@@ -1,3 +1,4 @@
+cat > /workspaces/Campaign/app.py <<'PY'
 import csv
 import gzip
 import io
@@ -611,3 +612,4 @@ def run_daily_optimization(req: DailyOptimizationRequest, authorization: Optiona
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+PY
