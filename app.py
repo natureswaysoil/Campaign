@@ -1,96 +1,198 @@
-from fastapi import FastAPI, HTTPException
-import requests, csv, io, os, re
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import csv
+import io
+import os
+import re
+import requests
+from typing import List, Dict, Any
 
-app = FastAPI()
+app = FastAPI(title="Amazon Ads Dashboard")
 
 PRODUCTS_CSV_URL = os.getenv(
     "PRODUCTS_CSV_URL",
-    "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv"
+    "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv",
 )
 
-STOPWORDS = {"the","and","for","with","from","your","you","our","this","that","soil","organic","liquid","natural","plants","plant","garden","lawn"}
+STOPWORDS = {
+    "the", "and", "for", "with", "from", "your", "you", "our", "this", "that",
+    "soil", "organic", "liquid", "natural", "plants", "plant", "garden", "lawn",
+    "safe", "kids", "pets", "beneficial", "nature", "way"
+}
 
-def normalize(text):
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
+templates = Jinja2Templates(directory="templates")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+def normalize(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9\s-]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
-def load_products():
-    r = requests.get(PRODUCTS_CSV_URL)
+
+def load_products() -> List[Dict[str, str]]:
+    r = requests.get(PRODUCTS_CSV_URL, timeout=30)
     r.raise_for_status()
     reader = csv.DictReader(io.StringIO(r.text))
-    return [row for row in reader]
+    return [{k.strip(): (v or "").strip() for k, v in row.items()} for row in reader]
 
-def find_product(key):
-    products = load_products()
-    key = key.lower()
-    for p in products:
-        if p.get("Product_ID","").lower() == key or p.get("SKU","").lower() == key:
+
+def truthy(v: str) -> bool:
+    return str(v).strip().lower() in {"true", "yes", "1", "y", "active"}
+
+
+def budget_from_price(price_value: str) -> float:
+    try:
+        price = float(str(price_value).replace("$", "").replace(",", "").strip())
+    except Exception:
+        return 25.0
+    if price < 15:
+        return 12.0
+    if price < 25:
+        return 18.0
+    if price < 40:
+        return 25.0
+    return 35.0
+
+
+def bid_from_price(price_value: str) -> float:
+    try:
+        price = float(str(price_value).replace("$", "").replace(",", "").strip())
+    except Exception:
+        return 0.85
+    if price < 15:
+        return 0.55
+    if price < 25:
+        return 0.75
+    if price < 40:
+        return 0.95
+    return 1.10
+
+
+def normalized_product(product: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "product_id": product.get("Product_ID", ""),
+        "sku": product.get("SKU", ""),
+        "asin": product.get("ASIN", ""),
+        "title": product.get("Title", ""),
+        "price": product.get("Selling_Price", ""),
+        "active": truthy(product.get("Active", "TRUE")),
+        "category": product.get("Category", ""),
+        "keywords": product.get("Keywords", ""),
+        "research_keywords": product.get("Research_Keywords", ""),
+        "priority_level": product.get("Priority_Level", ""),
+        "priority_score": product.get("Priority_Score", ""),
+        "suggested_budget": budget_from_price(product.get("Selling_Price", "")),
+        "suggested_bid": bid_from_price(product.get("Selling_Price", "")),
+        "raw": product,
+    }
+
+
+def find_product(key: str) -> Dict[str, Any]:
+    key = key.lower().strip()
+    for row in load_products():
+        p = normalized_product(row)
+        if p["product_id"].lower() == key or p["sku"].lower() == key:
             return p
     raise HTTPException(status_code=404, detail="Product not found")
 
-def generate_keywords(product):
-    keywords = []
 
-    title = normalize(product.get("Title",""))
-    words = [w for w in title.split() if w not in STOPWORDS and len(w) > 2]
+def parse_keyword_cell(value: str) -> List[str]:
+    if not value:
+        return []
+    parts = re.split(r"[\n,;|]+", value)
+    return [normalize(p) for p in parts if normalize(p)]
 
-    # base phrases
-    keywords.append(title)
 
-    # n-grams
-    for i in range(len(words)):
-        if i+1 < len(words):
-            keywords.append(words[i] + " " + words[i+1])
-        if i+2 < len(words):
-            keywords.append(words[i] + " " + words[i+1] + " " + words[i+2])
+def title_ngrams(title: str) -> List[str]:
+    clean = normalize(title)
+    words = [w for w in clean.split() if w not in STOPWORDS and len(w) > 2]
+    phrases = [clean] if clean else []
+    for n in (2, 3, 4):
+        for i in range(0, max(0, len(words) - n + 1)):
+            phrases.append(" ".join(words[i:i + n]))
+    return phrases
 
-    # sheet keywords
-    for field in ["Keywords","Research_Keywords"]:
-        if product.get(field):
-            parts = re.split(r"[,\n;]", product[field])
-            keywords.extend([normalize(p) for p in parts if p.strip()])
 
-    # category boost
-    category = normalize(product.get("Category",""))
-    if "dog" in category:
-        keywords += ["dog urine lawn repair","dog urine neutralizer"]
-    if "lawn" in category or "pasture" in category:
-        keywords += ["lawn fertilizer","grass fertilizer","pasture fertilizer"]
+def keyword_hints_from_category(category: str) -> List[str]:
+    c = normalize(category)
+    hints: List[str] = []
 
-    # clean + dedupe
+    if "dog" in c or "pet" in c:
+        hints += [
+            "dog urine neutralizer",
+            "dog urine lawn repair",
+            "pet urine grass treatment",
+        ]
+
+    if "pasture" in c or "hay" in c or "lawn" in c:
+        hints += [
+            "pasture fertilizer",
+            "hay fertilizer",
+            "liquid lawn fertilizer",
+            "grass fertilizer",
+        ]
+
+    if "bone" in c or "bloom" in c:
+        hints += [
+            "liquid bone meal",
+            "phosphorus fertilizer",
+            "bloom fertilizer",
+        ]
+
+    return hints
+
+
+def generate_keywords(product: Dict[str, Any]) -> List[str]:
+    merged: List[str] = []
+    merged.extend(parse_keyword_cell(product.get("keywords", "")))
+    merged.extend(parse_keyword_cell(product.get("research_keywords", "")))
+    merged.extend(title_ngrams(product.get("title", "")))
+    merged.extend(keyword_hints_from_category(product.get("category", "")))
+
+    out: List[str] = []
     seen = set()
-    final = []
-    for k in keywords:
-        if k and k not in seen:
-            seen.add(k)
-            final.append(k)
 
-    return final[:30]
+    for kw in merged:
+        if kw and kw not in seen and len(kw) <= 80:
+            seen.add(kw)
+            out.append(kw)
 
-@app.get("/")
-def root():
-    return {"status":"ok"}
+    return out[:40]
 
-@app.get("/list-products")
-def list_products():
-    return load_products()
 
-@app.get("/product/{key}")
-def product(key: str):
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request):
+    return templates.TemplateResponse("dashboard.html", {"request": request})
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/products")
+def api_products():
+    products = [normalized_product(r) for r in load_products()]
+    return {"count": len(products), "products": products}
+
+
+@app.get("/api/product/{key}")
+def api_product(key: str):
     return find_product(key)
 
-@app.get("/generate-keywords/{key}")
-def keywords(key: str):
-    p = find_product(key)
-    return {
-        "product": p.get("Title"),
-        "keywords": generate_keywords(p)
-    }
 
-@app.post("/create-campaign-from-product")
-def create_campaign(data: dict):
-    key = data.get("product_id") or data.get("sku")
+@app.get("/api/generate-keywords/{key}")
+def api_keywords(key: str):
+    p = find_product(key)
+    return {"product": p, "keywords": generate_keywords(p)}
+
+
+@app.post("/api/create-campaign-from-product")
+def api_create_campaign(payload: Dict[str, Any]):
+    key = payload.get("product_id") or payload.get("sku")
     if not key:
         raise HTTPException(status_code=400, detail="Provide product_id or sku")
 
@@ -98,8 +200,50 @@ def create_campaign(data: dict):
 
     return {
         "message": "Campaign ready (simulation)",
-        "product": p.get("Title"),
-        "asin": p.get("ASIN"),
-        "sku": p.get("SKU"),
-        "suggested_keywords": generate_keywords(p)
+        "product_id": p["product_id"],
+        "sku": p["sku"],
+        "asin": p["asin"],
+        "title": p["title"],
+        "budget": p["suggested_budget"],
+        "bid": p["suggested_bid"],
+        "keywords": generate_keywords(p),
+    }
+
+
+@app.post("/api/bulk-create-campaigns")
+def api_bulk_create(payload: Dict[str, Any]):
+    launch_only_active = payload.get("launch_only_active", True)
+    limit = payload.get("limit")
+
+    products = [normalized_product(r) for r in load_products()]
+    if launch_only_active:
+        products = [p for p in products if p["active"]]
+    if isinstance(limit, int):
+        products = products[:limit]
+
+    results = []
+    for p in products:
+        results.append({
+            "product_id": p["product_id"],
+            "sku": p["sku"],
+            "asin": p["asin"],
+            "title": p["title"],
+            "budget": p["suggested_budget"],
+            "bid": p["suggested_bid"],
+            "keywords_count": len(generate_keywords(p)),
+            "status": "ready",
+        })
+
+    return {"requested": len(products), "results": results}
+
+
+@app.post("/api/run-daily-optimization")
+def api_run_optimizer(payload: Dict[str, Any]):
+    return {
+        "message": "Optimizer dry-run ready",
+        "settings": {
+            "apply_negatives_live": payload.get("apply_negatives_live", False),
+            "apply_winners_live": payload.get("apply_winners_live", False),
+            "winner_bid": payload.get("winner_bid", 0.9),
+        }
     }
