@@ -71,16 +71,29 @@ async function getKeywords(sku) {
 }
 
 async function createCampaign(sku) {
-  const res = await fetch('/api/create-campaign-from-product', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ sku })
-  });
+  const output = document.getElementById("output");
+  output.textContent = "Launching campaign...";
 
-  const data = await res.json();
+  try {
+    const res = await fetch('/api/create-campaign-from-product', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku })
+    });
 
-  document.getElementById("output").textContent =
-    JSON.stringify(data, null, 2);
+    const data = await res.json();
+    output.textContent = JSON.stringify(data, null, 2);
+
+    if (!res.ok) {
+      alert("Launch failed: " + (data.detail || "Unknown error"));
+      return;
+    }
+
+    alert("Launch completed");
+  } catch (err) {
+    output.textContent = String(err);
+    alert("Launch error: " + err);
+  }
 }
 </script>
 
