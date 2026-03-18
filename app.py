@@ -109,10 +109,15 @@ def parse_keyword_cell(value: str) -> List[str]:
 def title_ngrams(title: str) -> List[str]:
     clean = normalize(title)
     words = [w for w in clean.split() if w not in STOPWORDS and len(w) > 2]
-    phrases = [clean] if clean else []
-    for n in (2, 3, 4):
+
+    phrases = []
+    if clean:
+        phrases.append(clean)
+
+    for n in (2, 3):
         for i in range(0, max(0, len(words) - n + 1)):
             phrases.append(" ".join(words[i:i + n]))
+
     return phrases
 
 
@@ -145,6 +150,7 @@ def keyword_hints_from_category(category: str) -> List[str]:
     return hints
 
 
+# 🔥 IMPROVED KEYWORD GENERATOR
 def generate_keywords(product: Dict[str, Any]) -> List[str]:
     merged: List[str] = []
 
@@ -170,6 +176,7 @@ def generate_keywords(product: Dict[str, Any]) -> List[str]:
             clean_keywords.append(kw)
 
     return clean_keywords[:30]
+
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
