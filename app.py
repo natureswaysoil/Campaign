@@ -147,21 +147,29 @@ def keyword_hints_from_category(category: str) -> List[str]:
 
 def generate_keywords(product: Dict[str, Any]) -> List[str]:
     merged: List[str] = []
+
     merged.extend(parse_keyword_cell(product.get("keywords", "")))
     merged.extend(parse_keyword_cell(product.get("research_keywords", "")))
     merged.extend(title_ngrams(product.get("title", "")))
     merged.extend(keyword_hints_from_category(product.get("category", "")))
 
-    out: List[str] = []
+    clean_keywords = []
     seen = set()
 
     for kw in merged:
-        if kw and kw not in seen and len(kw) <= 80:
+        kw = normalize(kw)
+
+        if not kw or len(kw) < 3:
+            continue
+
+        if len(kw) > 40:
+            continue
+
+        if kw not in seen:
             seen.add(kw)
-            out.append(kw)
+            clean_keywords.append(kw)
 
-    return out[:40]
-
+    return clean_keywords[:30]
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
