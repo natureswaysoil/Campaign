@@ -1,1 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Amazon Ads Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
 
+  <div class="wrap">
+    <h1>🚀 Amazon Ads Dashboard</h1>
+
+    <button onclick="loadProducts()">Load Products</button>
+
+    <table id="productsTable">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>SKU</th>
+          <th>Price</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>Keywords</h2>
+    <div id="keywords"></div>
+
+    <h2>Campaign Output</h2>
+    <pre id="output"></pre>
+  </div>
+
+<script>
+async function loadProducts() {
+  const res = await fetch('/api/products');
+  const data = await res.json();
+
+  const tbody = document.querySelector("#productsTable tbody");
+  tbody.innerHTML = "";
+
+  data.products.forEach(p => {
+    const row = document.createElement("tr");
+
+    row.innerHTML = `
+      <td>${p.title}</td>
+      <td>${p.sku}</td>
+      <td>${p.price}</td>
+      <td>
+        <button onclick="getKeywords('${p.sku}')">Keywords</button>
+        <button onclick="createCampaign('${p.sku}')">Launch</button>
+      </td>
+    `;
+
+    tbody.appendChild(row);
+  });
+}
+
+async function getKeywords(sku) {
+  const res = await fetch(`/api/generate-keywords/${sku}`);
+  const data = await res.json();
+
+  const box = document.getElementById("keywords");
+  box.innerHTML = "";
+
+  data.keywords.forEach(k => {
+    const span = document.createElement("span");
+    span.className = "chip";
+    span.textContent = k;
+    box.appendChild(span);
+  });
+}
+
+async function createCampaign(sku) {
+  const res = await fetch('/api/create-campaign-from-product', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ sku })
+  });
+
+  const data = await res.json();
+
+  document.getElementById("output").textContent =
+    JSON.stringify(data, null, 2);
+}
+</script>
+
+</body>
+</html>
