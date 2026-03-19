@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import csv
+import datetime
 import gzip
 import hmac
 import io
@@ -121,11 +122,11 @@ def optional_env_or_secret(name: str, default: Optional[str] = None) -> Optional
 
 
 def today_iso_date() -> str:
-    return time.strftime("%Y-%m-%d")
+    return datetime.date.today().isoformat()
 
 
 def iso_date_days_ago(days: int) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(time.time() - (days * 86400)))
+    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
 
 
 def normalize(text: str) -> str:
