@@ -347,3 +347,131 @@ class TestCampaignPayloadFormat:
                     assert iso_pattern.match(start_date), (
                         f"startDate must be YYYY-MM-DD format, got {start_date!r}"
                     )
+
+
+# ---------------------------------------------------------------------------
+# sanitize_campaign_name: forbidden-character stripping
+# ---------------------------------------------------------------------------
+
+class TestSanitizeCampaignName:
+    """Verify that sanitize_campaign_name removes characters forbidden by Amazon Ads."""
+
+    def test_html_entities_decoded(self):
+        """HTML entities like &amp; must be decoded before sending to Amazon Ads."""
+        result = app_module.sanitize_campaign_name("Orchid &amp; Violet Mix")
+        assert "&amp;" not in result
+        assert "&" in result
+
+    def test_smart_apostrophe_replaced(self):
+        """\u2019 (right single quotation mark) must be replaced with ASCII apostrophe."""
+        result = app_module.sanitize_campaign_name("Nature\u2019s Way")
+        assert "\u2019" not in result
+        assert "Nature's Way" == result
+
+    def test_registered_trademark_stripped(self):
+        """\u00ae (registered sign) must be removed."""
+        result = app_module.sanitize_campaign_name("Soil\u00ae Mix")
+        assert "\u00ae" not in result
+        assert result == "Soil Mix"
+
+    def test_en_dash_replaced_with_hyphen(self):
+        """\u2013 (en dash) must be replaced with a plain hyphen."""
+        result = app_module.sanitize_campaign_name("Premium \u2013 Best")
+        assert "\u2013" not in result
+        assert "-" in result
+
+    def test_em_dash_replaced_with_hyphen(self):
+        """\u2014 (em dash) must be replaced with a plain hyphen."""
+        result = app_module.sanitize_campaign_name("Premium \u2014 Best")
+        assert "\u2014" not in result
+        assert "-" in result
+
+    def test_smart_double_quotes_replaced(self):
+        """\u201c/\u201d (smart double quotes) must be replaced with ASCII quotes."""
+        result = app_module.sanitize_campaign_name("\u201cPremium\u201d Mix")
+        assert "\u201c" not in result
+        assert "\u201d" not in result
+
+    def test_trademark_symbol_stripped(self):
+        """\u2122 (trademark sign) must be removed."""
+        result = app_module.sanitize_campaign_name("Soil\u2122 Mix")
+        assert "\u2122" not in result
+
+    def test_result_is_ascii_only(self):
+        """Sanitized name must contain only ASCII characters."""
+        raw = "Nature\u2019s Way Soil\u00ae Orchid &amp; African Violet \u2013 Premium"
+        result = app_module.sanitize_campaign_name(raw)
+        result.encode("ascii")  # must not raise
+
+    def test_whitespace_collapsed(self):
+        """Extra internal whitespace must be collapsed to a single space."""
+        result = app_module.sanitize_campaign_name("Orchid   Mix")
+        assert "  " not in result
+
+    def test_empty_string(self):
+        """Empty input must return empty string without error."""
+        assert app_module.sanitize_campaign_name("") == ""
+
+    def test_none_input(self):
+        """None input must return empty string without error."""
+        assert app_module.sanitize_campaign_name(None) == ""
+
+    def test_full_product_title_from_error(self):
+        """Full title from the bug report must produce an ASCII-safe campaign name."""
+        # Simulate the raw title as stored in the spreadsheet (Unicode)
+        title = (
+            "Nature\u2019s Way Soil\u00ae Orchid &amp; African Violet Potting Mix "
+            "\u2013 Premium Coco Coir, Worm Castings, Acti"
+        )
+        result = app_module.sanitize_campaign_name(title)
+        result.encode("ascii")  # must not raise
+        assert "&amp;" not in result
+        assert "\u2019" not in result
+        assert "\u00ae" not in result
+        assert "\u2013" not in result
+
+    def test_campaign_name_uses_sanitized_title(self):
+        """create_live_campaign_for_product must use sanitized title in campaign name."""
+        import json as json_module
+
+        product = {
+            "sku": "TEST-SKU",
+            "asin": "B000TEST01",
+            "title": "Nature\u2019s Way Soil\u00ae Orchid &amp; African Violet",
+            "suggested_budget": 25.0,
+            "suggested_bid": 0.85,
+            "product_id": "TEST_001",
+        }
+
+        captured_bodies = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured_bodies.append((url, json))
+            r = MagicMock()
+            r.ok = True
+            r.status_code = 200
+            if "/sp/campaigns" in url:
+                body = {"campaigns": {"success": [{"campaign": {"campaignId": 1}, "index": 0}], "error": []}}
+            elif "/sp/adGroups" in url:
+                body = {"adGroups": {"success": [{"adGroup": {"adGroupId": 2}, "index": 0}], "error": []}}
+            else:
+                body = {}
+            r.text = json_module.dumps(body)
+            r.json.return_value = body
+            return r
+
+        with patch.object(app_module.AmazonAdsClient, "_get_token", return_value="tok"), \
+             patch("requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.post.side_effect = fake_post
+            mock_session_cls.return_value = mock_session
+            app_module.create_live_campaign_for_product(product)
+
+        for url, body in captured_bodies:
+            if "/sp/campaigns" in url:
+                for campaign in body.get("campaigns", []):
+                    name = campaign.get("name", "")
+                    name.encode("ascii")  # must not raise
+                    assert "\u2019" not in name
+                    assert "\u00ae" not in name
+                    assert "&amp;" not in name
