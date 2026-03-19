@@ -1,9 +1,11 @@
-# Amazon Ads Sheet Autopilot
+# Amazon PPC Bid Optimizer
 
 This version reads products directly from your public Google Sheet CSV feed and adds:
 - sheet-driven product loading
 - auto keyword generation from `Keywords`, `Research_Keywords`, `Title`, and `Category`
 - daily optimizer loop endpoint
+
+**GCP Project:** `amazon-ppc-bid-optimizer` (project number `366028971954`)
 
 ---
 
@@ -11,6 +13,8 @@ This version reads products directly from your public Google Sheet CSV feed and 
 
 The deploy workflow needs several GitHub secrets. Add them at:
 **Repository → Settings → Secrets and variables → Actions → New repository secret**
+
+> **Note:** `GCP_PROJECT_ID` (`amazon-ppc-bid-optimizer`) is now hardcoded in the workflow — you no longer need to add it as a secret.
 
 ### GCP Authentication (choose one option)
 
@@ -21,10 +25,10 @@ Workload Identity Federation lets GitHub Actions authenticate to GCP without sto
 1. **Create a Workload Identity Pool and Provider** in your GCP project:
 
    ```bash
-   PROJECT_ID="your-gcp-project-id"
+   PROJECT_ID="amazon-ppc-bid-optimizer"
    POOL_NAME="github-pool"
    PROVIDER_NAME="github-provider"
-   REPO="your-github-org/your-repo"   # e.g. natureswaysoil/Campaign
+   REPO="natureswaysoil/Campaign"
 
    # Create the pool
    gcloud iam workload-identity-pools create "$POOL_NAME" \
@@ -88,7 +92,7 @@ Workload Identity Federation lets GitHub Actions authenticate to GCP without sto
      --workload-identity-pool="$POOL_NAME" \
      --format="value(name)"
    # Output looks like:
-   # projects/123456789/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+   # projects/366028971954/locations/global/workloadIdentityPools/github-pool/providers/github-provider
    ```
 
 5. **Add these two secrets to GitHub**:
@@ -96,7 +100,7 @@ Workload Identity Federation lets GitHub Actions authenticate to GCP without sto
    | Secret name | Value |
    |---|---|
    | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Output of the `describe` command above |
-   | `GCP_SERVICE_ACCOUNT_EMAIL` | `github-deploy-sa@<your-project>.iam.gserviceaccount.com` |
+   | `GCP_SERVICE_ACCOUNT_EMAIL` | `github-deploy-sa@amazon-ppc-bid-optimizer.iam.gserviceaccount.com` |
 
 ---
 
@@ -105,7 +109,7 @@ Workload Identity Federation lets GitHub Actions authenticate to GCP without sto
 1. **Create a service account** and download a JSON key:
 
    ```bash
-   PROJECT_ID="your-gcp-project-id"
+   PROJECT_ID="amazon-ppc-bid-optimizer"
    SA_NAME="github-deploy-sa"
 
    gcloud iam service-accounts create "$SA_NAME" \
@@ -143,9 +147,7 @@ Workload Identity Federation lets GitHub Actions authenticate to GCP without sto
 
 ### Always-required secret
 
-| Secret name | Value |
-|---|---|
-| `GCP_PROJECT_ID` | Your GCP project ID (e.g. `my-gcp-project-123`) |
+> **Note:** `GCP_PROJECT_ID` is now hardcoded in the workflow as `amazon-ppc-bid-optimizer`. You no longer need to configure this as a GitHub secret.
 
 ---
 
