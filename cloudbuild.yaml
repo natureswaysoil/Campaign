@@ -1,18 +1,42 @@
 steps:
+  # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA', '.']
+    args: 
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$BUILD_ID'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:latest'
+      - '.'
+  
+  # Push the Docker image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA']
+    args: 
+      - 'push'
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app'
+  
+  # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
-      - run
-      - deploy
-      - amazon-ads-autopilot
-      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA
-      - --region=us-central1
-      - --platform=managed
-      - --allow-unauthenticated
-      - --set-env-vars=GCP_PROJECT_ID=$PROJECT_ID
+      - 'run'
+      - 'deploy'
+      - 'amazon-ads-autopilot'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:latest'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID'
+      - '--memory=512Mi'
+      - '--cpu=1'
+      - '--max-instances=10'
+      - '--min-instances=0'
+      - '--timeout=300'
+
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$BUILD_ID'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
