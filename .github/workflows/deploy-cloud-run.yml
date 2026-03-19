@@ -1,3 +1,75 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          missing=()
+          for secret_name in GCP_PROJECT_ID GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT_EMAIL; do
+            value=$(printenv "$secret_name" || true)
+            if [ -z "$value" ]; then
+              missing+=("$secret_name")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "❌ Missing required secrets: ${missing[*]}"
+            echo "Configure these secrets in GitHub repository settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "✅ All required secrets are present."
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Validate AMAZON_ADS_REGION format
+        run: |
+          region="${AMAZON_ADS_REGION:-}"
+          if [ -z "$region" ]; then
+            echo "⚠️  AMAZON_ADS_REGION secret is empty; the app will default to 'na'."
+          else
+            # Fail fast if the value looks like a YAML/JSON list (starts with '[' or '-')
+            first_char="${region:0:1}"
+            if [[ "$first_char" == "[" || "$first_char" == "-" ]]; then
+              echo "❌ AMAZON_ADS_REGION appears to contain a list value (starts with '${first_char}')."
+              echo "   It must be a plain scalar string: na, eu, or fe."
+              echo "   Current value: ${region}"
+              exit 1
+            fi
+            # Fail if the value contains newline characters (multi-line secret)
+            if [[ "$region" == *$'\n'* ]]; then
+              echo "❌ AMAZON_ADS_REGION contains newline characters — expected a single scalar string."
+              exit 1
+            fi
+            echo "✅ AMAZON_ADS_REGION looks like a scalar value: '${region}'"
+          fi
+        env:
+          AMAZON_ADS_REGION: ${{ secrets.AMAZON_ADS_REGION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy amazon-ads-autopilot \
@@ -6,4 +78,5 @@
             --platform managed \
             --allow-unauthenticated \
             --set-env-vars GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }},PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
-            --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest      
+            --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest
+

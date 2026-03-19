@@ -1,4 +1,3 @@
-cat > app.py << 'ENDOFFILE'
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -61,7 +60,7 @@ def get_secret(project_id: str, secret_id: str) -> str:
     client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
     response = client.access_secret_version(request={"name": name})
-    return response.payload.data.decode("utf-8")
+    return response.payload.data.decode("utf-8").strip()
 
 
 def load_env_or_secret(name: str, default: Optional[str] = None) -> str:
@@ -402,11 +401,17 @@ def verify_internal_token(authorization: Optional[str]) -> None:
 
 class AmazonAdsClient:
     def __init__(self):
-        self.client_id = load_env_or_secret("AMAZON_ADS_CLIENT_ID")
-        self.client_secret = load_env_or_secret("AMAZON_ADS_CLIENT_SECRET")
-        self.refresh_token = load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN")
-        self.profile_id = load_env_or_secret("AMAZON_ADS_PROFILE_ID")
-        self.region = load_env_or_secret("AMAZON_ADS_REGION", "na").lower()
+        self.client_id = load_env_or_secret("AMAZON_ADS_CLIENT_ID").strip()
+        self.client_secret = load_env_or_secret("AMAZON_ADS_CLIENT_SECRET").strip()
+        self.refresh_token = load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN").strip()
+        self.profile_id = load_env_or_secret("AMAZON_ADS_PROFILE_ID").strip()
+        self.region = load_env_or_secret("AMAZON_ADS_REGION", "na").strip().lower()
+
+        if self.region and (self.region[0] in ("[", "-") or "\n" in self.region):
+            raise RuntimeError(
+                f"AMAZON_ADS_REGION appears to contain a list or multi-line value: {self.region!r}. "
+                "Expected a scalar string: na, eu, or fe."
+            )
 
         if self.region not in BASE_URLS:
             raise RuntimeError("AMAZON_ADS_REGION must be na, eu, or fe")
@@ -438,8 +443,8 @@ class AmazonAdsClient:
             "Authorization": f"Bearer {self.access_token}",
             "Amazon-Advertising-API-ClientId": self.client_id,
             "Amazon-Advertising-API-Scope": self.profile_id,
-            "Content-Type": "application/vnd.spCampaign.v3+json",
-            "Accept": "application/vnd.spCampaign.v3+json",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
         }
 
     def post(self, endpoint: str, body: Any) -> Any:
@@ -667,12 +672,3 @@ def api_run_optimizer(
     verify_internal_token(authorization)
     # Optimizer code continues...
     return {"message": "Optimizer not fully implemented yet"}
-ENDOFFILE
-
-# Validate
-python3 -c "import ast; ast.parse(open('app.py').read())" && echo "✅ Valid!"
-
-# Deploy
-git add app.py
-git commit -m "Use v2 API endpoints with correct Content-Type headers"
-gcloud builds submit --config=cloudbuild.yaml
