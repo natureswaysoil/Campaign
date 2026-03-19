@@ -9,6 +9,9 @@ permissions:
   contents: read
   id-token: write
 
+env:
+  GCP_PROJECT_ID: amazon-ppc-bid-optimizer
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -19,13 +22,6 @@ jobs:
 
       - name: Validate required secrets and select auth method
         run: |
-          # GCP_PROJECT_ID is always required
-          if [ -z "$GCP_PROJECT_ID" ]; then
-            echo "❌ Missing required secret: GCP_PROJECT_ID"
-            echo "Configure this secret in GitHub repository settings → Secrets and variables → Actions."
-            exit 1
-          fi
-
           # Determine authentication method
           if [ -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" ] && [ -n "$GCP_SERVICE_ACCOUNT_EMAIL" ]; then
             echo "✅ Using Workload Identity Federation authentication."
@@ -39,8 +35,8 @@ jobs:
             echo "Configure one of the following in GitHub repository settings → Secrets and variables → Actions:"
             echo ""
             echo "  Option A — Workload Identity Federation (recommended):"
-            echo "    GCP_WORKLOAD_IDENTITY_PROVIDER  e.g. projects/123/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
-            echo "    GCP_SERVICE_ACCOUNT_EMAIL        e.g. my-sa@my-project.iam.gserviceaccount.com"
+            echo "    GCP_WORKLOAD_IDENTITY_PROVIDER  e.g. projects/366028971954/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
+            echo "    GCP_SERVICE_ACCOUNT_EMAIL        e.g. my-sa@amazon-ppc-bid-optimizer.iam.gserviceaccount.com"
             echo ""
             echo "  Option B — Service Account Key JSON:"
             echo "    GCP_SA_KEY  (the full JSON key file content from 'gcloud iam service-accounts keys create')"
@@ -49,9 +45,8 @@ jobs:
             exit 1
           fi
 
-          echo "✅ All required secrets are present."
+          echo "✅ Authentication method selected."
         env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
@@ -99,10 +94,10 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy amazon-ads-autopilot \
-            --image us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} \
+            --image us-central1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} \
             --region us-central1 \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }},PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
+            --set-env-vars GCP_PROJECT_ID=${{ env.GCP_PROJECT_ID }},PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
             --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest
 
