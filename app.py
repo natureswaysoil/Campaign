@@ -37,7 +37,8 @@ BASE_URLS = {
 }
 
 # SP v3 endpoints: all batch endpoints (campaigns/adGroups/productAds/keywords/campaignNegativeKeywords)
-# accept a JSON array of objects; reports uses the v3 Reporting API path.
+# require the payload to be wrapped in a key-specific object, e.g. {"campaigns": [...]}.
+# The reporting endpoint uses plain application/json with a raw object body.
 ENDPOINTS = {
     "campaigns": "/sp/campaigns",
     "ad_groups": "/sp/adGroups",
@@ -55,6 +56,26 @@ ENDPOINT_CONTENT_TYPES: Dict[str, str] = {
     "/sp/productAds": "application/vnd.spproductad.v3+json",
     "/sp/keywords": "application/vnd.spkeyword.v3+json",
     "/sp/campaignNegativeKeywords": "application/vnd.spcampaignnegativekeyword.v3+json",
+}
+
+# SP v3 batch endpoints wrap request arrays and response items in these keys.
+# Request:  {"campaigns": [...]}
+# Response: {"campaigns": {"success": [{"campaign": {...}, "index": N}], "error": [...]}}
+ENDPOINT_BATCH_KEYS: Dict[str, str] = {
+    "/sp/campaigns": "campaigns",
+    "/sp/adGroups": "adGroups",
+    "/sp/productAds": "productAds",
+    "/sp/keywords": "keywords",
+    "/sp/campaignNegativeKeywords": "campaignNegativeKeywords",
+}
+
+# Maps batch key -> singular item key used inside each success entry of the response.
+BATCH_ITEM_KEYS: Dict[str, str] = {
+    "campaigns": "campaign",
+    "adGroups": "adGroup",
+    "productAds": "productAd",
+    "keywords": "keyword",
+    "campaignNegativeKeywords": "campaignNegativeKeyword",
 }
 
 STOPWORDS = {
@@ -271,18 +292,34 @@ def find_product(key: str) -> Dict[str, Any]:
 
 
 def extract_first_id(payload: Any) -> int:
-    # SP v3 batch endpoints return a list of response objects; handle both list and dict defensively.
+    # SP v3 batch response: {"campaigns": {"success": [{"campaign": {"campaignId": ...}, "index": 0}], "error": []}}
+    # Also handles legacy flat-list or flat-dict responses defensively.
     if isinstance(payload, dict):
-        row = payload
+        # Try SP v3 wrapped format: {batchKey: {success: [{itemKey: {id: ...}}]}}
+        for batch_key, item_key in BATCH_ITEM_KEYS.items():
+            if batch_key in payload:
+                inner = payload[batch_key]
+                if isinstance(inner, dict) and "success" in inner:
+                    successes = inner["success"]
+                    if isinstance(successes, list) and successes:
+                        item = successes[0].get(item_key, successes[0])
+                        for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+                            if key in item:
+                                return int(item[key])
+                elif isinstance(inner, list) and inner:
+                    item = inner[0]
+                    for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+                        if key in item:
+                            return int(item[key])
+        # Flat dict fallback
+        for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+            if key in payload:
+                return int(payload[key])
     elif isinstance(payload, list) and payload:
         row = payload[0]
-    else:
-        raise RuntimeError(
-            f"Unexpected payload (expected dict or non-empty list, got {type(payload).__name__}): {payload}"
-        )
-    for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
-        if key in row:
-            return int(row[key])
+        for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+            if key in row:
+                return int(row[key])
     raise RuntimeError(f"No ID found in payload: {payload}")
 
 
@@ -474,11 +511,21 @@ class AmazonAdsClient:
                 return ct
         return "application/json"
 
+    def _batch_key_for(self, endpoint: str) -> Optional[str]:
+        return ENDPOINT_BATCH_KEYS.get(endpoint)
+
     def post(self, endpoint: str, body: Any) -> Any:
         url = f"{self.base_url}{endpoint}"
+        content_type = self._content_type_for(endpoint)
+
+        # SP v3 batch endpoints require the list to be wrapped in a key-specific object,
+        # e.g. {"campaigns": [...]} rather than a raw JSON array.
+        batch_key = self._batch_key_for(endpoint)
+        if batch_key and isinstance(body, list):
+            body = {batch_key: body}
+
         logger.info(f"POST to {endpoint}")
         logger.info(f"Body preview: {str(body)[:300]}")
-        content_type = self._content_type_for(endpoint)
         resp = self.session.post(url, headers=self.headers(content_type), json=body, timeout=60)
         
         logger.info(f"Status: {resp.status_code}")
