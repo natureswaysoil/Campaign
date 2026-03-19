@@ -8,12 +8,17 @@ import csv
 import gzip
 import io
 import json
+import logging
 import os
 import re
 import time
 from typing import List, Dict, Any, Optional
 
 import requests
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Amazon Ads Dashboard")
 
@@ -32,6 +37,7 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
+# Try v3 API endpoints instead of v2
 ENDPOINTS = {
     "campaigns": "/sp/campaigns",
     "ad_groups": "/sp/adGroups",
@@ -442,8 +448,14 @@ class AmazonAdsClient:
 
     def post(self, endpoint: str, body: Any) -> Any:
         url = f"{self.base_url}{endpoint}"
+        logger.info(f"POST {url}")
+        logger.info(f"Body type: {type(body)}, Body: {json.dumps(body)[:200]}")
+        
         resp = self.session.post(url, headers=self.headers(), json=body, timeout=60)
+        
+        logger.info(f"Response status: {resp.status_code}")
         if not resp.ok:
+            logger.error(f"API Error: {resp.text}")
             raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text}")
         return resp.json() if resp.text.strip() else None
 
@@ -493,49 +505,54 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     start_date = today_yyyymmdd()
     generated_keywords = generate_keywords(product)
 
-    campaign_payload = {
-        "name": f"{product['title']} | MANUAL | {start_date}",
+    logger.info(f"Creating campaign for {product['sku']}")
+    
+    # Send as ARRAY per Amazon Ads API v2 spec
+    campaign_payload = [{
+        "name": f"{product['title'][:100]} | MANUAL | {start_date}",
         "campaignType": "sponsoredProducts",
         "targetingType": "manual",
         "state": "enabled",
         "dailyBudget": round(product["suggested_budget"], 2),
         "startDate": start_date,
-    }
-    campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
+    }]
     
-    if isinstance(campaign_resp, dict):
-        campaign_id = int(campaign_resp.get("campaignId") or campaign_resp.get("id"))
-    else:
-        campaign_id = extract_first_id(campaign_resp)
+    logger.info("Calling campaigns endpoint...")
+    campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
+    campaign_id = extract_first_id(campaign_resp)
+    logger.info(f"Campaign created: {campaign_id}")
 
-    ad_group_payload = {
+    ad_group_payload = [{
         "name": "Main Ad Group",
         "campaignId": campaign_id,
         "state": "enabled",
         "defaultBid": round(product["suggested_bid"], 2),
-    }
-    ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
+    }]
     
-    if isinstance(ad_group_resp, dict):
-        ad_group_id = int(ad_group_resp.get("adGroupId") or ad_group_resp.get("id"))
-    else:
-        ad_group_id = extract_first_id(ad_group_resp)
+    logger.info("Calling ad groups endpoint...")
+    ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
+    ad_group_id = extract_first_id(ad_group_resp)
+    logger.info(f"Ad group created: {ad_group_id}")
 
-    product_ad_payload = {
+    product_ad_payload = [{
         "campaignId": campaign_id,
         "adGroupId": ad_group_id,
         "asin": product["asin"],
         "sku": product["sku"],
         "state": "enabled",
-    }
+    }]
+    
+    logger.info("Calling product ads endpoint...")
     product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
+    logger.info("Product ad created")
 
     keywords_resp = []
     if generated_keywords:
-        keywords_resp = client.post(
-            ENDPOINTS["keywords"],
-            keyword_rows(generated_keywords, ad_group_id, product["suggested_bid"])
-        )
+        logger.info(f"Creating {len(generated_keywords)} keywords...")
+        kw_rows = keyword_rows(generated_keywords, ad_group_id, product["suggested_bid"])
+        logger.info(f"Total keyword rows (with match types): {len(kw_rows)}")
+        keywords_resp = client.post(ENDPOINTS["keywords"], kw_rows)
+        logger.info("Keywords created")
 
     return {
         "message": "Live campaign created",
@@ -596,6 +613,7 @@ def api_create_campaign(payload: Dict[str, Any]):
     try:
         return create_live_campaign_for_product(product)
     except Exception as e:
+        logger.error(f"Campaign creation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -768,7 +786,7 @@ def api_run_optimizer(
                 "hold": len(summary["hold"]),
             },
             "winners": summary["winners"],
-            "negatives": summary["negatives"],
+            "negatives": negatives",
             "hold": summary["hold"],
             "live_actions": live_actions,
             "settings": {
@@ -782,10 +800,10 @@ def api_run_optimizer(
         raise HTTPException(status_code=500, detail=str(e))
 ENDOFFILE
 
-# Verify syntax
-python3 -c "import ast; ast.parse(open('app.py').read())" && echo "✅ Syntax valid!"
+# Test syntax
+python3 -c "import ast; ast.parse(open('app.py').read())" && echo "✅ Valid"
 
-# Commit and deploy
+# Deploy
 git add app.py
-git commit -m "Complete fix: Amazon Ads API single objects (no arrays)"
+git commit -m "Add logging + revert to arrays (Amazon API v2 format)"
 gcloud builds submit --config=cloudbuild.yaml
