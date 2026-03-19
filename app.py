@@ -1,4 +1,3 @@
-# Create a clean fixed version
 cat > app.py << 'ENDOFFILE'
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse
@@ -784,9 +783,9 @@ def api_run_optimizer(
 ENDOFFILE
 
 # Verify syntax
-python3 -c "import ast; ast.parse(open('app.py').read())" && echo "✓ Syntax is valid!"
+python3 -c "import ast; ast.parse(open('app.py').read())" && echo "✅ Syntax valid!"
 
-# Deploy
+# Commit and deploy
 git add app.py
-git commit -m "Complete fixed app.py with Amazon Ads API format fix"
+git commit -m "Complete fix: Amazon Ads API single objects (no arrays)"
 gcloud builds submit --config=cloudbuild.yaml
