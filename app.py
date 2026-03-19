@@ -1,3 +1,5 @@
+# Create a clean fixed version
+cat > app.py << 'ENDOFFILE'
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,7 +33,6 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-# These are the same Sponsored Products paths your project has been using.
 ENDPOINTS = {
     "campaigns": "/sp/campaigns",
     "ad_groups": "/sp/adGroups",
@@ -51,9 +52,6 @@ templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-# -----------------------------
-# Secrets / config
-# -----------------------------
 def get_secret(project_id: str, secret_id: str) -> str:
     from google.cloud import secretmanager
     client = secretmanager.SecretManagerServiceClient()
@@ -86,9 +84,6 @@ def optional_env_or_secret(name: str, default: Optional[str] = None) -> Optional
         return default
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def today_yyyymmdd() -> str:
     return time.strftime("%Y%m%d")
 
@@ -395,7 +390,8 @@ def classify_terms(
 def verify_internal_token(authorization: Optional[str]) -> None:
     required = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN")
     if not required:
-        return
+        raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN must be configured")
+    
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     supplied = authorization.replace("Bearer ", "", 1).strip()
@@ -403,9 +399,6 @@ def verify_internal_token(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Invalid bearer token")
 
 
-# -----------------------------
-# Amazon Ads live client
-# -----------------------------
 class AmazonAdsClient:
     def __init__(self):
         self.client_id = load_env_or_secret("AMAZON_ADS_CLIENT_ID")
@@ -501,7 +494,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     start_date = today_yyyymmdd()
     generated_keywords = generate_keywords(product)
 
-  campaign_payload = {
+    campaign_payload = {
         "name": f"{product['title']} | MANUAL | {start_date}",
         "campaignType": "sponsoredProducts",
         "targetingType": "manual",
@@ -510,28 +503,32 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "startDate": start_date,
     }
     campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
-    # Handle both dict and list responses
+    
     if isinstance(campaign_resp, dict):
         campaign_id = int(campaign_resp.get("campaignId") or campaign_resp.get("id"))
     else:
         campaign_id = extract_first_id(campaign_resp)
 
-    ad_group_payload = [{
+    ad_group_payload = {
         "name": "Main Ad Group",
         "campaignId": campaign_id,
         "state": "enabled",
         "defaultBid": round(product["suggested_bid"], 2),
-    }]
+    }
     ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
-    ad_group_id = extract_first_id(ad_group_resp)
+    
+    if isinstance(ad_group_resp, dict):
+        ad_group_id = int(ad_group_resp.get("adGroupId") or ad_group_resp.get("id"))
+    else:
+        ad_group_id = extract_first_id(ad_group_resp)
 
-    product_ad_payload = [{
+    product_ad_payload = {
         "campaignId": campaign_id,
         "adGroupId": ad_group_id,
         "asin": product["asin"],
         "sku": product["sku"],
         "state": "enabled",
-    }]
+    }
     product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
 
     keywords_resp = []
@@ -559,9 +556,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# -----------------------------
-# Routes
-# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request})
@@ -666,7 +660,6 @@ def api_run_optimizer(
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
 ):
-    # keep this safe by default
     verify_internal_token(authorization)
 
     apply_negatives_live = payload.get("apply_negatives_live", False)
@@ -788,3 +781,12 @@ def api_run_optimizer(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+ENDOFFILE
+
+# Verify syntax
+python3 -c "import ast; ast.parse(open('app.py').read())" && echo "✓ Syntax is valid!"
+
+# Deploy
+git add app.py
+git commit -m "Complete fixed app.py with Amazon Ads API format fix"
+gcloud builds submit --config=cloudbuild.yaml
