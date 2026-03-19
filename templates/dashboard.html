@@ -41,22 +41,38 @@ async function loadProducts() {
   data.products.forEach(p => {
     const row = document.createElement("tr");
 
-    row.innerHTML = `
-      <td>${p.title}</td>
-      <td>${p.sku}</td>
-      <td>${p.price}</td>
-      <td>
-        <button onclick="getKeywords('${p.sku}')">Keywords</button>
-        <button onclick="createCampaign('${p.sku}')">Launch</button>
-      </td>
-    `;
+    const tdTitle = document.createElement("td");
+    tdTitle.textContent = p.title;
+
+    const tdSku = document.createElement("td");
+    tdSku.textContent = p.sku;
+
+    const tdPrice = document.createElement("td");
+    tdPrice.textContent = p.price;
+
+    const btnKeywords = document.createElement("button");
+    btnKeywords.textContent = "Keywords";
+    btnKeywords.addEventListener("click", () => getKeywords(p.sku));
+
+    const btnLaunch = document.createElement("button");
+    btnLaunch.textContent = "Launch";
+    btnLaunch.addEventListener("click", () => createCampaign(p.sku));
+
+    const tdActions = document.createElement("td");
+    tdActions.appendChild(btnKeywords);
+    tdActions.appendChild(btnLaunch);
+
+    row.appendChild(tdTitle);
+    row.appendChild(tdSku);
+    row.appendChild(tdPrice);
+    row.appendChild(tdActions);
 
     tbody.appendChild(row);
   });
 }
 
 async function getKeywords(sku) {
-  const res = await fetch(`/api/generate-keywords/${sku}`);
+  const res = await fetch(`/api/generate-keywords/${encodeURIComponent(sku)}`);
   const data = await res.json();
 
   const box = document.getElementById("keywords");
