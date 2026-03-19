@@ -330,24 +330,24 @@ def keyword_rows(keywords: List[str], campaign_id: int, ad_group_id: int, bid: f
             "campaignId": campaign_id,
             "adGroupId": ad_group_id,
             "keywordText": kw,
-            "matchType": "exact",
-            "state": "enabled",
+            "matchType": "EXACT",
+            "state": "ENABLED",
             "bid": round(bid * 1.15, 2),
         })
         rows.append({
             "campaignId": campaign_id,
             "adGroupId": ad_group_id,
             "keywordText": kw,
-            "matchType": "phrase",
-            "state": "enabled",
+            "matchType": "PHRASE",
+            "state": "ENABLED",
             "bid": round(bid, 2),
         })
         rows.append({
             "campaignId": campaign_id,
             "adGroupId": ad_group_id,
             "keywordText": kw,
-            "matchType": "broad",
-            "state": "enabled",
+            "matchType": "BROAD",
+            "state": "ENABLED",
             "bid": round(bid * 0.85, 2),
         })
     return rows
@@ -360,7 +360,7 @@ def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict[s
             "campaignId": campaign_id,
             "keywordText": term,
             "matchType": "negativeExact",
-            "state": "enabled",
+            "state": "ENABLED",
         })
     return rows
 
@@ -587,10 +587,12 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
 
     campaign_payload = {
         "name": f"{product['title'][:100]} | MANUAL | {start_date}",
-        "campaignType": "sponsoredProducts",
-        "targetingType": "manual",
-        "state": "enabled",
-        "dailyBudget": round(product["suggested_budget"], 2),
+        "targetingType": "MANUAL",
+        "state": "ENABLED",
+        "budget": {
+            "budget": round(product["suggested_budget"], 2),
+            "budgetType": "DAILY",
+        },
         "startDate": start_date,
     }
     
@@ -600,7 +602,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     ad_group_payload = {
         "name": "Main Ad Group",
         "campaignId": campaign_id,
-        "state": "enabled",
+        "state": "ENABLED",
         "defaultBid": round(product["suggested_bid"], 2),
     }
     
@@ -612,7 +614,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "adGroupId": ad_group_id,
         "asin": product["asin"],
         "sku": product["sku"],
-        "state": "enabled",
+        "state": "ENABLED",
     }
     
     product_ad_resp = client.post(ENDPOINTS["product_ads"], [product_ad_payload])
