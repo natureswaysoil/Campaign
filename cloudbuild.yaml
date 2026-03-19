@@ -1,18 +1,18 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$COMMIT_SHA', '.']
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA', '.']
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$COMMIT_SHA']
+    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA']
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - run
       - deploy
       - amazon-ads-autopilot
-      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$COMMIT_SHA
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA
       - --region=us-central1
       - --platform=managed
       - --allow-unauthenticated
       - --set-env-vars=GCP_PROJECT_ID=$PROJECT_ID
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:$SHORT_SHA'
