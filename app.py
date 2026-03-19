@@ -36,14 +36,14 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-# Amazon Ads API v2 endpoints (require arrays)
+# SP v2 endpoints (accept arrays); reports uses the v3 Reporting API path
 ENDPOINTS = {
     "campaigns": "/v2/sp/campaigns",
     "ad_groups": "/v2/sp/adGroups",
     "product_ads": "/v2/sp/productAds",
     "keywords": "/v2/sp/keywords",
     "negative_keywords": "/v2/sp/campaignNegativeKeywords",
-    "reports": "/v2/reports",
+    "reports": "/reporting/reports",
 }
 
 STOPWORDS = {
