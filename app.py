@@ -501,16 +501,20 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     start_date = today_yyyymmdd()
     generated_keywords = generate_keywords(product)
 
-    campaign_payload = [{
+  campaign_payload = {
         "name": f"{product['title']} | MANUAL | {start_date}",
         "campaignType": "sponsoredProducts",
         "targetingType": "manual",
         "state": "enabled",
         "dailyBudget": round(product["suggested_budget"], 2),
         "startDate": start_date,
-    }]
+    }
     campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
-    campaign_id = extract_first_id(campaign_resp)
+    # Handle both dict and list responses
+    if isinstance(campaign_resp, dict):
+        campaign_id = int(campaign_resp.get("campaignId") or campaign_resp.get("id"))
+    else:
+        campaign_id = extract_first_id(campaign_resp)
 
     ad_group_payload = [{
         "name": "Main Ad Group",
