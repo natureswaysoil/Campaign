@@ -47,6 +47,16 @@ ENDPOINTS = {
     "reports": "/reporting/reports",
 }
 
+# Amazon Ads SP v3 endpoints require vendor-specific Content-Type / Accept headers.
+# The reporting endpoint continues to use plain application/json.
+ENDPOINT_CONTENT_TYPES: Dict[str, str] = {
+    "/sp/campaigns": "application/vnd.spcampaign.v3+json",
+    "/sp/adGroups": "application/vnd.spadgroup.v3+json",
+    "/sp/productAds": "application/vnd.spproductad.v3+json",
+    "/sp/keywords": "application/vnd.spkeyword.v3+json",
+    "/sp/campaignNegativeKeywords": "application/vnd.spcampaignnegativekeyword.v3+json",
+}
+
 STOPWORDS = {
     "the", "and", "for", "with", "from", "your", "you", "our", "this", "that",
     "soil", "organic", "liquid", "natural", "plants", "plant", "garden", "lawn",
@@ -449,21 +459,27 @@ class AmazonAdsClient:
             raise RuntimeError(f"Access token missing from response: {data}")
         return token
 
-    def headers(self) -> Dict[str, str]:
+    def headers(self, content_type: str = "application/json") -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.access_token}",
             "Amazon-Advertising-API-ClientId": self.client_id,
             "Amazon-Advertising-API-Scope": self.profile_id,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Content-Type": content_type,
+            "Accept": content_type,
         }
+
+    def _content_type_for(self, endpoint: str) -> str:
+        for path, ct in ENDPOINT_CONTENT_TYPES.items():
+            if endpoint.startswith(path):
+                return ct
+        return "application/json"
 
     def post(self, endpoint: str, body: Any) -> Any:
         url = f"{self.base_url}{endpoint}"
         logger.info(f"POST to {endpoint}")
         logger.info(f"Body preview: {str(body)[:300]}")
-        
-        resp = self.session.post(url, headers=self.headers(), json=body, timeout=60)
+        content_type = self._content_type_for(endpoint)
+        resp = self.session.post(url, headers=self.headers(content_type), json=body, timeout=60)
         
         logger.info(f"Status: {resp.status_code}")
         if not resp.ok:
@@ -476,7 +492,8 @@ class AmazonAdsClient:
 
     def get(self, endpoint: str) -> Any:
         url = f"{self.base_url}{endpoint}"
-        resp = self.session.get(url, headers=self.headers(), timeout=60)
+        content_type = self._content_type_for(endpoint)
+        resp = self.session.get(url, headers=self.headers(content_type), timeout=60)
         if not resp.ok:
             raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text}")
         return resp.json() if resp.text.strip() else None
