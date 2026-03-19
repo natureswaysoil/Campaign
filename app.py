@@ -36,8 +36,8 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-# SP v3 endpoints: campaigns/adGroups/productAds accept a single JSON object;
-# keywords/campaignNegativeKeywords accept arrays; reports uses the v3 Reporting API path.
+# SP v3 endpoints: all batch endpoints (campaigns/adGroups/productAds/keywords/campaignNegativeKeywords)
+# accept a JSON array of objects; reports uses the v3 Reporting API path.
 ENDPOINTS = {
     "campaigns": "/sp/campaigns",
     "ad_groups": "/sp/adGroups",
@@ -271,7 +271,7 @@ def find_product(key: str) -> Dict[str, Any]:
 
 
 def extract_first_id(payload: Any) -> int:
-    # v3 single-entity endpoints return a JSON object; v3 batch endpoints return a list.
+    # SP v3 batch endpoints return a list of response objects; handle both list and dict defensively.
     if isinstance(payload, dict):
         row = payload
     elif isinstance(payload, list) and payload:
@@ -547,7 +547,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "startDate": start_date,
     }
     
-    campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
+    campaign_resp = client.post(ENDPOINTS["campaigns"], [campaign_payload])
     campaign_id = extract_first_id(campaign_resp)
 
     ad_group_payload = {
@@ -557,7 +557,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "defaultBid": round(product["suggested_bid"], 2),
     }
     
-    ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
+    ad_group_resp = client.post(ENDPOINTS["ad_groups"], [ad_group_payload])
     ad_group_id = extract_first_id(ad_group_resp)
 
     product_ad_payload = {
@@ -568,7 +568,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "state": "enabled",
     }
     
-    product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
+    product_ad_resp = client.post(ENDPOINTS["product_ads"], [product_ad_payload])
 
     keywords_resp = []
     if generated_keywords:
