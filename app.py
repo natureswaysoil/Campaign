@@ -472,7 +472,6 @@ class AmazonAdsClient:
         body = {
             "name": f"sp-search-term-{start_date}-{end_date}",
             "startDate": start_date,
-    }
             "endDate": end_date,
             "configuration": {
                 "adProduct": "SPONSORED_PRODUCTS",
@@ -509,7 +508,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "state": "enabled",
         "dailyBudget": round(product["suggested_budget"], 2),
         "startDate": start_date,
-    }
     }]
     campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
     campaign_id = extract_first_id(campaign_resp)
