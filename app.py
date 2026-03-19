@@ -359,24 +359,24 @@ def keyword_rows(keywords: List[str], campaign_id: int, ad_group_id: int, bid: f
     rows = []
     for kw in keywords:
         rows.append({
-            "campaignId": campaign_id,
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
             "keywordText": kw,
             "matchType": "EXACT",
             "state": "ENABLED",
             "bid": round(bid * 1.15, 2),
         })
         rows.append({
-            "campaignId": campaign_id,
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
             "keywordText": kw,
             "matchType": "PHRASE",
             "state": "ENABLED",
             "bid": round(bid, 2),
         })
         rows.append({
-            "campaignId": campaign_id,
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
             "keywordText": kw,
             "matchType": "BROAD",
             "state": "ENABLED",
@@ -389,7 +389,7 @@ def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict[s
     rows = []
     for term in negatives:
         rows.append({
-            "campaignId": campaign_id,
+            "campaignId": str(campaign_id),
             "keywordText": term,
             "matchType": "negativeExact",
             "state": "ENABLED",
@@ -633,7 +633,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
 
     ad_group_payload = {
         "name": "Main Ad Group",
-        "campaignId": campaign_id,
+        "campaignId": str(campaign_id),
         "state": "ENABLED",
         "defaultBid": round(product["suggested_bid"], 2),
     }
@@ -642,8 +642,8 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     ad_group_id = extract_first_id(ad_group_resp)
 
     product_ad_payload = {
-        "campaignId": campaign_id,
-        "adGroupId": ad_group_id,
+        "campaignId": str(campaign_id),
+        "adGroupId": str(ad_group_id),
         "asin": product["asin"],
         "sku": product["sku"],
         "state": "ENABLED",
