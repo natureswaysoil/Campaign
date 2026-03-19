@@ -7,12 +7,14 @@ import csv
 import datetime
 import gzip
 import hmac
+import html
 import io
 import json
 import logging
 import os
 import re
 import time
+import unicodedata
 from typing import List, Dict, Any, Optional
 
 import requests
@@ -133,6 +135,35 @@ def normalize(text: str) -> str:
     text = (text or "").lower()
     text = re.sub(r"[^a-z0-9\s-]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+_UNICODE_TO_ASCII = {
+    "\u2018": "'",   # left single quotation mark
+    "\u2019": "'",   # right single quotation mark
+    "\u201c": '"',   # left double quotation mark
+    "\u201d": '"',   # right double quotation mark
+    "\u2013": "-",   # en dash
+    "\u2014": "-",   # em dash
+    "\u2026": "...", # horizontal ellipsis
+    "\u00ae": "",    # registered sign ®
+    "\u2122": "",    # trade mark sign ™
+}
+
+
+def sanitize_campaign_name(name: Optional[str]) -> str:
+    """Return a campaign name safe for the Amazon Ads API.
+
+    Decodes HTML entities, replaces common Unicode punctuation with ASCII
+    equivalents, strips remaining non-ASCII characters, and collapses
+    extra whitespace.
+    """
+    name = html.unescape(name or "")
+    for char, replacement in _UNICODE_TO_ASCII.items():
+        name = name.replace(char, replacement)
+    name = unicodedata.normalize("NFKD", name)
+    name = name.encode("ascii", errors="ignore").decode("ascii")
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
 
 
 def unique_in_order(items: List[str]) -> List[str]:
@@ -587,7 +618,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     logger.info(f"Creating campaign for SKU: {product['sku']}")
 
     campaign_payload = {
-        "name": f"{product['title'][:100]} | MANUAL | {start_date}",
+        "name": f"{sanitize_campaign_name(product['title'])[:100]} | MANUAL | {start_date}",
         "targetingType": "MANUAL",
         "state": "ENABLED",
         "budget": {
