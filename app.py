@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 
 import csv
 import gzip
+import hmac
 import io
 import json
 import logging
@@ -283,7 +284,7 @@ def keyword_rows(keywords: List[str], ad_group_id: int, bid: float) -> List[Dict
             "keywordText": kw,
             "matchType": "phrase",
             "state": "enabled",
-            "bid": round(bid * 1.00, 2),
+            "bid": round(bid, 2),
         })
         rows.append({
             "adGroupId": ad_group_id,
@@ -391,11 +392,11 @@ def verify_internal_token(authorization: Optional[str]) -> None:
     required = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN")
     if not required:
         raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN must be configured")
-    
+
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     supplied = authorization.replace("Bearer ", "", 1).strip()
-    if supplied != required:
+    if not hmac.compare_digest(supplied, required):
         raise HTTPException(status_code=403, detail="Invalid bearer token")
 
 
@@ -478,7 +479,8 @@ class AmazonAdsClient:
 
     def request_sp_search_term_report(self, start_date: str, end_date: str) -> Any:
         body = {
-            "reportDate": end_date,
+            "startDate": start_date,
+            "endDate": end_date,
             "configuration": {
                 "adProduct": "SPONSORED_PRODUCTS",
                 "groupBy": ["searchTerm"],
@@ -605,7 +607,7 @@ def api_create_campaign(payload: Dict[str, Any]):
     try:
         return create_live_campaign_for_product(product)
     except Exception as e:
-        logger.error(f"Campaign creation failed", exc_info=True)
+        logger.error("Campaign creation failed", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -664,11 +666,92 @@ def api_bulk_create(payload: Dict[str, Any]):
     }
 
 
+MAX_REPORT_POLL_ATTEMPTS = 30  # 30 × 10 s = 5 minutes
+
+
 @app.post("/api/run-daily-optimization")
 def api_run_optimizer(
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
 ):
     verify_internal_token(authorization)
-    # Optimizer code continues...
-    return {"message": "Optimizer not fully implemented yet"}
+
+    apply_negatives_live = payload.get("apply_negatives_live", False)
+    apply_winners_live = payload.get("apply_winners_live", False)
+
+    try:
+        winner_bid = float(payload.get("winner_bid", 0.9))
+        lookback_days = int(payload.get("lookback_days", 14))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid parameter value: {exc}") from exc
+
+    client = AmazonAdsClient()
+    start_date = yyyymmdd_days_ago(lookback_days)
+    end_date = today_yyyymmdd()
+
+    # Request search term report
+    report_resp = client.request_sp_search_term_report(start_date, end_date)
+    report_id = (report_resp or {}).get("reportId")
+    if not report_id:
+        logger.error("No reportId in response: %s", report_resp)
+        raise HTTPException(status_code=500, detail="Report request did not return a report ID")
+
+    # Poll until the report is ready (up to 5 minutes)
+    status_resp: Dict[str, Any] = {}
+    for _ in range(MAX_REPORT_POLL_ATTEMPTS):
+        status_resp = client.get_report_status(report_id) or {}
+        status = status_resp.get("status", "")
+        if status == "SUCCESS":
+            break
+        if status in ("FAILURE", "CANCELLED"):
+            raise HTTPException(status_code=500, detail=f"Report generation failed: {status}")
+        time.sleep(10)
+    else:
+        raise HTTPException(status_code=504, detail="Report generation timed out")
+
+    # Download and parse report
+    download_url = status_resp.get("location") or status_resp.get("url")
+    if not download_url:
+        raise HTTPException(status_code=500, detail="No download URL in report response")
+
+    content = client.download_binary(download_url)
+    rows = parse_report_json_bytes(content)
+    classified = classify_terms(rows)
+
+    # Optionally apply negative keywords grouped by campaign
+    negatives_applied: List[Dict[str, Any]] = []
+    if apply_negatives_live and classified["negatives"]:
+        by_campaign: Dict[int, List[str]] = {}
+        for item in classified["negatives"]:
+            cid = item["campaign_id"]
+            if cid:
+                by_campaign.setdefault(cid, []).append(item["term"])
+        for cid, terms in by_campaign.items():
+            neg_rows = negative_keyword_rows(unique_in_order(terms), cid)
+            resp = client.post(ENDPOINTS["negative_keywords"], neg_rows)
+            negatives_applied.append({"campaign_id": cid, "count": len(terms), "response": resp})
+
+    # Optionally promote winning search terms as exact/phrase/broad keywords
+    winners_applied: List[Dict[str, Any]] = []
+    if apply_winners_live and classified["winners"]:
+        by_ad_group: Dict[int, List[str]] = {}
+        for item in classified["winners"]:
+            agid = item["ad_group_id"]
+            if agid:
+                by_ad_group.setdefault(agid, []).append(item["term"])
+        for agid, terms in by_ad_group.items():
+            kw_rows = keyword_rows(unique_in_order(terms), agid, winner_bid)
+            resp = client.post(ENDPOINTS["keywords"], kw_rows)
+            winners_applied.append({"ad_group_id": agid, "count": len(terms), "response": resp})
+
+    return {
+        "report_id": report_id,
+        "date_range": {"start": start_date, "end": end_date},
+        "rows_analyzed": len(rows),
+        "winners": len(classified["winners"]),
+        "negatives": len(classified["negatives"]),
+        "hold": len(classified["hold"]),
+        "negatives_applied": negatives_applied,
+        "winners_applied": winners_applied,
+        "classified": classified,
+    }

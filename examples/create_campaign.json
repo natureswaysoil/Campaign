@@ -1,8 +1,3 @@
 {
-  "sku": "YOUR-SKU",
-  "asin": "YOURASIN",
-  "product_name": "Nature's Way Soil Hay, Pasture & Lawn Fertilizer",
-  "daily_budget": 25,
-  "default_bid": 0.85,
-  "mode": "manual"
+  "sku": "YOUR-SKU"
 }
