@@ -120,12 +120,12 @@ def optional_env_or_secret(name: str, default: Optional[str] = None) -> Optional
         return default
 
 
-def today_yyyymmdd() -> str:
-    return time.strftime("%Y%m%d")
+def today_iso_date() -> str:
+    return time.strftime("%Y-%m-%d")
 
 
-def yyyymmdd_days_ago(days: int) -> str:
-    return time.strftime("%Y%m%d", time.localtime(time.time() - (days * 86400)))
+def iso_date_days_ago(days: int) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() - (days * 86400)))
 
 
 def normalize(text: str) -> str:
@@ -580,7 +580,7 @@ class AmazonAdsClient:
 
 def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     client = AmazonAdsClient()
-    start_date = today_yyyymmdd()
+    start_date = today_iso_date()
     generated_keywords = generate_keywords(product)
 
     logger.info(f"Creating campaign for SKU: {product['sku']}")
@@ -762,8 +762,8 @@ def api_run_optimizer(
         raise HTTPException(status_code=400, detail=f"Invalid parameter value: {exc}") from exc
 
     client = AmazonAdsClient()
-    start_date = yyyymmdd_days_ago(lookback_days)
-    end_date = today_yyyymmdd()
+    start_date = iso_date_days_ago(lookback_days)
+    end_date = today_iso_date()
 
     # Request search term report
     report_resp = client.request_sp_search_term_report(start_date, end_date)

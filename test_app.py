@@ -178,7 +178,7 @@ class TestAmazonAdsClientPost:
             captured["body"] = json
             return self._mock_response({"reportId": "abc123"})
 
-        body = {"startDate": "20240101", "endDate": "20240110", "configuration": {}}
+        body = {"startDate": "2024-01-01", "endDate": "2024-01-10", "configuration": {}}
         with patch.object(client.session, "post", side_effect=fake_post):
             client.post("/reporting/reports", body)
 
@@ -300,4 +300,50 @@ class TestCampaignPayloadFormat:
                 for campaign in body.get("campaigns", []):
                     assert campaign.get("state") == "ENABLED", (
                         f"Campaign state must be 'ENABLED', got {campaign.get('state')!r}"
+                    )
+
+    def test_campaign_start_date_is_iso_format(self):
+        """Campaign startDate must be YYYY-MM-DD (e.g. '2026-03-19'), not YYYYMMDD."""
+        import re
+        product = {
+            "sku": "TEST-SKU",
+            "asin": "B000TEST01",
+            "title": "Test Product",
+            "suggested_budget": 25.0,
+            "suggested_bid": 0.85,
+            "product_id": "TEST_001",
+        }
+
+        captured_bodies = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured_bodies.append((url, json))
+            r = MagicMock()
+            r.ok = True
+            r.status_code = 200
+            if "/sp/campaigns" in url:
+                body = {"campaigns": {"success": [{"campaign": {"campaignId": 1}, "index": 0}], "error": []}}
+            elif "/sp/adGroups" in url:
+                body = {"adGroups": {"success": [{"adGroup": {"adGroupId": 2}, "index": 0}], "error": []}}
+            else:
+                body = {}
+            r.text = json_module.dumps(body)
+            r.json.return_value = body
+            return r
+
+        with patch.object(app_module.AmazonAdsClient, "_get_token", return_value="tok"), \
+             patch("requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.post.side_effect = fake_post
+            mock_session_cls.return_value = mock_session
+            app_module.create_live_campaign_for_product(product)
+
+        iso_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        for url, body in captured_bodies:
+            if "/sp/campaigns" in url:
+                for campaign in body.get("campaigns", []):
+                    start_date = campaign.get("startDate")
+                    assert start_date is not None, "Campaign must have a startDate"
+                    assert iso_pattern.match(start_date), (
+                        f"startDate must be YYYY-MM-DD format, got {start_date!r}"
                     )
