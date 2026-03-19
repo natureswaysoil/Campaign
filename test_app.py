@@ -25,11 +25,11 @@ import app as app_module
 class TestKeywordRows:
     def test_includes_campaign_id(self):
         rows = app_module.keyword_rows(["fertilizer"], 111, 222, 1.0)
-        assert all(r["campaignId"] == 111 for r in rows)
+        assert all(r["campaignId"] == "111" for r in rows)
 
     def test_includes_ad_group_id(self):
         rows = app_module.keyword_rows(["fertilizer"], 111, 222, 1.0)
-        assert all(r["adGroupId"] == 222 for r in rows)
+        assert all(r["adGroupId"] == "222" for r in rows)
 
     def test_three_match_types_per_keyword(self):
         rows = app_module.keyword_rows(["fertilizer"], 111, 222, 1.0)
@@ -58,6 +58,18 @@ class TestKeywordRows:
             assert isinstance(r["bid"], (int, float))
             assert not isinstance(r["bid"], list)
 
+    def test_campaign_id_is_string(self):
+        rows = app_module.keyword_rows(["fertilizer"], 111, 222, 1.0)
+        assert all(isinstance(r["campaignId"], str) for r in rows), (
+            "campaignId must be a string for SP v3 API compatibility"
+        )
+
+    def test_ad_group_id_is_string(self):
+        rows = app_module.keyword_rows(["fertilizer"], 111, 222, 1.0)
+        assert all(isinstance(r["adGroupId"], str) for r in rows), (
+            "adGroupId must be a string for SP v3 API compatibility"
+        )
+
     def test_multiple_keywords(self):
         kws = ["fertilizer", "organic", "lawn care"]
         rows = app_module.keyword_rows(kws, 111, 222, 1.0)
@@ -79,7 +91,13 @@ class TestNegativeKeywordRows:
 
     def test_includes_campaign_id(self):
         rows = app_module.negative_keyword_rows(["free"], 111)
-        assert rows[0]["campaignId"] == 111
+        assert rows[0]["campaignId"] == "111"
+
+    def test_campaign_id_is_string(self):
+        rows = app_module.negative_keyword_rows(["free"], 111)
+        assert isinstance(rows[0]["campaignId"], str), (
+            "campaignId must be a string for SP v3 API compatibility"
+        )
 
     def test_one_row_per_term(self):
         rows = app_module.negative_keyword_rows(["free", "cheap", "trial"], 111)
