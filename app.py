@@ -36,13 +36,14 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-# SP v2 endpoints (accept arrays); reports uses the v3 Reporting API path
+# SP v3 endpoints: campaigns/adGroups/productAds accept a single JSON object;
+# keywords/campaignNegativeKeywords accept arrays; reports uses the v3 Reporting API path.
 ENDPOINTS = {
-    "campaigns": "/v2/sp/campaigns",
-    "ad_groups": "/v2/sp/adGroups",
-    "product_ads": "/v2/sp/productAds",
-    "keywords": "/v2/sp/keywords",
-    "negative_keywords": "/v2/sp/campaignNegativeKeywords",
+    "campaigns": "/sp/campaigns",
+    "ad_groups": "/sp/adGroups",
+    "product_ads": "/sp/productAds",
+    "keywords": "/sp/keywords",
+    "negative_keywords": "/sp/campaignNegativeKeywords",
     "reports": "/reporting/reports",
 }
 
@@ -260,19 +261,26 @@ def find_product(key: str) -> Dict[str, Any]:
 
 
 def extract_first_id(payload: Any) -> int:
-    if not isinstance(payload, list) or not payload:
-        raise RuntimeError(f"Unexpected payload: {payload}")
-    row = payload[0]
+    # v3 single-entity endpoints return a JSON object; v3 batch endpoints return a list.
+    if isinstance(payload, dict):
+        row = payload
+    elif isinstance(payload, list) and payload:
+        row = payload[0]
+    else:
+        raise RuntimeError(
+            f"Unexpected payload (expected dict or non-empty list, got {type(payload).__name__}): {payload}"
+        )
     for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
         if key in row:
             return int(row[key])
     raise RuntimeError(f"No ID found in payload: {payload}")
 
 
-def keyword_rows(keywords: List[str], ad_group_id: int, bid: float) -> List[Dict[str, Any]]:
+def keyword_rows(keywords: List[str], campaign_id: int, ad_group_id: int, bid: float) -> List[Dict[str, Any]]:
     rows = []
     for kw in keywords:
         rows.append({
+            "campaignId": campaign_id,
             "adGroupId": ad_group_id,
             "keywordText": kw,
             "matchType": "exact",
@@ -280,6 +288,7 @@ def keyword_rows(keywords: List[str], ad_group_id: int, bid: float) -> List[Dict
             "bid": round(bid * 1.15, 2),
         })
         rows.append({
+            "campaignId": campaign_id,
             "adGroupId": ad_group_id,
             "keywordText": kw,
             "matchType": "phrase",
@@ -287,6 +296,7 @@ def keyword_rows(keywords: List[str], ad_group_id: int, bid: float) -> List[Dict
             "bid": round(bid, 2),
         })
         rows.append({
+            "campaignId": campaign_id,
             "adGroupId": ad_group_id,
             "keywordText": kw,
             "matchType": "broad",
@@ -511,41 +521,41 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(f"Creating campaign for SKU: {product['sku']}")
 
-    campaign_payload = [{
+    campaign_payload = {
         "name": f"{product['title'][:100]} | MANUAL | {start_date}",
         "campaignType": "sponsoredProducts",
         "targetingType": "manual",
         "state": "enabled",
         "dailyBudget": round(product["suggested_budget"], 2),
         "startDate": start_date,
-    }]
+    }
     
     campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
     campaign_id = extract_first_id(campaign_resp)
 
-    ad_group_payload = [{
+    ad_group_payload = {
         "name": "Main Ad Group",
         "campaignId": campaign_id,
         "state": "enabled",
         "defaultBid": round(product["suggested_bid"], 2),
-    }]
+    }
     
     ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
     ad_group_id = extract_first_id(ad_group_resp)
 
-    product_ad_payload = [{
+    product_ad_payload = {
         "campaignId": campaign_id,
         "adGroupId": ad_group_id,
         "asin": product["asin"],
         "sku": product["sku"],
         "state": "enabled",
-    }]
+    }
     
     product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
 
     keywords_resp = []
     if generated_keywords:
-        kw_rows = keyword_rows(generated_keywords, ad_group_id, product["suggested_bid"])
+        kw_rows = keyword_rows(generated_keywords, campaign_id, ad_group_id, product["suggested_bid"])
         keywords_resp = client.post(ENDPOINTS["keywords"], kw_rows)
 
     return {
@@ -734,15 +744,19 @@ def api_run_optimizer(
     # Optionally promote winning search terms as exact/phrase/broad keywords
     winners_applied: List[Dict[str, Any]] = []
     if apply_winners_live and classified["winners"]:
-        by_ad_group: Dict[int, List[str]] = {}
+        # Track campaign_id alongside ad_group_id (required by v3 keywords API)
+        ad_group_data: Dict[int, Dict[str, Any]] = {}
         for item in classified["winners"]:
             agid = item["ad_group_id"]
-            if agid:
-                by_ad_group.setdefault(agid, []).append(item["term"])
-        for agid, terms in by_ad_group.items():
-            kw_rows = keyword_rows(unique_in_order(terms), agid, winner_bid)
+            cid = item["campaign_id"]
+            if agid and cid:
+                if agid not in ad_group_data:
+                    ad_group_data[agid] = {"campaign_id": cid, "terms": []}
+                ad_group_data[agid]["terms"].append(item["term"])
+        for agid, data in ad_group_data.items():
+            kw_rows = keyword_rows(unique_in_order(data["terms"]), data["campaign_id"], agid, winner_bid)
             resp = client.post(ENDPOINTS["keywords"], kw_rows)
-            winners_applied.append({"ad_group_id": agid, "count": len(terms), "response": resp})
+            winners_applied.append({"ad_group_id": agid, "count": len(data["terms"]), "response": resp})
 
     return {
         "report_id": report_id,
