@@ -9,30 +9,7 @@
   <div class="wrap">
     <h1>🚀 Amazon Ads Dashboard</h1>
 
-    <div class="toolbar">
-      <div class="action-with-status">
-        <button onclick="loadProducts()">Load Products</button>
-        <span id="statusLoadProducts" class="status-badge status-idle">idle</span>
-      </div>
-      <div class="action-with-status">
-        <button onclick="loadLaunchLogs()">Refresh Launch Logs</button>
-        <span id="statusLoadLaunchLogs" class="status-badge status-idle">idle</span>
-      </div>
-      <div class="action-with-status">
-        <button onclick="loadChecklist()">Load Checklist</button>
-        <span id="statusLoadChecklist" class="status-badge status-idle">idle</span>
-      </div>
-      <div class="action-with-status">
-        <button onclick="loadOptimizerRuns()">Refresh Optimizer Runs</button>
-        <span id="statusLoadOptimizerRuns" class="status-badge status-idle">idle</span>
-      </div>
-    </div>
-
-    <div class="budget-form">
-      <label>Filter Campaign ID <input id="filterCampaignId" type="text" placeholder="Optional campaign filter"></label>
-      <label>Filter Start Date <input id="filterStartDate" type="date"></label>
-      <label>Filter End Date <input id="filterEndDate" type="date"></label>
-    </div>
+    <button onclick="loadProducts()">Load Products</button>
 
     <table id="productsTable">
       <thead>
@@ -51,103 +28,12 @@
 
     <h2>Campaign Output</h2>
     <pre id="output"></pre>
-
-    <h2>Latest Launch Summaries</h2>
-    <div class="toolbar">
-      <button onclick="exportLaunchJson()">Export Launch Logs JSON</button>
-      <button onclick="exportLaunchCsv()">Export Launch Logs CSV</button>
-    </div>
-    <pre id="launchLogs">No launch logs loaded.</pre>
-
-    <h2>Optimizer Runs</h2>
-    <div class="toolbar">
-      <button onclick="exportOptimizerJson()">Export Optimizer Runs JSON</button>
-      <button onclick="exportOptimizerCsv()">Export Optimizer Runs CSV</button>
-    </div>
-    <pre id="optimizerRuns">No optimizer runs loaded.</pre>
-
-    <h2>Post-Launch Optimization Checklist</h2>
-    <pre id="checklist">Checklist not loaded.</pre>
-
-    <h2>Daily Budget Adjustment</h2>
-    <div class="budget-form">
-      <label>Campaign ID <input id="campaignId" type="text"></label>
-      <label>Current Budget <input id="currentBudget" type="number" step="0.01" value="25"></label>
-      <label>Target ACOS <input id="targetAcos" type="number" step="0.01" value="0.35"></label>
-      <label>Current ACOS <input id="currentAcos" type="number" step="0.01" value="0.35"></label>
-      <label>Budget Utilization (0-1) <input id="budgetUtilization" type="number" step="0.01" value="0.9"></label>
-      <label>Clicks <input id="clicks" type="number" value="20"></label>
-      <label>Orders <input id="orders" type="number" value="0"></label>
-      <label>Spend <input id="spend" type="number" step="0.01" value="25"></label>
-      <label>Optimizer Token (optional) <input id="optimizerToken" type="password" placeholder="Bearer token value"></label>
-      <div class="budget-actions">
-        <div class="action-with-status">
-          <button onclick="autofillBudgetFromLatestLaunch()">Auto-fill From Latest Launch</button>
-          <span id="statusAutofill" class="status-badge status-idle">idle</span>
-        </div>
-        <div class="action-with-status">
-          <button onclick="recommendBudgetAdjustment()">Recommend Budget</button>
-          <span id="statusRecommendBudget" class="status-badge status-idle">idle</span>
-        </div>
-        <div class="action-with-status">
-          <button onclick="applyBudgetAdjustment()">Apply Live Budget</button>
-          <span id="statusApplyBudget" class="status-badge status-idle">idle</span>
-        </div>
-        <div class="action-with-status">
-          <button onclick="runQuickOptimizer()">Run Optimizer + Safe Negatives</button>
-          <span id="statusRunOptimizer" class="status-badge status-idle">idle</span>
-        </div>
-      </div>
-    </div>
-    <pre id="budgetOutput">Budget recommendation will appear here.</pre>
   </div>
 
 <script>
-async function readJsonResponse(res) {
-  const raw = await res.text();
-  let data = null;
-
-  if (raw && raw.trim()) {
-    try {
-      data = JSON.parse(raw);
-    } catch (err) {
-      if (!res.ok) {
-        throw new Error(raw);
-      }
-      throw new Error(`Response was not valid JSON (status ${res.status}).`);
-    }
-  }
-
-  if (!res.ok) {
-    const detail = data && data.detail ? data.detail : raw || `Request failed with status ${res.status}`;
-    throw new Error(detail);
-  }
-
-  if (data === null) {
-    throw new Error("Empty response body from server.");
-  }
-
-  return data;
-}
-
-async function fetchJson(url, options) {
-  const res = await fetch(url, options);
-  return readJsonResponse(res);
-}
-
-function setStatus(id, state, message) {
-  const el = document.getElementById(id);
-  if (!el) {
-    return;
-  }
-  el.className = `status-badge status-${state}`;
-  el.textContent = message || state;
-}
-
 async function loadProducts() {
-  setStatus('statusLoadProducts', 'pending', 'loading');
-  const data = await fetchJson('/api/products');
-  setStatus('statusLoadProducts', 'success', `ok (${data.count || 0})`);
+  const res = await fetch('/api/products');
+  const data = await res.json();
 
   const tbody = document.querySelector("#productsTable tbody");
   tbody.innerHTML = "";
@@ -155,22 +41,39 @@ async function loadProducts() {
   data.products.forEach(p => {
     const row = document.createElement("tr");
 
-    row.innerHTML = `
-      <td>${p.title}</td>
-      <td>${p.sku}</td>
-      <td>${p.price}</td>
-      <td>
-        <button onclick="getKeywords('${p.sku}')">Keywords</button>
-        <button onclick="createCampaign('${p.sku}')">Launch</button>
-      </td>
-    `;
+    const tdTitle = document.createElement("td");
+    tdTitle.textContent = p.title;
+
+    const tdSku = document.createElement("td");
+    tdSku.textContent = p.sku;
+
+    const tdPrice = document.createElement("td");
+    tdPrice.textContent = p.price;
+
+    const btnKeywords = document.createElement("button");
+    btnKeywords.textContent = "Keywords";
+    btnKeywords.addEventListener("click", () => getKeywords(p.sku));
+
+    const btnLaunch = document.createElement("button");
+    btnLaunch.textContent = "Launch";
+    btnLaunch.addEventListener("click", () => createCampaign(p.sku));
+
+    const tdActions = document.createElement("td");
+    tdActions.appendChild(btnKeywords);
+    tdActions.appendChild(btnLaunch);
+
+    row.appendChild(tdTitle);
+    row.appendChild(tdSku);
+    row.appendChild(tdPrice);
+    row.appendChild(tdActions);
 
     tbody.appendChild(row);
   });
 }
 
 async function getKeywords(sku) {
-  const data = await fetchJson(`/api/generate-keywords/${sku}`);
+  const res = await fetch(`/api/generate-keywords/${encodeURIComponent(sku)}`);
+  const data = await res.json();
 
   const box = document.getElementById("keywords");
   box.innerHTML = "";
@@ -188,237 +91,26 @@ async function createCampaign(sku) {
   output.textContent = "Launching campaign...";
 
   try {
-    const data = await fetchJson('/api/create-campaign-from-product', {
+    const res = await fetch('/api/create-campaign-from-product', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sku })
     });
+
+    const data = await res.json();
     output.textContent = JSON.stringify(data, null, 2);
 
+    if (!res.ok) {
+      alert("Launch failed: " + (data.detail || "Unknown error"));
+      return;
+    }
+
     alert("Launch completed");
-    await loadLaunchLogs();
-    await loadProducts();
   } catch (err) {
     output.textContent = String(err);
     alert("Launch error: " + err);
   }
 }
-
-function fillBudgetFieldsFromLog(log) {
-  if (!log || !log.campaign) {
-    return;
-  }
-  document.getElementById("campaignId").value = log.campaign.campaign_id || "";
-  document.getElementById("currentBudget").value = log.campaign.daily_budget || 25;
-}
-
-function formatDateForApi(value) {
-  if (!value) {
-    return "";
-  }
-  return value.replaceAll('-', '');
-}
-
-function currentFilters() {
-  return {
-    campaign_id: document.getElementById("filterCampaignId").value.trim(),
-    start_date: document.getElementById("filterStartDate").value,
-    end_date: document.getElementById("filterEndDate").value,
-  };
-}
-
-function filterQueryString() {
-  const f = currentFilters();
-  const params = new URLSearchParams();
-  if (f.campaign_id) {
-    params.set('campaign_id', f.campaign_id);
-  }
-  if (f.start_date) {
-    params.set('start_date', f.start_date);
-  }
-  if (f.end_date) {
-    params.set('end_date', f.end_date);
-  }
-  return params.toString();
-}
-
-async function autofillBudgetFromLatestLaunch() {
-  const output = document.getElementById("budgetOutput");
-  output.textContent = "Loading latest launch for auto-fill...";
-  setStatus('statusAutofill', 'pending', 'running');
-  try {
-    const qs = filterQueryString();
-    const data = await fetchJson(`/api/launch-logs/latest${qs ? `?${qs}` : ''}`);
-    if (!data.found || !data.log) {
-      output.textContent = "No launch log found to auto-fill.";
-      setStatus('statusAutofill', 'error', 'not found');
-      return;
-    }
-    fillBudgetFieldsFromLog(data.log);
-    output.textContent = "Budget form auto-filled from latest launch.";
-    setStatus('statusAutofill', 'success', 'done');
-  } catch (err) {
-    output.textContent = String(err);
-    setStatus('statusAutofill', 'error', 'failed');
-  }
-}
-
-async function loadLaunchLogs() {
-  const box = document.getElementById("launchLogs");
-  box.textContent = "Loading launch logs...";
-  setStatus('statusLoadLaunchLogs', 'pending', 'loading');
-  try {
-    const qs = filterQueryString();
-    const data = await fetchJson(`/api/launch-logs?limit=10${qs ? `&${qs}` : ''}`);
-    box.textContent = JSON.stringify(data, null, 2);
-    if (data.logs && data.logs.length > 0) {
-      fillBudgetFieldsFromLog(data.logs[0]);
-    }
-    setStatus('statusLoadLaunchLogs', 'success', `ok (${data.count || 0})`);
-  } catch (err) {
-    box.textContent = String(err);
-    setStatus('statusLoadLaunchLogs', 'error', 'failed');
-  }
-}
-
-async function loadOptimizerRuns() {
-  const box = document.getElementById("optimizerRuns");
-  box.textContent = "Loading optimizer runs...";
-  setStatus('statusLoadOptimizerRuns', 'pending', 'loading');
-  try {
-    const qs = filterQueryString();
-    const data = await fetchJson(`/api/optimizer-runs?limit=10${qs ? `&${qs}` : ''}`);
-    box.textContent = JSON.stringify(data, null, 2);
-    setStatus('statusLoadOptimizerRuns', 'success', `ok (${data.count || 0})`);
-  } catch (err) {
-    box.textContent = String(err);
-    setStatus('statusLoadOptimizerRuns', 'error', 'failed');
-  }
-}
-
-async function loadChecklist() {
-  const box = document.getElementById("checklist");
-  box.textContent = "Loading checklist...";
-  setStatus('statusLoadChecklist', 'pending', 'loading');
-  try {
-    const data = await fetchJson('/api/optimization-checklist');
-    box.textContent = JSON.stringify(data, null, 2);
-    setStatus('statusLoadChecklist', 'success', 'ok');
-  } catch (err) {
-    box.textContent = String(err);
-    setStatus('statusLoadChecklist', 'error', 'failed');
-  }
-}
-
-function budgetPayload(applyLive) {
-  return {
-    campaign_id: document.getElementById("campaignId").value,
-    current_budget: Number(document.getElementById("currentBudget").value),
-    target_acos: Number(document.getElementById("targetAcos").value),
-    acos: Number(document.getElementById("currentAcos").value),
-    budget_utilization: Number(document.getElementById("budgetUtilization").value),
-    clicks: Number(document.getElementById("clicks").value),
-    orders: Number(document.getElementById("orders").value),
-    spend: Number(document.getElementById("spend").value),
-    apply_live: applyLive,
-  };
-}
-
-function optimizerPayload() {
-  const filters = currentFilters();
-  return {
-    optimizer_token: document.getElementById("optimizerToken").value,
-    campaign_id: filters.campaign_id,
-    start_date: formatDateForApi(filters.start_date),
-    end_date: formatDateForApi(filters.end_date),
-    min_clicks_for_negative: 20,
-    min_orders_for_winner: 2,
-    max_acos_for_winner: Number(document.getElementById("targetAcos").value),
-    min_clicks_for_winner: 8,
-  };
-}
-
-async function recommendBudgetAdjustment() {
-  const output = document.getElementById("budgetOutput");
-  output.textContent = "Calculating recommendation...";
-  setStatus('statusRecommendBudget', 'pending', 'running');
-  try {
-    const data = await fetchJson('/api/recommend-budget-adjustment', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(budgetPayload(false))
-    });
-    output.textContent = JSON.stringify(data, null, 2);
-    setStatus('statusRecommendBudget', 'success', 'done');
-  } catch (err) {
-    output.textContent = String(err);
-    setStatus('statusRecommendBudget', 'error', 'failed');
-  }
-}
-
-async function applyBudgetAdjustment() {
-  const output = document.getElementById("budgetOutput");
-  output.textContent = "Applying budget update...";
-  setStatus('statusApplyBudget', 'pending', 'running');
-  try {
-    const data = await fetchJson('/api/adjust-campaign-budget', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(budgetPayload(true))
-    });
-    output.textContent = JSON.stringify(data, null, 2);
-    setStatus('statusApplyBudget', 'success', 'done');
-    await loadLaunchLogs();
-  } catch (err) {
-    output.textContent = String(err);
-    setStatus('statusApplyBudget', 'error', 'failed');
-  }
-}
-
-async function runQuickOptimizer() {
-  const output = document.getElementById("budgetOutput");
-  output.textContent = "Running optimizer with safe negatives...";
-  setStatus('statusRunOptimizer', 'pending', 'running');
-  try {
-    const data = await fetchJson('/api/quick-optimize-safe-negatives', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(optimizerPayload())
-    });
-    output.textContent = JSON.stringify(data, null, 2);
-    setStatus('statusRunOptimizer', 'success', 'done');
-    await loadOptimizerRuns();
-    await loadLaunchLogs();
-  } catch (err) {
-    output.textContent = String(err);
-    setStatus('statusRunOptimizer', 'error', 'failed');
-  }
-}
-
-function exportLaunchJson() {
-  const qs = filterQueryString();
-  window.open(`/api/export/launch-logs.json?limit=500${qs ? `&${qs}` : ''}`, '_blank');
-}
-
-function exportLaunchCsv() {
-  const qs = filterQueryString();
-  window.open(`/api/export/launch-logs.csv?limit=500${qs ? `&${qs}` : ''}`, '_blank');
-}
-
-function exportOptimizerJson() {
-  const qs = filterQueryString();
-  window.open(`/api/export/optimizer-runs.json?limit=500${qs ? `&${qs}` : ''}`, '_blank');
-}
-
-function exportOptimizerCsv() {
-  const qs = filterQueryString();
-  window.open(`/api/export/optimizer-runs.csv?limit=500${qs ? `&${qs}` : ''}`, '_blank');
-}
-
-loadProducts();
-loadLaunchLogs();
-loadChecklist();
-loadOptimizerRuns();
 </script>
 
 </body>

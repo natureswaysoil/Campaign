@@ -1,22 +1,26 @@
 from fastapi import FastAPI, HTTPException, Request, Header
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import csv
-from datetime import date, datetime, timezone
+import datetime
 import gzip
+import hmac
+import html
 import io
 import json
+import logging
 import os
-from pathlib import Path
 import re
-import subprocess
-import threading
 import time
+import unicodedata
 from typing import List, Dict, Any, Optional
 
 import requests
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Amazon Ads Dashboard")
 
@@ -35,27 +39,46 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-# These are the same Sponsored Products paths your project has been using.
+# SP v3 endpoints: all batch endpoints (campaigns/adGroups/productAds/keywords/campaignNegativeKeywords)
+# require the payload to be wrapped in a key-specific object, e.g. {"campaigns": [...]}.
+# The reporting endpoint uses plain application/json with a raw object body.
 ENDPOINTS = {
     "campaigns": "/sp/campaigns",
     "ad_groups": "/sp/adGroups",
     "product_ads": "/sp/productAds",
     "keywords": "/sp/keywords",
-    "negative_keywords": "/sp/negativeKeywords",
+    "negative_keywords": "/sp/campaignNegativeKeywords",
     "reports": "/reporting/reports",
 }
 
-STRING_FIELDS = {
-    "campaignId",
-    "adGroupId",
-    "keywordId",
-    "targetId",
-    "adId",
-    "id",
-    "asin",
-    "sku",
-    "startDate",
-    "endDate",
+# Amazon Ads SP v3 endpoints require vendor-specific Content-Type / Accept headers.
+# The reporting endpoint continues to use plain application/json.
+ENDPOINT_CONTENT_TYPES: Dict[str, str] = {
+    "/sp/campaigns": "application/vnd.spcampaign.v3+json",
+    "/sp/adGroups": "application/vnd.spadgroup.v3+json",
+    "/sp/productAds": "application/vnd.spproductad.v3+json",
+    "/sp/keywords": "application/vnd.spkeyword.v3+json",
+    "/sp/campaignNegativeKeywords": "application/vnd.spcampaignnegativekeyword.v3+json",
+}
+
+# SP v3 batch endpoints wrap request arrays and response items in these keys.
+# Request:  {"campaigns": [...]}
+# Response: {"campaigns": {"success": [{"campaign": {...}, "index": N}], "error": [...]}}
+ENDPOINT_BATCH_KEYS: Dict[str, str] = {
+    "/sp/campaigns": "campaigns",
+    "/sp/adGroups": "adGroups",
+    "/sp/productAds": "productAds",
+    "/sp/keywords": "keywords",
+    "/sp/campaignNegativeKeywords": "campaignNegativeKeywords",
+}
+
+# Maps batch key -> singular item key used inside each success entry of the response.
+BATCH_ITEM_KEYS: Dict[str, str] = {
+    "campaigns": "campaign",
+    "adGroups": "adGroup",
+    "productAds": "productAd",
+    "keywords": "keyword",
+    "campaignNegativeKeywords": "campaignNegativeKeyword",
 }
 
 STOPWORDS = {
@@ -64,81 +87,16 @@ STOPWORDS = {
     "safe", "kids", "pets", "beneficial", "nature", "way"
 }
 
-DATA_DIR = Path("data")
-LAUNCH_LOG_PATH = DATA_DIR / "campaign_launches.jsonl"
-OPTIMIZER_LOG_PATH = DATA_DIR / "optimizer_runs.jsonl"
-
-OPTIMIZATION_CHECKLIST = {
-    "negatives": [
-        "Add obvious mismatch negatives from the first search term report.",
-        "Add low-intent modifiers as phrase or exact negatives where irrelevant.",
-        "Maintain a shared negative list for repeated waste terms.",
-        "Review weekly and promote recurring waste queries to permanent negatives.",
-    ],
-    "bid_tiers": [
-        "Tier A: core high-intent terms, bid above baseline.",
-        "Tier B: category terms, keep at baseline bid.",
-        "Tier C: exploratory long-tail terms, bid below baseline.",
-        "Promote winners up one tier and demote costly non-converters.",
-    ],
-    "search_term_harvesting": [
-        "Pull search term reports every 3 to 7 days.",
-        "Promote converting queries into exact-match terms.",
-        "Reduce bid or negate queries beyond no-sale spend threshold.",
-        "Use broad and phrase for discovery, exact for efficiency.",
-    ],
-}
-
-BUDGET_GUARDRAILS = {
-    "min_daily_budget": 10.0,
-    "max_step_pct": 0.25,
-    "cooldown_hours": 48,
-    "weekly_change_cap_pct": 0.5,
-}
-
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-def auto_open_dashboard_enabled() -> bool:
-    # Keep browser auto-open to local dev only and allow opt-out.
-    if os.getenv("K_SERVICE"):
-        return False
-    flag = str(os.getenv("AUTO_OPEN_DASHBOARD", "true")).strip().lower()
-    return flag in {"1", "true", "yes", "y"}
-
-
-def open_dashboard_in_browser() -> None:
-    browser = os.getenv("BROWSER")
-    if not browser:
-        return
-
-    port = os.getenv("PORT", "8080")
-    url = f"http://127.0.0.1:{port}/"
-
-    try:
-        subprocess.Popen([browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
-
-@app.on_event("startup")
-def auto_open_dashboard_on_startup() -> None:
-    if auto_open_dashboard_enabled():
-        timer = threading.Timer(1.0, open_dashboard_in_browser)
-        timer.daemon = True
-        timer.start()
-
-
-# -----------------------------
-# Secrets / config
-# -----------------------------
 def get_secret(project_id: str, secret_id: str) -> str:
     from google.cloud import secretmanager
     client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
     response = client.access_secret_version(request={"name": name})
-    return response.payload.data.decode("utf-8")
+    return response.payload.data.decode("utf-8").strip()
 
 
 def load_env_or_secret(name: str, default: Optional[str] = None) -> str:
@@ -165,15 +123,12 @@ def optional_env_or_secret(name: str, default: Optional[str] = None) -> Optional
         return default
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def today_yyyymmdd() -> str:
-    return time.strftime("%Y%m%d")
+def today_iso_date() -> str:
+    return datetime.date.today().isoformat()
 
 
-def yyyymmdd_days_ago(days: int) -> str:
-    return time.strftime("%Y%m%d", time.localtime(time.time() - (days * 86400)))
+def iso_date_days_ago(days: int) -> str:
+    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
 
 
 def normalize(text: str) -> str:
@@ -182,20 +137,33 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def maybe_fix_mojibake(text: str) -> str:
-    """Repair common UTF-8-as-Latin-1 mojibake (for example: Natureâ€™s -> Nature's)."""
-    if not text:
-        return ""
+_UNICODE_TO_ASCII = {
+    "\u2018": "'",   # left single quotation mark
+    "\u2019": "'",   # right single quotation mark
+    "\u201c": '"',   # left double quotation mark
+    "\u201d": '"',   # right double quotation mark
+    "\u2013": "-",   # en dash
+    "\u2014": "-",   # em dash
+    "\u2026": "...", # horizontal ellipsis
+    "\u00ae": "",    # registered sign ®
+    "\u2122": "",    # trade mark sign ™
+}
 
-    suspicious_markers = ("Ã", "â", "Â")
-    if not any(marker in text for marker in suspicious_markers):
-        return text
 
-    try:
-        fixed = text.encode("latin-1").decode("utf-8")
-        return fixed
-    except Exception:
-        return text
+def sanitize_campaign_name(name: Optional[str]) -> str:
+    """Return a campaign name safe for the Amazon Ads API.
+
+    Decodes HTML entities, replaces common Unicode punctuation with ASCII
+    equivalents, strips remaining non-ASCII characters, and collapses
+    extra whitespace.
+    """
+    name = html.unescape(name or "")
+    for char, replacement in _UNICODE_TO_ASCII.items():
+        name = name.replace(char, replacement)
+    name = unicodedata.normalize("NFKD", name)
+    name = name.encode("ascii", errors="ignore").decode("ascii")
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
 
 
 def unique_in_order(items: List[str]) -> List[str]:
@@ -205,380 +173,6 @@ def unique_in_order(items: List[str]) -> List[str]:
         if item and item not in seen:
             seen.add(item)
             out.append(item)
-    return out
-
-
-def now_iso_utc() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def append_jsonl(path: Path, record: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-                if isinstance(row, dict):
-                    rows.append(row)
-            except json.JSONDecodeError:
-                continue
-    return rows
-
-
-def count_container_errors(payload: Any, container_key: str) -> int:
-    if not isinstance(payload, dict):
-        return 0
-    container = payload.get(container_key)
-    if not isinstance(container, dict):
-        return 0
-    errors = container.get("error")
-    return len(errors) if isinstance(errors, list) else 0
-
-
-def dedupe_keywords(keywords: List[str]) -> List[str]:
-    return unique_in_order([normalize(k) for k in keywords if normalize(k)])
-
-
-def build_campaign_launch_summary(
-    product: Dict[str, Any],
-    campaign_id: str,
-    ad_group_id: str,
-    product_ad_resp: Any,
-    seed_keywords: List[str],
-    created_keyword_rows: int,
-    campaign_resp: Any,
-    ad_group_resp: Any,
-    keywords_resp: Any,
-) -> Dict[str, Any]:
-    product_ad_id = ""
-    try:
-        product_ad_id = extract_first_id(product_ad_resp)
-    except Exception:
-        product_ad_id = ""
-
-    title = maybe_fix_mojibake(product.get("title", ""))
-    return {
-        "event_type": "campaign_launch",
-        "status": "success",
-        "launched_at_utc": now_iso_utc(),
-        "account": {
-            "product_id": product.get("product_id", ""),
-            "sku": product.get("sku", ""),
-            "asin": product.get("asin", ""),
-        },
-        "campaign": {
-            "campaign_id": campaign_id,
-            "ad_group_id": ad_group_id,
-            "name": title,
-            "daily_budget": round(float(product.get("suggested_budget", 0.0)), 2),
-            "default_bid": round(float(product.get("suggested_bid", 0.0)), 2),
-            "state": "enabled",
-        },
-        "creation_results": {
-            "campaign_errors": count_container_errors(campaign_resp, "campaigns"),
-            "ad_group_errors": count_container_errors(ad_group_resp, "adGroups"),
-            "product_ad_errors": count_container_errors(product_ad_resp, "productAds"),
-            "keyword_errors": count_container_errors(keywords_resp, "keywords"),
-            "keyword_success_count": created_keyword_rows,
-        },
-        "keyword_inputs": {
-            "seed_count": len(seed_keywords),
-            "deduplicated_seed_count": len(dedupe_keywords(seed_keywords)),
-        },
-        "ids": {
-            "product_ad_id": product_ad_id,
-        },
-        "quality_flags": {
-            "title_encoding_cleaned": title != product.get("title", ""),
-            "keyword_expansion_detected": created_keyword_rows > len(seed_keywords),
-            "expansion_note": f"{len(seed_keywords)} seed terms produced {created_keyword_rows} created keyword entries",
-        },
-    }
-
-
-def parse_iso_utc(value: str) -> Optional[datetime]:
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def budget_adjustment_recommendation(
-    current_budget: float,
-    target_acos: float,
-    acos: float,
-    budget_utilization: float,
-    clicks: int,
-    orders: int,
-    spend: float,
-    last_adjusted_at: Optional[str],
-    weekly_change_pct: float,
-    no_sale_click_threshold: int = 20,
-) -> Dict[str, Any]:
-    min_budget = float(BUDGET_GUARDRAILS["min_daily_budget"])
-    max_step_pct = float(BUDGET_GUARDRAILS["max_step_pct"])
-    cooldown_hours = int(BUDGET_GUARDRAILS["cooldown_hours"])
-    weekly_cap_pct = float(BUDGET_GUARDRAILS["weekly_change_cap_pct"])
-
-    if current_budget <= 0:
-        current_budget = min_budget
-
-    reason = "hold"
-    action = "hold"
-    requested_step_pct = 0.0
-    now = datetime.now(timezone.utc)
-
-    if last_adjusted_at:
-        dt = parse_iso_utc(last_adjusted_at)
-        if dt is not None:
-            hours_since = (now - dt).total_seconds() / 3600
-            if hours_since < cooldown_hours:
-                return {
-                    "action": "hold",
-                    "reason": f"cooldown_active_{cooldown_hours}h",
-                    "recommended_budget": round(current_budget, 2),
-                    "step_pct": 0.0,
-                    "guardrails": BUDGET_GUARDRAILS,
-                }
-
-    if budget_utilization >= 0.9 and target_acos > 0 and acos <= target_acos and clicks >= 20:
-        action = "increase"
-        reason = "budget_capped_and_acos_on_target"
-        requested_step_pct = 0.15
-    elif target_acos > 0 and acos > (1.25 * target_acos) and spend >= current_budget and clicks >= 20:
-        action = "decrease"
-        reason = "acos_above_threshold"
-        requested_step_pct = -0.10
-    elif orders == 0 and clicks >= no_sale_click_threshold:
-        action = "decrease"
-        reason = "no_orders_after_click_threshold"
-        requested_step_pct = -0.15
-
-    capped_step_pct = max(-max_step_pct, min(max_step_pct, requested_step_pct))
-
-    if action != "hold" and abs(weekly_change_pct + capped_step_pct) > weekly_cap_pct:
-        return {
-            "action": "hold",
-            "reason": "weekly_change_cap_reached",
-            "recommended_budget": round(current_budget, 2),
-            "step_pct": 0.0,
-            "guardrails": BUDGET_GUARDRAILS,
-        }
-
-    new_budget = current_budget * (1.0 + capped_step_pct)
-    new_budget = max(min_budget, new_budget)
-
-    return {
-        "action": action,
-        "reason": reason,
-        "recommended_budget": round(new_budget, 2),
-        "step_pct": round(capped_step_pct, 4),
-        "guardrails": BUDGET_GUARDRAILS,
-    }
-
-
-def campaign_budget_history(campaign_id: str) -> List[Dict[str, Any]]:
-    events = read_jsonl(LAUNCH_LOG_PATH)
-    out: List[Dict[str, Any]] = []
-    for event in events:
-        if event.get("event_type") != "budget_adjustment":
-            continue
-        if str(event.get("campaign_id", "")) != str(campaign_id):
-            continue
-        out.append(event)
-    return out
-
-
-def last_budget_adjusted_at(campaign_id: str) -> Optional[str]:
-    history = campaign_budget_history(campaign_id)
-    if not history:
-        return None
-    return str(history[-1].get("adjusted_at_utc") or "") or None
-
-
-def weekly_change_pct_so_far(campaign_id: str) -> float:
-    now = datetime.now(timezone.utc)
-    total = 0.0
-    for event in campaign_budget_history(campaign_id):
-        dt = parse_iso_utc(str(event.get("adjusted_at_utc", "")))
-        if dt is None:
-            continue
-        if (now - dt).total_seconds() > 7 * 86400:
-            continue
-        try:
-            total += float(event.get("step_pct", 0.0))
-        except Exception:
-            continue
-    return total
-
-
-def launch_log_export_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for row in rows:
-        if row.get("event_type") != "campaign_launch":
-            continue
-        campaign = row.get("campaign", {}) if isinstance(row.get("campaign"), dict) else {}
-        account = row.get("account", {}) if isinstance(row.get("account"), dict) else {}
-        creation = row.get("creation_results", {}) if isinstance(row.get("creation_results"), dict) else {}
-        out.append({
-            "launched_at_utc": row.get("launched_at_utc", ""),
-            "product_id": account.get("product_id", ""),
-            "sku": account.get("sku", ""),
-            "asin": account.get("asin", ""),
-            "campaign_id": campaign.get("campaign_id", ""),
-            "ad_group_id": campaign.get("ad_group_id", ""),
-            "daily_budget": campaign.get("daily_budget", ""),
-            "default_bid": campaign.get("default_bid", ""),
-            "keyword_success_count": creation.get("keyword_success_count", 0),
-            "keyword_errors": creation.get("keyword_errors", 0),
-        })
-    return out
-
-
-def optimizer_log_export_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for row in rows:
-        summary = row.get("summary_counts", {}) if isinstance(row.get("summary_counts"), dict) else {}
-        settings = row.get("settings", {}) if isinstance(row.get("settings"), dict) else {}
-        out.append({
-            "ran_at_utc": row.get("ran_at_utc", ""),
-            "report_id": row.get("report_id", ""),
-            "start_date": row.get("report_window", {}).get("start_date", "") if isinstance(row.get("report_window"), dict) else "",
-            "end_date": row.get("report_window", {}).get("end_date", "") if isinstance(row.get("report_window"), dict) else "",
-            "rows": summary.get("rows", 0),
-            "winners": summary.get("winners", 0),
-            "negatives": summary.get("negatives", 0),
-            "hold": summary.get("hold", 0),
-            "apply_negatives_live": settings.get("apply_negatives_live", False),
-            "apply_winners_live": settings.get("apply_winners_live", False),
-        })
-    return out
-
-
-def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
-    if not rows:
-        return b""
-    headers = list(rows[0].keys())
-    stream = io.StringIO()
-    writer = csv.DictWriter(stream, fieldnames=headers)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow(row)
-    return stream.getvalue().encode("utf-8")
-
-
-def parse_filter_date(value: str) -> Optional[date]:
-    value = (value or "").strip()
-    if not value:
-        return None
-
-    candidates = [value]
-    if "T" in value:
-        candidates.append(value.split("T", 1)[0])
-
-    for candidate in candidates:
-        try:
-            return datetime.strptime(candidate, "%Y-%m-%d").date()
-        except ValueError:
-            pass
-        try:
-            return datetime.strptime(candidate, "%Y%m%d").date()
-        except ValueError:
-            pass
-    return None
-
-
-def parse_event_date(value: str) -> Optional[date]:
-    dt = parse_iso_utc(value)
-    if dt is not None:
-        return dt.date()
-    return parse_filter_date(value)
-
-
-def in_date_range(event_date: Optional[date], start_date: Optional[date], end_date: Optional[date]) -> bool:
-    if event_date is None:
-        return False
-    if start_date and event_date < start_date:
-        return False
-    if end_date and event_date > end_date:
-        return False
-    return True
-
-
-def filter_launch_log_rows(
-    rows: List[Dict[str, Any]],
-    start_date_value: str,
-    end_date_value: str,
-    campaign_id: str,
-) -> List[Dict[str, Any]]:
-    start_date = parse_filter_date(start_date_value)
-    end_date = parse_filter_date(end_date_value)
-    campaign_filter = (campaign_id or "").strip()
-
-    out: List[Dict[str, Any]] = []
-    for row in rows:
-        if row.get("event_type") != "campaign_launch":
-            continue
-        event_date = parse_event_date(str(row.get("launched_at_utc", "")))
-        if (start_date or end_date) and not in_date_range(event_date, start_date, end_date):
-            continue
-        this_campaign_id = str(row.get("campaign", {}).get("campaign_id", "")) if isinstance(row.get("campaign"), dict) else ""
-        if campaign_filter and this_campaign_id != campaign_filter:
-            continue
-        out.append(row)
-    return out
-
-
-def optimizer_run_campaign_ids(row: Dict[str, Any]) -> List[str]:
-    ids: List[str] = []
-    settings = row.get("settings") if isinstance(row.get("settings"), dict) else {}
-    campaign_filter = str(settings.get("campaign_filter", "")).strip() if isinstance(settings, dict) else ""
-    if campaign_filter:
-        ids.append(campaign_filter)
-
-    live_actions = row.get("live_actions") if isinstance(row.get("live_actions"), dict) else {}
-    negatives = live_actions.get("negative_terms_added") if isinstance(live_actions, dict) else []
-    if isinstance(negatives, list):
-        for item in negatives:
-            if not isinstance(item, dict):
-                continue
-            campaign_id = str(item.get("campaign_id", "")).strip()
-            if campaign_id:
-                ids.append(campaign_id)
-    return unique_in_order(ids)
-
-
-def filter_optimizer_rows(
-    rows: List[Dict[str, Any]],
-    start_date_value: str,
-    end_date_value: str,
-    campaign_id: str,
-) -> List[Dict[str, Any]]:
-    start_date = parse_filter_date(start_date_value)
-    end_date = parse_filter_date(end_date_value)
-    campaign_filter = (campaign_id or "").strip()
-
-    out: List[Dict[str, Any]] = []
-    for row in rows:
-        event_date = parse_event_date(str(row.get("ran_at_utc", "")))
-        if (start_date or end_date) and not in_date_range(event_date, start_date, end_date):
-            continue
-        if campaign_filter:
-            campaign_ids = optimizer_run_campaign_ids(row)
-            if campaign_filter not in campaign_ids:
-                continue
-        out.append(row)
     return out
 
 
@@ -698,22 +292,22 @@ def load_products() -> List[Dict[str, str]]:
     r = requests.get(PRODUCTS_CSV_URL, timeout=30)
     r.raise_for_status()
     reader = csv.DictReader(io.StringIO(r.text))
-    return [{k.strip(): maybe_fix_mojibake((v or "").strip()) for k, v in row.items()} for row in reader]
+    return [{k.strip(): (v or "").strip() for k, v in row.items()} for row in reader]
 
 
 def normalized_product(product: Dict[str, str]) -> Dict[str, Any]:
     return {
-        "product_id": maybe_fix_mojibake(product.get("Product_ID", "")),
-        "sku": maybe_fix_mojibake(product.get("SKU", "")),
-        "asin": maybe_fix_mojibake(product.get("ASIN", "")),
-        "title": maybe_fix_mojibake(product.get("Title", "")),
-        "price": maybe_fix_mojibake(product.get("Selling_Price", "")),
+        "product_id": product.get("Product_ID", ""),
+        "sku": product.get("SKU", ""),
+        "asin": product.get("ASIN", ""),
+        "title": product.get("Title", ""),
+        "price": product.get("Selling_Price", ""),
         "active": truthy(product.get("Active", "TRUE")),
-        "category": maybe_fix_mojibake(product.get("Category", "")),
-        "keywords": maybe_fix_mojibake(product.get("Keywords", "")),
-        "research_keywords": maybe_fix_mojibake(product.get("Research_Keywords", "")),
-        "priority_level": maybe_fix_mojibake(product.get("Priority_Level", "")),
-        "priority_score": maybe_fix_mojibake(product.get("Priority_Score", "")),
+        "category": product.get("Category", ""),
+        "keywords": product.get("Keywords", ""),
+        "research_keywords": product.get("Research_Keywords", ""),
+        "priority_level": product.get("Priority_Level", ""),
+        "priority_score": product.get("Priority_Score", ""),
         "suggested_budget": budget_from_price(product.get("Selling_Price", "")),
         "suggested_bid": bid_from_price(product.get("Selling_Price", "")),
         "raw": product,
@@ -729,110 +323,77 @@ def find_product(key: str) -> Dict[str, Any]:
     raise HTTPException(status_code=404, detail="Product not found")
 
 
-def extract_first_id(payload: Any) -> str:
-    id_keys = ("campaignId", "adGroupId", "keywordId", "adId", "id")
-
-    if isinstance(payload, list) and payload:
-        row = payload[0]
-        if isinstance(row, dict):
-            for key in id_keys:
-                if key in row and row[key] not in (None, ""):
-                    return str(row[key]).strip()
-
+def extract_first_id(payload: Any) -> int:
+    # SP v3 batch response: {"campaigns": {"success": [{"campaign": {"campaignId": ...}, "index": 0}], "error": []}}
+    # Also handles legacy flat-list or flat-dict responses defensively.
     if isinstance(payload, dict):
-        grouped_keys = ("campaigns", "adGroups", "productAds", "keywords", "targets")
-        for group_key in grouped_keys:
-            group = payload.get(group_key)
-            if not isinstance(group, dict):
-                continue
-            success = group.get("success")
-            if not isinstance(success, list) or not success:
-                continue
-            row = success[0]
-            if not isinstance(row, dict):
-                continue
-
-            for key in id_keys:
-                if key in row and row[key] not in (None, ""):
-                    return str(row[key]).strip()
-
-            for nested_value in row.values():
-                if not isinstance(nested_value, dict):
-                    continue
-                for key in id_keys:
-                    if key in nested_value and nested_value[key] not in (None, ""):
-                        return str(nested_value[key]).strip()
-
+        # Try SP v3 wrapped format: {batchKey: {success: [{itemKey: {id: ...}}]}}
+        for batch_key, item_key in BATCH_ITEM_KEYS.items():
+            if batch_key in payload:
+                inner = payload[batch_key]
+                if isinstance(inner, dict) and "success" in inner:
+                    successes = inner["success"]
+                    if isinstance(successes, list) and successes:
+                        item = successes[0].get(item_key, successes[0])
+                        for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+                            if key in item:
+                                return int(item[key])
+                elif isinstance(inner, list) and inner:
+                    item = inner[0]
+                    for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+                        if key in item:
+                            return int(item[key])
+        # Flat dict fallback
+        for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+            if key in payload:
+                return int(payload[key])
+    elif isinstance(payload, list) and payload:
+        row = payload[0]
+        for key in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+            if key in row:
+                return int(row[key])
     raise RuntimeError(f"No ID found in payload: {payload}")
 
 
-def extract_success_rows(payload: Any, container_key: str) -> List[Dict[str, Any]]:
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
-
-    if isinstance(payload, dict):
-        container = payload.get(container_key)
-        if isinstance(container, dict):
-            success = container.get("success")
-            if isinstance(success, list):
-                return [row for row in success if isinstance(row, dict)]
-
-    return []
-
-
-def coerce_string_fields(payload: Any) -> Any:
-    if isinstance(payload, list):
-        return [coerce_string_fields(item) for item in payload]
-    if isinstance(payload, dict):
-        out: Dict[str, Any] = {}
-        for key, value in payload.items():
-            if key in STRING_FIELDS and value not in (None, ""):
-                out[key] = str(value).strip()
-            else:
-                out[key] = coerce_string_fields(value)
-        return out
-    return payload
-
-
-def keyword_rows(keywords: List[str], ad_group_id: str, bid: float) -> List[Dict[str, Any]]:
+def keyword_rows(keywords: List[str], campaign_id: int, ad_group_id: int, bid: float) -> List[Dict[str, Any]]:
     rows = []
-    for kw in dedupe_keywords(keywords):
+    for kw in keywords:
         rows.append({
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
             "keywordText": kw,
-            "matchType": "exact",
-            "state": "enabled",
+            "matchType": "EXACT",
+            "state": "ENABLED",
             "bid": round(bid * 1.15, 2),
         })
         rows.append({
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
             "keywordText": kw,
-            "matchType": "phrase",
-            "state": "enabled",
-            "bid": round(bid * 1.00, 2),
+            "matchType": "PHRASE",
+            "state": "ENABLED",
+            "bid": round(bid, 2),
         })
         rows.append({
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
             "keywordText": kw,
-            "matchType": "broad",
-            "state": "enabled",
+            "matchType": "BROAD",
+            "state": "ENABLED",
             "bid": round(bid * 0.85, 2),
         })
     return rows
 
 
-def negative_keyword_rows(negatives: List[str], campaign_id: str, ad_group_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict[str, Any]]:
     rows = []
     for term in negatives:
-        row = {
-            "campaignId": campaign_id,
+        rows.append({
+            "campaignId": str(campaign_id),
             "keywordText": term,
-            "state": "enabled",
             "matchType": "negativeExact",
-        }
-        if ad_group_id is not None:
-            row["adGroupId"] = ad_group_id
-        rows.append(row)
+            "state": "ENABLED",
+        })
     return rows
 
 
@@ -868,15 +429,6 @@ def text(row: Dict[str, Any], keys: List[str], default: str = "") -> str:
     return default
 
 
-def id_text(row: Dict[str, Any], keys: List[str], default: str = "") -> str:
-    for key in keys:
-        if key in row and row[key] not in (None, ""):
-            value = str(row[key]).strip()
-            if value:
-                return value
-    return default
-
-
 def classify_terms(
     rows: List[Dict[str, Any]],
     min_clicks_for_negative: int = 20,
@@ -888,8 +440,8 @@ def classify_terms(
 
     for row in rows:
         term = text(row, ["Customer Search Term", "searchTerm", "Search Term", "customer_search_term"])
-        campaign_id = id_text(row, ["Campaign Id", "campaignId"], "")
-        ad_group_id = id_text(row, ["Ad Group Id", "adGroupId"], "")
+        campaign_id = int(num(row, ["Campaign Id", "campaignId"], 0))
+        ad_group_id = int(num(row, ["Ad Group Id", "adGroupId"], 0))
         clicks = int(num(row, ["Clicks", "clicks"], 0))
         cost = num(row, ["Spend", "Cost", "cost", "spend"], 0.0)
         sales = num(row, ["7 Day Total Sales", "14 Day Total Sales", "Sales", "sales", "sales7d"], 0.0)
@@ -928,24 +480,28 @@ def classify_terms(
 def verify_internal_token(authorization: Optional[str]) -> None:
     required = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN")
     if not required:
-        return
+        raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN must be configured")
+
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     supplied = authorization.replace("Bearer ", "", 1).strip()
-    if supplied != required:
+    if not hmac.compare_digest(supplied, required):
         raise HTTPException(status_code=403, detail="Invalid bearer token")
 
 
-# -----------------------------
-# Amazon Ads live client
-# -----------------------------
 class AmazonAdsClient:
     def __init__(self):
-        self.client_id = load_env_or_secret("AMAZON_ADS_CLIENT_ID")
-        self.client_secret = load_env_or_secret("AMAZON_ADS_CLIENT_SECRET")
-        self.refresh_token = load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN")
-        self.profile_id = load_env_or_secret("AMAZON_ADS_PROFILE_ID")
-        self.region = load_env_or_secret("AMAZON_ADS_REGION", "na").lower()
+        self.client_id = load_env_or_secret("AMAZON_ADS_CLIENT_ID").strip()
+        self.client_secret = load_env_or_secret("AMAZON_ADS_CLIENT_SECRET").strip()
+        self.refresh_token = load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN").strip()
+        self.profile_id = load_env_or_secret("AMAZON_ADS_PROFILE_ID").strip()
+        self.region = load_env_or_secret("AMAZON_ADS_REGION", "na").strip().lower()
+
+        if self.region and (self.region[0] in ("[", "-") or "\n" in self.region):
+            raise RuntimeError(
+                f"AMAZON_ADS_REGION appears to contain a list or multi-line value: {self.region!r}. "
+                "Expected a scalar string: na, eu, or fe."
+            )
 
         if self.region not in BASE_URLS:
             raise RuntimeError("AMAZON_ADS_REGION must be na, eu, or fe")
@@ -972,30 +528,51 @@ class AmazonAdsClient:
             raise RuntimeError(f"Access token missing from response: {data}")
         return token
 
-    def headers(self) -> Dict[str, str]:
+    def headers(self, content_type: str = "application/json") -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.access_token}",
             "Amazon-Advertising-API-ClientId": self.client_id,
             "Amazon-Advertising-API-Scope": self.profile_id,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Content-Type": content_type,
+            "Accept": content_type,
         }
+
+    def _content_type_for(self, endpoint: str) -> str:
+        for path, ct in ENDPOINT_CONTENT_TYPES.items():
+            if endpoint.startswith(path):
+                return ct
+        return "application/json"
+
+    def _batch_key_for(self, endpoint: str) -> Optional[str]:
+        return ENDPOINT_BATCH_KEYS.get(endpoint)
 
     def post(self, endpoint: str, body: Any) -> Any:
         url = f"{self.base_url}{endpoint}"
-        resp = self.session.post(
-            url,
-            headers=self.headers(),
-            json=coerce_string_fields(body),
-            timeout=60,
-        )
+        content_type = self._content_type_for(endpoint)
+
+        # SP v3 batch endpoints require the list to be wrapped in a key-specific object,
+        # e.g. {"campaigns": [...]} rather than a raw JSON array.
+        batch_key = self._batch_key_for(endpoint)
+        if batch_key and isinstance(body, list):
+            body = {batch_key: body}
+
+        logger.info(f"POST to {endpoint}")
+        logger.info(f"Body preview: {str(body)[:300]}")
+        resp = self.session.post(url, headers=self.headers(content_type), json=body, timeout=60)
+        
+        logger.info(f"Status: {resp.status_code}")
         if not resp.ok:
+            logger.error(f"Error response: {resp.text}")
             raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text}")
-        return resp.json() if resp.text.strip() else None
+        
+        result = resp.json() if resp.text.strip() else None
+        logger.info(f"Response preview: {str(result)[:300]}")
+        return result
 
     def get(self, endpoint: str) -> Any:
         url = f"{self.base_url}{endpoint}"
-        resp = self.session.get(url, headers=self.headers(), timeout=60)
+        content_type = self._content_type_for(endpoint)
+        resp = self.session.get(url, headers=self.headers(content_type), timeout=60)
         if not resp.ok:
             raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text}")
         return resp.json() if resp.text.strip() else None
@@ -1008,22 +585,21 @@ class AmazonAdsClient:
 
     def request_sp_search_term_report(self, start_date: str, end_date: str) -> Any:
         body = {
-            "name": f"sp-search-term-{start_date}-{end_date}",
             "startDate": start_date,
             "endDate": end_date,
             "configuration": {
                 "adProduct": "SPONSORED_PRODUCTS",
-                "reportTypeId": "spSearchTerm",
+                "groupBy": ["searchTerm"],
                 "columns": [
                     "campaignId",
                     "adGroupId",
-                    "keywordId",
                     "searchTerm",
                     "clicks",
                     "cost",
                     "sales7d",
                     "purchases7d",
                 ],
+                "reportTypeId": "spSearchTerm",
                 "timeUnit": "SUMMARY",
                 "format": "GZIP_JSON",
             },
@@ -1036,72 +612,49 @@ class AmazonAdsClient:
 
 def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     client = AmazonAdsClient()
-    start_date = today_yyyymmdd()
-    generated_keywords = dedupe_keywords(generate_keywords(product))
-    keyword_payload = keyword_rows(generated_keywords, "__pending_ad_group__", product["suggested_bid"])
+    start_date = today_iso_date()
+    generated_keywords = generate_keywords(product)
 
-    campaign_payload = [{
-        "name": f"{product['title']} | MANUAL | {start_date}",
-        "campaignType": "sponsoredProducts",
-        "targetingType": "manual",
-        "state": "enabled",
-        "dailyBudget": round(product["suggested_budget"], 2),
+    logger.info(f"Creating campaign for SKU: {product['sku']}")
+
+    campaign_payload = {
+        "name": f"{sanitize_campaign_name(product['title'])[:100]} | MANUAL | {start_date}",
+        "targetingType": "MANUAL",
+        "state": "ENABLED",
+        "budget": {
+            "budget": round(product["suggested_budget"], 2),
+            "budgetType": "DAILY",
+        },
         "startDate": start_date,
-    }]
-    campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
+    }
+    
+    campaign_resp = client.post(ENDPOINTS["campaigns"], [campaign_payload])
     campaign_id = extract_first_id(campaign_resp)
 
-    ad_group_payload = [{
+    ad_group_payload = {
         "name": "Main Ad Group",
-        "campaignId": campaign_id,
-        "state": "enabled",
+        "campaignId": str(campaign_id),
+        "state": "ENABLED",
         "defaultBid": round(product["suggested_bid"], 2),
-    }]
-    ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
+    }
+    
+    ad_group_resp = client.post(ENDPOINTS["ad_groups"], [ad_group_payload])
     ad_group_id = extract_first_id(ad_group_resp)
 
-    product_ad_payload = [{
-        "campaignId": campaign_id,
-        "adGroupId": ad_group_id,
+    product_ad_payload = {
+        "campaignId": str(campaign_id),
+        "adGroupId": str(ad_group_id),
         "asin": product["asin"],
         "sku": product["sku"],
-        "state": "enabled",
-    }]
-    product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
+        "state": "ENABLED",
+    }
+    
+    product_ad_resp = client.post(ENDPOINTS["product_ads"], [product_ad_payload])
 
     keywords_resp = []
     if generated_keywords:
-        keyword_payload = keyword_rows(generated_keywords, ad_group_id, product["suggested_bid"])
-        keywords_resp = client.post(
-            ENDPOINTS["keywords"],
-            keyword_payload
-        )
-
-    keyword_success_rows = extract_success_rows(keywords_resp, "keywords")
-    keyword_errors = []
-    if isinstance(keywords_resp, dict):
-        container = keywords_resp.get("keywords")
-        if isinstance(container, dict) and isinstance(container.get("error"), list):
-            keyword_errors = container.get("error")
-
-    match_type_breakdown = {
-        "exact": len(generated_keywords),
-        "phrase": len(generated_keywords),
-        "broad": len(generated_keywords),
-    }
-
-    launch_summary = build_campaign_launch_summary(
-        product=product,
-        campaign_id=campaign_id,
-        ad_group_id=ad_group_id,
-        product_ad_resp=product_ad_resp,
-        seed_keywords=generated_keywords,
-        created_keyword_rows=len(keyword_success_rows),
-        campaign_resp=campaign_resp,
-        ad_group_resp=ad_group_resp,
-        keywords_resp=keywords_resp,
-    )
-    append_jsonl(LAUNCH_LOG_PATH, launch_summary)
+        kw_rows = keyword_rows(generated_keywords, campaign_id, ad_group_id, product["suggested_bid"])
+        keywords_resp = client.post(ENDPOINTS["keywords"], kw_rows)
 
     return {
         "message": "Live campaign created",
@@ -1114,24 +667,13 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "campaign_id": campaign_id,
         "ad_group_id": ad_group_id,
         "keywords": generated_keywords,
-        "keyword_summary": {
-            "base_keywords_count": len(generated_keywords),
-            "rows_submitted": len(keyword_payload),
-            "rows_created": len(keyword_success_rows),
-            "rows_failed": len(keyword_errors),
-            "match_type_breakdown": match_type_breakdown,
-        },
         "campaign_response": campaign_resp,
         "ad_group_response": ad_group_resp,
         "product_ad_response": product_ad_resp,
         "keywords_response": keywords_resp,
-        "launch_summary": launch_summary,
     }
 
 
-# -----------------------------
-# Routes
-# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request})
@@ -1173,232 +715,8 @@ def api_create_campaign(payload: Dict[str, Any]):
     try:
         return create_live_campaign_for_product(product)
     except Exception as e:
+        logger.error("Campaign creation failed", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/optimization-checklist")
-def api_optimization_checklist():
-    return {
-        "message": "Post-launch optimization checklist",
-        "sections": OPTIMIZATION_CHECKLIST,
-        "budget_guardrails": BUDGET_GUARDRAILS,
-    }
-
-
-@app.get("/api/launch-logs")
-def api_launch_logs(
-    limit: int = 25,
-    start_date: str = "",
-    end_date: str = "",
-    campaign_id: str = "",
-):
-    rows = read_jsonl(LAUNCH_LOG_PATH)
-    campaign_rows = filter_launch_log_rows(rows, start_date, end_date, campaign_id)
-    if limit > 0:
-        campaign_rows = campaign_rows[-limit:]
-    return {
-        "count": len(campaign_rows),
-        "logs": list(reversed(campaign_rows)),
-    }
-
-
-@app.get("/api/launch-logs/latest")
-def api_latest_launch_log(campaign_id: str = ""):
-    rows = read_jsonl(LAUNCH_LOG_PATH)
-    campaign_rows = filter_launch_log_rows(rows, "", "", campaign_id)
-    if not campaign_rows:
-        return {"found": False, "log": None}
-    return {"found": True, "log": campaign_rows[-1]}
-
-
-@app.get("/api/export/launch-logs.json")
-def api_export_launch_logs_json(
-    limit: int = 200,
-    start_date: str = "",
-    end_date: str = "",
-    campaign_id: str = "",
-):
-    rows = read_jsonl(LAUNCH_LOG_PATH)
-    campaign_rows = filter_launch_log_rows(rows, start_date, end_date, campaign_id)
-    if limit > 0:
-        campaign_rows = campaign_rows[-limit:]
-    payload = json.dumps({"count": len(campaign_rows), "logs": campaign_rows}, ensure_ascii=False, indent=2)
-    return Response(
-        content=payload,
-        media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=launch_logs.json"},
-    )
-
-
-@app.get("/api/export/launch-logs.csv")
-def api_export_launch_logs_csv(
-    limit: int = 200,
-    start_date: str = "",
-    end_date: str = "",
-    campaign_id: str = "",
-):
-    rows = read_jsonl(LAUNCH_LOG_PATH)
-    campaign_rows = filter_launch_log_rows(rows, start_date, end_date, campaign_id)
-    if limit > 0:
-        campaign_rows = campaign_rows[-limit:]
-    csv_rows = launch_log_export_rows(campaign_rows)
-    return Response(
-        content=rows_to_csv_bytes(csv_rows),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=launch_logs.csv"},
-    )
-
-
-@app.get("/api/optimizer-runs")
-def api_optimizer_runs(
-    limit: int = 25,
-    start_date: str = "",
-    end_date: str = "",
-    campaign_id: str = "",
-):
-    rows = read_jsonl(OPTIMIZER_LOG_PATH)
-    rows = filter_optimizer_rows(rows, start_date, end_date, campaign_id)
-    if limit > 0:
-        rows = rows[-limit:]
-    return {
-        "count": len(rows),
-        "runs": list(reversed(rows)),
-    }
-
-
-@app.get("/api/export/optimizer-runs.json")
-def api_export_optimizer_runs_json(
-    limit: int = 200,
-    start_date: str = "",
-    end_date: str = "",
-    campaign_id: str = "",
-):
-    rows = read_jsonl(OPTIMIZER_LOG_PATH)
-    rows = filter_optimizer_rows(rows, start_date, end_date, campaign_id)
-    if limit > 0:
-        rows = rows[-limit:]
-    payload = json.dumps({"count": len(rows), "runs": rows}, ensure_ascii=False, indent=2)
-    return Response(
-        content=payload,
-        media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=optimizer_runs.json"},
-    )
-
-
-@app.get("/api/export/optimizer-runs.csv")
-def api_export_optimizer_runs_csv(
-    limit: int = 200,
-    start_date: str = "",
-    end_date: str = "",
-    campaign_id: str = "",
-):
-    rows = read_jsonl(OPTIMIZER_LOG_PATH)
-    rows = filter_optimizer_rows(rows, start_date, end_date, campaign_id)
-    if limit > 0:
-        rows = rows[-limit:]
-    csv_rows = optimizer_log_export_rows(rows)
-    return Response(
-        content=rows_to_csv_bytes(csv_rows),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=optimizer_runs.csv"},
-    )
-
-
-@app.post("/api/recommend-budget-adjustment")
-def api_recommend_budget_adjustment(payload: Dict[str, Any]):
-    campaign_id = str(payload.get("campaign_id", "")).strip()
-    if not campaign_id:
-        raise HTTPException(status_code=400, detail="Provide campaign_id")
-
-    try:
-        current_budget = float(payload.get("current_budget"))
-        target_acos = float(payload.get("target_acos"))
-        acos = float(payload.get("acos"))
-        budget_utilization = float(payload.get("budget_utilization"))
-        clicks = int(payload.get("clicks", 0))
-        orders = int(payload.get("orders", 0))
-        spend = float(payload.get("spend", 0.0))
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid numeric input: {exc}")
-
-    recommendation = budget_adjustment_recommendation(
-        current_budget=current_budget,
-        target_acos=target_acos,
-        acos=acos,
-        budget_utilization=budget_utilization,
-        clicks=clicks,
-        orders=orders,
-        spend=spend,
-        last_adjusted_at=last_budget_adjusted_at(campaign_id),
-        weekly_change_pct=weekly_change_pct_so_far(campaign_id),
-        no_sale_click_threshold=int(payload.get("no_sale_click_threshold", 20)),
-    )
-
-    return {
-        "campaign_id": campaign_id,
-        "inputs": {
-            "current_budget": current_budget,
-            "target_acos": target_acos,
-            "acos": acos,
-            "budget_utilization": budget_utilization,
-            "clicks": clicks,
-            "orders": orders,
-            "spend": spend,
-        },
-        "recommendation": recommendation,
-    }
-
-
-@app.post("/api/adjust-campaign-budget")
-def api_adjust_campaign_budget(payload: Dict[str, Any]):
-    campaign_id = str(payload.get("campaign_id", "")).strip()
-    if not campaign_id:
-        raise HTTPException(status_code=400, detail="Provide campaign_id")
-
-    apply_live = bool(payload.get("apply_live", False))
-
-    recommendation_response = api_recommend_budget_adjustment(payload)
-    recommendation = recommendation_response["recommendation"]
-    current_budget = float(recommendation_response["inputs"]["current_budget"])
-    new_budget = float(recommendation["recommended_budget"])
-    step_pct = float(recommendation["step_pct"])
-
-    applied = False
-    api_response = None
-
-    if apply_live and recommendation["action"] != "hold":
-        client = AmazonAdsClient()
-        body = [{
-            "campaignId": campaign_id,
-            "dailyBudget": round(new_budget, 2),
-        }]
-        api_response = client.post(ENDPOINTS["campaigns"], body)
-        applied = True
-
-    event = {
-        "event_type": "budget_adjustment",
-        "adjusted_at_utc": now_iso_utc(),
-        "campaign_id": campaign_id,
-        "old_budget": round(current_budget, 2),
-        "new_budget": round(new_budget, 2),
-        "step_pct": step_pct,
-        "action": recommendation["action"],
-        "reason": recommendation["reason"],
-        "applied_live": applied,
-    }
-    append_jsonl(LAUNCH_LOG_PATH, event)
-
-    return {
-        "campaign_id": campaign_id,
-        "recommendation": recommendation,
-        "applied_live": applied,
-        "budget_change": {
-            "old_budget": round(current_budget, 2),
-            "new_budget": round(new_budget, 2),
-            "step_pct": step_pct,
-        },
-        "api_response": api_response,
-    }
 
 
 @app.post("/api/bulk-create-campaigns")
@@ -1456,177 +774,96 @@ def api_bulk_create(payload: Dict[str, Any]):
     }
 
 
+MAX_REPORT_POLL_ATTEMPTS = 30  # 30 × 10 s = 5 minutes
+
+
 @app.post("/api/run-daily-optimization")
 def api_run_optimizer(
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
 ):
-    # keep this safe by default
     verify_internal_token(authorization)
 
     apply_negatives_live = payload.get("apply_negatives_live", False)
     apply_winners_live = payload.get("apply_winners_live", False)
-    winner_bid = float(payload.get("winner_bid", 0.9))
-
-    min_clicks_for_negative = int(payload.get("min_clicks_for_negative", 20))
-    min_orders_for_winner = int(payload.get("min_orders_for_winner", 2))
-    max_acos_for_winner = float(payload.get("max_acos_for_winner", 0.35))
-    min_clicks_for_winner = int(payload.get("min_clicks_for_winner", 8))
-    campaign_filter = str(payload.get("campaign_id", "")).strip()
 
     try:
-        client = AmazonAdsClient()
+        winner_bid = float(payload.get("winner_bid", 0.9))
+        lookback_days = int(payload.get("lookback_days", 14))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid parameter value: {exc}") from exc
 
-        end_date = payload.get("end_date") or yyyymmdd_days_ago(1)
-        start_date = payload.get("start_date") or yyyymmdd_days_ago(8)
+    client = AmazonAdsClient()
+    start_date = iso_date_days_ago(lookback_days)
+    end_date = today_iso_date()
 
-        report_job = client.request_sp_search_term_report(start_date=start_date, end_date=end_date)
+    # Request search term report
+    report_resp = client.request_sp_search_term_report(start_date, end_date)
+    report_id = (report_resp or {}).get("reportId")
+    if not report_id:
+        logger.error("No reportId in response: %s", report_resp)
+        raise HTTPException(status_code=500, detail="Report request did not return a report ID")
 
-        report_id = None
-        if isinstance(report_job, dict):
-            report_id = report_job.get("reportId") or report_job.get("id")
-        if not report_id and isinstance(report_job, list) and report_job:
-            report_id = report_job[0].get("reportId") or report_job[0].get("id")
-        if not report_id:
-            raise RuntimeError(f"Could not determine report ID from response: {report_job}")
+    # Poll until the report is ready (up to 5 minutes)
+    status_resp: Dict[str, Any] = {}
+    for _ in range(MAX_REPORT_POLL_ATTEMPTS):
+        status_resp = client.get_report_status(report_id) or {}
+        status = status_resp.get("status", "")
+        if status == "SUCCESS":
+            break
+        if status in ("FAILURE", "CANCELLED"):
+            raise HTTPException(status_code=500, detail=f"Report generation failed: {status}")
+        time.sleep(10)
+    else:
+        raise HTTPException(status_code=504, detail="Report generation timed out")
 
-        status_payload = None
-        download_url = None
+    # Download and parse report
+    download_url = status_resp.get("location") or status_resp.get("url")
+    if not download_url:
+        raise HTTPException(status_code=500, detail="No download URL in report response")
 
-        for _ in range(18):
-            status_payload = client.get_report_status(str(report_id))
-            status = ""
-            location = None
+    content = client.download_binary(download_url)
+    rows = parse_report_json_bytes(content)
+    classified = classify_terms(rows)
 
-            if isinstance(status_payload, dict):
-                status = str(status_payload.get("status") or status_payload.get("processingStatus") or "").upper()
-                location = status_payload.get("url") or status_payload.get("location") or status_payload.get("downloadUrl")
+    # Optionally apply negative keywords grouped by campaign
+    negatives_applied: List[Dict[str, Any]] = []
+    if apply_negatives_live and classified["negatives"]:
+        by_campaign: Dict[int, List[str]] = {}
+        for item in classified["negatives"]:
+            cid = item["campaign_id"]
+            if cid:
+                by_campaign.setdefault(cid, []).append(item["term"])
+        for cid, terms in by_campaign.items():
+            neg_rows = negative_keyword_rows(unique_in_order(terms), cid)
+            resp = client.post(ENDPOINTS["negative_keywords"], neg_rows)
+            negatives_applied.append({"campaign_id": cid, "count": len(terms), "response": resp})
 
-            if status in {"COMPLETED", "SUCCESS"} and location:
-                download_url = location
-                break
+    # Optionally promote winning search terms as exact/phrase/broad keywords
+    winners_applied: List[Dict[str, Any]] = []
+    if apply_winners_live and classified["winners"]:
+        # Track campaign_id alongside ad_group_id (required by v3 keywords API)
+        ad_group_data: Dict[int, Dict[str, Any]] = {}
+        for item in classified["winners"]:
+            agid = item["ad_group_id"]
+            cid = item["campaign_id"]
+            if agid and cid:
+                if agid not in ad_group_data:
+                    ad_group_data[agid] = {"campaign_id": cid, "terms": []}
+                ad_group_data[agid]["terms"].append(item["term"])
+        for agid, data in ad_group_data.items():
+            kw_rows = keyword_rows(unique_in_order(data["terms"]), data["campaign_id"], agid, winner_bid)
+            resp = client.post(ENDPOINTS["keywords"], kw_rows)
+            winners_applied.append({"ad_group_id": agid, "count": len(data["terms"]), "response": resp})
 
-            if status in {"FAILED", "FAILURE"}:
-                raise RuntimeError(f"Report failed: {status_payload}")
-
-            time.sleep(20)
-
-        if not download_url:
-            raise RuntimeError(f"Timed out waiting for report. Last status: {status_payload}")
-
-        content = client.download_binary(download_url)
-        rows = parse_report_json_bytes(content)
-
-        summary = classify_terms(
-            rows=rows,
-            min_clicks_for_negative=min_clicks_for_negative,
-            min_orders_for_winner=min_orders_for_winner,
-            max_acos_for_winner=max_acos_for_winner,
-            min_clicks_for_winner=min_clicks_for_winner,
-        )
-
-        if campaign_filter:
-            summary["winners"] = [r for r in summary["winners"] if str(r.get("campaign_id", "")) == campaign_filter]
-            summary["negatives"] = [r for r in summary["negatives"] if str(r.get("campaign_id", "")) == campaign_filter]
-            summary["hold"] = [r for r in summary["hold"] if str(r.get("campaign_id", "")) == campaign_filter]
-
-        live_actions = {"negative_terms_added": [], "winner_terms_promoted": []}
-
-        if apply_negatives_live:
-            grouped_negatives: Dict[tuple, List[str]] = {}
-            for item in summary["negatives"]:
-                key = (item["campaign_id"], item["ad_group_id"] or None)
-                grouped_negatives.setdefault(key, []).append(item["term"])
-
-            for (campaign_id, ad_group_id), terms in grouped_negatives.items():
-                if not campaign_id:
-                    continue
-                rows_to_add = negative_keyword_rows(unique_in_order(terms), campaign_id, ad_group_id or None)
-                client.post(ENDPOINTS["negative_keywords"], rows_to_add)
-                live_actions["negative_terms_added"].append({
-                    "campaign_id": campaign_id,
-                    "ad_group_id": ad_group_id,
-                    "terms": unique_in_order(terms),
-                })
-
-        if apply_winners_live:
-            grouped_winners: Dict[str, List[str]] = {}
-            for item in summary["winners"]:
-                if not item["ad_group_id"]:
-                    continue
-                grouped_winners.setdefault(item["ad_group_id"], []).append(item["term"])
-
-            for ad_group_id, terms in grouped_winners.items():
-                rows_to_add = [{
-                    "adGroupId": ad_group_id,
-                    "keywordText": term,
-                    "matchType": "exact",
-                    "state": "enabled",
-                    "bid": round(winner_bid, 2),
-                } for term in unique_in_order(terms)]
-                client.post(ENDPOINTS["keywords"], rows_to_add)
-                live_actions["winner_terms_promoted"].append({
-                    "ad_group_id": ad_group_id,
-                    "terms": unique_in_order(terms),
-                })
-
-        result = {
-            "message": "Optimizer finished",
-            "report_id": report_id,
-            "report_window": {"start_date": start_date, "end_date": end_date},
-            "summary_counts": {
-                "rows": len(rows),
-                "winners": len(summary["winners"]),
-                "negatives": len(summary["negatives"]),
-                "hold": len(summary["hold"]),
-            },
-            "winners": summary["winners"],
-            "negatives": summary["negatives"],
-            "hold": summary["hold"],
-            "live_actions": live_actions,
-            "settings": {
-                "apply_negatives_live": apply_negatives_live,
-                "apply_winners_live": apply_winners_live,
-                "winner_bid": winner_bid,
-                "campaign_filter": campaign_filter,
-            },
-        }
-
-        append_jsonl(OPTIMIZER_LOG_PATH, {
-            "event_type": "optimizer_run",
-            "ran_at_utc": now_iso_utc(),
-            **result,
-        })
-
-        return result
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/quick-optimize-safe-negatives")
-def api_quick_optimize_safe_negatives(payload: Dict[str, Any]):
-    # Optional token passthrough for environments where DAILY_OPTIMIZER_TOKEN is set.
-    token = str(payload.get("optimizer_token", "")).strip()
-    authorization = f"Bearer {token}" if token else None
-
-    optimizer_payload = {
-        "apply_negatives_live": True,
-        "apply_winners_live": False,
-        "winner_bid": float(payload.get("winner_bid", 0.9)),
-        "min_clicks_for_negative": int(payload.get("min_clicks_for_negative", 20)),
-        "min_orders_for_winner": int(payload.get("min_orders_for_winner", 2)),
-        "max_acos_for_winner": float(payload.get("max_acos_for_winner", 0.35)),
-        "min_clicks_for_winner": int(payload.get("min_clicks_for_winner", 8)),
-    }
-
-    if payload.get("start_date"):
-        optimizer_payload["start_date"] = payload.get("start_date")
-    if payload.get("end_date"):
-        optimizer_payload["end_date"] = payload.get("end_date")
-
-    result = api_run_optimizer(optimizer_payload, authorization=authorization)
     return {
-        "message": "Quick optimizer completed with safe negatives enabled",
-        "result": result,
+        "report_id": report_id,
+        "date_range": {"start": start_date, "end": end_date},
+        "rows_analyzed": len(rows),
+        "winners": len(classified["winners"]),
+        "negatives": len(classified["negatives"]),
+        "hold": len(classified["hold"]),
+        "negatives_applied": negatives_applied,
+        "winners_applied": winners_applied,
+        "classified": classified,
     }

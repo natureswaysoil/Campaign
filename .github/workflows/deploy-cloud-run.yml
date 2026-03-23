@@ -1,41 +1,117 @@
 name: Deploy to Cloud Run
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: amazon-ppc-bid-optimizer
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v3
+      - name: Validate required secrets and select auth method
+        run: |
+          # Determine authentication method
+          if [ -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" ] && [ -n "$GCP_SERVICE_ACCOUNT_EMAIL" ]; then
+            echo "✅ Using Workload Identity Federation authentication."
+            echo "AUTH_METHOD=wif" >> "$GITHUB_ENV"
+          elif [ -n "$GCP_SA_KEY" ]; then
+            echo "✅ Using Service Account Key authentication."
+            echo "AUTH_METHOD=sa_key" >> "$GITHUB_ENV"
+          else
+            echo "❌ No GCP authentication method configured."
+            echo ""
+            echo "Configure one of the following in GitHub repository settings → Secrets and variables → Actions:"
+            echo ""
+            echo "  Option A — Workload Identity Federation (recommended):"
+            echo "    GCP_WORKLOAD_IDENTITY_PROVIDER  e.g. projects/366028971954/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
+            echo "    GCP_SERVICE_ACCOUNT_EMAIL        e.g. my-sa@amazon-ppc-bid-optimizer.iam.gserviceaccount.com"
+            echo ""
+            echo "  Option B — Service Account Key JSON:"
+            echo "    GCP_SA_KEY  (the full JSON key file content from 'gcloud iam service-accounts keys create')"
+            echo ""
+            echo "See README.md for step-by-step setup instructions."
+            exit 1
+          fi
+
+          echo "✅ Authentication method selected."
+        env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Validate AMAZON_ADS_REGION format
+        run: |
+          region="${AMAZON_ADS_REGION:-}"
+          if [ -z "$region" ]; then
+            echo "⚠️  AMAZON_ADS_REGION secret is empty; the app will default to 'na'."
+          else
+            # Fail fast if the value looks like a YAML/JSON list (starts with '[' or '-')
+            first_char="${region:0:1}"
+            if [[ "$first_char" == "[" || "$first_char" == "-" ]]; then
+              echo "❌ AMAZON_ADS_REGION appears to contain a list value (starts with '${first_char}')."
+              echo "   It must be a plain scalar string: na, eu, or fe."
+              echo "   Current value: ${region}"
+              exit 1
+            fi
+            # Fail if the value contains newline characters (multi-line secret)
+            if [[ "$region" == *$'\n'* ]]; then
+              echo "❌ AMAZON_ADS_REGION contains newline characters — expected a single scalar string."
+              exit 1
+            fi
+            echo "✅ AMAZON_ADS_REGION looks like a scalar value: '${region}'"
+          fi
+        env:
+          AMAZON_ADS_REGION: ${{ secrets.AMAZON_ADS_REGION }}
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        if: env.AUTH_METHOD == 'wif'
+        uses: google-github-actions/auth@v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Authenticate to Google Cloud (Service Account Key)
+        if: env.AUTH_METHOD == 'sa_key'
+        uses: google-github-actions/auth@v2
+        with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Set up gcloud
+      - name: Set up gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker
+      - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      - name: Build and Push
+      - name: Build Docker image
         run: |
-          docker build -t us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} .
-          docker push us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }}
+          docker build \
+            -t us-central1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push \
+            us-central1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }}
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy amazon-ads-autopilot \
-            --image us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} \
+            --image us-central1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} \
             --region us-central1 \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }},PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv
+            --set-env-vars GCP_PROJECT_ID=${{ env.GCP_PROJECT_ID }},PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
+            --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest
+

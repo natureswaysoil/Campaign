@@ -1,73 +1,165 @@
-# Amazon Ads Sheet Autopilot
+# Amazon PPC Bid Optimizer
 
-This service reads products from a Google Sheet CSV feed and can launch Sponsored Products campaigns from SKU or product ID.
+This version reads products directly from your public Google Sheet CSV feed and adds:
+- sheet-driven product loading
+- auto keyword generation from `Keywords`, `Research_Keywords`, `Title`, and `Category`
+- daily optimizer loop endpoint
 
-## Implemented Features
+**GCP Project:** `amazon-ppc-bid-optimizer` (project number `366028971954`)
 
-- Structured campaign launch summaries stored in `data/campaign_launches.jsonl`
-- Keyword deduplication before match-type expansion and submission
-- Post-launch optimization checklist API for dashboard/log workflows
-- Rule-based daily budget recommendation and optional live budget updates
+---
 
-## Key Endpoints
+## GitHub Actions — Required Secrets
 
-- `GET /api/products`
-- `GET /api/generate-keywords/{sku_or_product_id}`
-- `POST /api/create-campaign-from-product`
-- `GET /api/launch-logs?limit=10`
-- `GET /api/launch-logs/latest`
-- `GET /api/optimization-checklist`
-- `POST /api/recommend-budget-adjustment`
-- `POST /api/adjust-campaign-budget`
-- `POST /api/run-daily-optimization`
-- `POST /api/quick-optimize-safe-negatives`
-- `GET /api/optimizer-runs?limit=10`
-- `GET /api/export/launch-logs.json`
-- `GET /api/export/launch-logs.csv`
-- `GET /api/export/optimizer-runs.json`
-- `GET /api/export/optimizer-runs.csv`
+The deploy workflow needs several GitHub secrets. Add them at:
+**Repository → Settings → Secrets and variables → Actions → New repository secret**
 
-## Filtering
+> **Note:** `GCP_PROJECT_ID` (`amazon-ppc-bid-optimizer`) is now hardcoded in the workflow — you no longer need to add it as a secret.
 
-These endpoints support optional query filters:
+### GCP Authentication (choose one option)
 
-- `campaign_id`
-- `start_date` (`YYYY-MM-DD` or `YYYYMMDD`)
-- `end_date` (`YYYY-MM-DD` or `YYYYMMDD`)
+#### Option A — Workload Identity Federation (recommended)
 
-Supported on:
+Workload Identity Federation lets GitHub Actions authenticate to GCP without storing a long-lived key.
 
-- `GET /api/launch-logs`
-- `GET /api/launch-logs/latest`
-- `GET /api/optimizer-runs`
-- `GET /api/export/launch-logs.json`
-- `GET /api/export/launch-logs.csv`
-- `GET /api/export/optimizer-runs.json`
-- `GET /api/export/optimizer-runs.csv`
+1. **Create a Workload Identity Pool and Provider** in your GCP project:
 
-`POST /api/run-daily-optimization` and `POST /api/quick-optimize-safe-negatives` also accept optional `campaign_id`, `start_date`, and `end_date` in the JSON payload.
+   ```bash
+   PROJECT_ID="amazon-ppc-bid-optimizer"
+   POOL_NAME="github-pool"
+   PROVIDER_NAME="github-provider"
+   REPO="natureswaysoil/Campaign"
 
-## Budget Adjustment Inputs
+   # Create the pool
+   gcloud iam workload-identity-pools create "$POOL_NAME" \
+     --project="$PROJECT_ID" \
+     --location="global" \
+     --display-name="GitHub Actions pool"
 
-Example payload:
+   # Create the OIDC provider
+   gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
+     --project="$PROJECT_ID" \
+     --location="global" \
+     --workload-identity-pool="$POOL_NAME" \
+     --display-name="GitHub provider" \
+     --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+     --issuer-uri="https://token.actions.githubusercontent.com"
+   ```
 
-```json
-{
-  "campaign_id": "274716363056043",
-  "current_budget": 25,
-  "target_acos": 0.35,
-  "acos": 0.31,
-  "budget_utilization": 0.93,
-  "clicks": 42,
-  "orders": 4,
-  "spend": 23.7,
-  "apply_live": false
-}
-```
+2. **Create a service account** and grant it Cloud Run and Artifact Registry permissions:
 
-Guardrails are enforced in code:
+   ```bash
+   SA_NAME="github-deploy-sa"
 
-- minimum daily budget floor: 10
-- max step change per adjustment: 25%
-- cooldown period: 48 hours
-- rolling 7-day budget change cap: 50%
+   gcloud iam service-accounts create "$SA_NAME" \
+     --project="$PROJECT_ID" \
+     --display-name="GitHub Actions Deploy SA"
+
+   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:${SA_EMAIL}" \
+     --role="roles/run.admin"
+
+   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:${SA_EMAIL}" \
+     --role="roles/artifactregistry.writer"
+
+   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:${SA_EMAIL}" \
+     --role="roles/iam.serviceAccountUser"
+   ```
+
+3. **Allow the GitHub repo to impersonate the service account**:
+
+   ```bash
+   POOL_ID=$(gcloud iam workload-identity-pools describe "$POOL_NAME" \
+     --project="$PROJECT_ID" --location="global" \
+     --format="value(name)")
+
+   gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+     --project="$PROJECT_ID" \
+     --role="roles/iam.workloadIdentityUser" \
+     --member="principalSet://iam.googleapis.com/${POOL_ID}/attribute.repository/${REPO}"
+   ```
+
+4. **Retrieve the provider resource name** (this is the value for `GCP_WORKLOAD_IDENTITY_PROVIDER`):
+
+   ```bash
+   gcloud iam workload-identity-pools providers describe "$PROVIDER_NAME" \
+     --project="$PROJECT_ID" \
+     --location="global" \
+     --workload-identity-pool="$POOL_NAME" \
+     --format="value(name)"
+   # Output looks like:
+   # projects/366028971954/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+   ```
+
+5. **Add these two secrets to GitHub**:
+
+   | Secret name | Value |
+   |---|---|
+   | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Output of the `describe` command above |
+   | `GCP_SERVICE_ACCOUNT_EMAIL` | `github-deploy-sa@amazon-ppc-bid-optimizer.iam.gserviceaccount.com` |
+
+---
+
+#### Option B — Service Account Key JSON (simpler, no WIF setup)
+
+1. **Create a service account** and download a JSON key:
+
+   ```bash
+   PROJECT_ID="amazon-ppc-bid-optimizer"
+   SA_NAME="github-deploy-sa"
+
+   gcloud iam service-accounts create "$SA_NAME" \
+     --project="$PROJECT_ID" \
+     --display-name="GitHub Actions Deploy SA"
+
+   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:${SA_EMAIL}" \
+     --role="roles/run.admin"
+
+   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:${SA_EMAIL}" \
+     --role="roles/artifactregistry.writer"
+
+   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+     --member="serviceAccount:${SA_EMAIL}" \
+     --role="roles/iam.serviceAccountUser"
+
+   gcloud iam service-accounts keys create key.json \
+     --iam-account="$SA_EMAIL" \
+     --project="$PROJECT_ID"
+   ```
+
+2. **Add one secret to GitHub**:
+
+   | Secret name | Value |
+   |---|---|
+   | `GCP_SA_KEY` | Full contents of the `key.json` file |
+
+   > ⚠️ Store `key.json` securely and delete it from your local machine after adding it to GitHub.
+
+---
+
+### Always-required secret
+
+> **Note:** `GCP_PROJECT_ID` is now hardcoded in the workflow as `amazon-ppc-bid-optimizer`. You no longer need to configure this as a GitHub secret.
+
+---
+
+### Amazon Ads secrets (loaded into Cloud Run via Secret Manager)
+
+Store each of these in **both** GitHub Secrets (for validation) and **GCP Secret Manager** (for the running app).
+
+| Secret name | Description |
+|---|---|
+| `AMAZON_ADS_CLIENT_ID` | Amazon Ads API client ID |
+| `AMAZON_ADS_CLIENT_SECRET` | Amazon Ads API client secret |
+| `AMAZON_ADS_REFRESH_TOKEN` | OAuth refresh token |
+| `AMAZON_ADS_PROFILE_ID` | Amazon Ads profile ID |
+| `AMAZON_ADS_REGION` | Region code: `na`, `eu`, or `fe` (defaults to `na` if unset) |
+
