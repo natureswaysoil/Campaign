@@ -12,6 +12,50 @@ body {
   border-radius: 10px;
 }
 
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.action-with-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-badge {
+  display: inline-block;
+  min-width: 62px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: lowercase;
+}
+
+.status-idle {
+  color: #4a5568;
+  background: #edf2f7;
+}
+
+.status-pending {
+  color: #744210;
+  background: #fef3c7;
+}
+
+.status-success {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.status-error {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
 h1 {
   margin-bottom: 20px;
 }
@@ -56,4 +100,32 @@ pre {
   padding: 10px;
   margin-top: 10px;
   overflow: auto;
+}
+
+.budget-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.budget-form label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: #333;
+}
+
+.budget-form input {
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+}
+
+.budget-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
