@@ -1,97 +1,71 @@
 #!/usr/bin/env python3
-"""Fetch campaign IDs from Amazon Ads reporting API"""
+"""
+Fetch campaign IDs using Amazon Ads Reporting API
+"""
 
 import json
-import gzip
 import time
-from datetime import datetime, timedelta
-from app import AmazonAdsClient, ENDPOINTS
+from app import AmazonAdsClient, load_env_or_secret
 
 def fetch_campaign_ids():
-    """Fetch campaign IDs using the SP report API"""
+    """Fetch all campaign IDs and save to JSON"""
     
-    client = AmazonAdsClient()
+    # Initialize client
+    client = AmazonAdsClient(
+        client_id=load_env_or_secret("AMAZON_ADS_CLIENT_ID"),
+        client_secret=load_env_or_secret("AMAZON_ADS_CLIENT_SECRET"),
+        refresh_token=load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN"),
+        profile_id=load_env_or_secret("AMAZON_ADS_PROFILE_ID")
+    )
     
-    # Request a campaign report for the last 30 days
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    print("Requesting campaign report...")
     
-    print(f"Requesting campaign report from {start_date} to {end_date}...")
-    
-    body = {
-        "startDate": start_date,
-        "endDate": end_date,
-        "configuration": {
-            "adProduct": "SPONSORED_PRODUCTS",
-            "groupBy": ["campaign"],
-            "columns": ["campaignId", "campaignName", "campaignBudgetAmount", "campaignStatus"],
-            "reportTypeId": "spCampaigns",
-            "timeUnit": "SUMMARY",
-            "format": "GZIP_JSON"
-        }
+    # Request report
+    report_config = {
+        "reportDate": "YESTERDAY",
+        "metrics": "campaignId,campaignName,campaignStatus"
     }
     
-    # Request the report
-    report_resp = client.post(ENDPOINTS["reports"], body)
-    report_id = report_resp.get("reportId")
-    
+    report_id = client.request_report("campaigns", report_config)
     print(f"Report ID: {report_id}")
-    print("Report generating (this can take 5-10 minutes)...")
-    print("You can check status manually at: https://advertising.amazon.com")
     
-    # Poll for completion - wait longer between checks
-    for i in range(60):  # 60 attempts x 30 sec = 30 minutes max
-        time.sleep(30)  # Wait 30 seconds between checks
+    # Wait for report (check every 30 seconds)
+    max_attempts = 30
+    for attempt in range(max_attempts):
+        status = client.get_report_status(report_id)
+        print(f"Attempt {attempt + 1}/{max_attempts}: {status}")
         
-        try:
-            status_resp = client.get(f"{ENDPOINTS['reports']}/{report_id}")
-            status = status_resp.get("status")
-            
-            if i % 2 == 0:  # Print every minute
-                print(f"  {(i+1)*30//60} min - Status: {status}")
-            
-            if status == "COMPLETED":
-                download_url = status_resp.get("url")
-                print(f"\n✓ Report ready!")
-                
-                # Download and decompress
-                data = client.download_binary(download_url)
-                decompressed = gzip.decompress(data).decode('utf-8')
-                report = json.loads(decompressed)
-                
-                # Extract campaign ID mapping
-                campaign_map = {}
-                for row in report:
-                    camp_id = row.get("campaignId")
-                    camp_name = row.get("campaignName")
-                    if camp_id and camp_name:
-                        campaign_map[camp_name] = str(camp_id)
-                
-                # Save to file
-                with open('campaign_ids.json', 'w') as f:
-                    json.dump(campaign_map, f, indent=2)
-                
-                print(f"\n✓ Found {len(campaign_map)} campaigns")
-                print(f"✓ Saved to campaign_ids.json")
-                return campaign_map
-            
-            elif status in ["FAILED", "FATAL"]:
-                print(f"✗ Report failed: {status_resp}")
-                return {}
-                
-        except Exception as e:
-            print(f"  Error checking status: {e}")
-            continue
+        if status == "SUCCESS":
+            break
+        elif status in ["FAILURE", "FATAL"]:
+            raise Exception(f"Report generation failed: {status}")
+        
+        time.sleep(30)
     
-    print("\n✗ Timeout after 30 minutes")
-    print(f"Check report status manually: Report ID {report_id}")
-    return {}
+    if status != "SUCCESS":
+        raise Exception("Report timed out")
+    
+    # Download report
+    print("Downloading report...")
+    report_data = client.download_report(report_id)
+    
+    # Parse and save campaign IDs
+    campaign_map = {}
+    for row in report_data:
+        campaign_id = row.get("campaignId")
+        campaign_name = row.get("campaignName")
+        if campaign_id and campaign_name:
+            campaign_map[campaign_name] = campaign_id
+    
+    print(f"Found {len(campaign_map)} campaigns")
+    
+    # Save to /tmp (exists in Cloud Run)
+    output_path = "/tmp/campaign_ids.json"
+    with open(output_path, "w") as f:
+        json.dump(campaign_map, f, indent=2)
+    
+    print(f"Saved to {output_path}")
+    return campaign_map
 
 if __name__ == "__main__":
-    campaign_map = fetch_campaign_ids()
-    
-    if campaign_map:
-        print("\nSample campaigns:")
-        for name, cid in list(campaign_map.items())[:5]:
-            print(f"  {cid}: {name[:60]}")
-
+    fetch_campaign_ids()
