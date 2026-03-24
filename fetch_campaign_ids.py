@@ -10,12 +10,12 @@ from app import AmazonAdsClient, load_env_or_secret
 def fetch_campaign_ids():
     """Fetch all campaign IDs and save to JSON"""
     
-    # Initialize client
+    # Initialize client - use the exact parameter names from app.py
     client = AmazonAdsClient(
-        client_id=load_env_or_secret("AMAZON_ADS_CLIENT_ID"),
-        client_secret=load_env_or_secret("AMAZON_ADS_CLIENT_SECRET"),
-        refresh_token=load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN"),
-        profile_id=load_env_or_secret("AMAZON_ADS_PROFILE_ID")
+        load_env_or_secret("AMAZON_ADS_CLIENT_ID"),
+        load_env_or_secret("AMAZON_ADS_CLIENT_SECRET"),
+        load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN"),
+        load_env_or_secret("AMAZON_ADS_PROFILE_ID")
     )
     
     print("Requesting campaign report...")
