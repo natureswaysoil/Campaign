@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import csv
@@ -88,7 +87,6 @@ STOPWORDS = {
 }
 
 templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 def get_secret(project_id: str, secret_id: str) -> str:
