@@ -924,7 +924,7 @@ def api_list_campaigns():
             json={
                 "maxResults": 100,
                 "filters": {
-                    "stateFilter": {"include": ["ENABLED", "PAUSED", "ARCHIVED"]}
+                    "stateFilter": {"include": ["ENABLED"]}
                 }
             },
             timeout=30,
