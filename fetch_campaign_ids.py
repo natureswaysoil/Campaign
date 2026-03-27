@@ -5,18 +5,13 @@ Fetch campaign IDs using Amazon Ads Reporting API
 
 import json
 import time
-from app import AmazonAdsClient, load_env_or_secret
+from app import AmazonAdsClient
 
 def fetch_campaign_ids():
     """Fetch all campaign IDs and save to JSON"""
     
-    # Initialize client - use the exact parameter names from app.py
-    client = AmazonAdsClient(
-        load_env_or_secret("AMAZON_ADS_CLIENT_ID"),
-        load_env_or_secret("AMAZON_ADS_CLIENT_SECRET"),
-        load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN"),
-        load_env_or_secret("AMAZON_ADS_PROFILE_ID")
-    )
+    # Initialize client - AmazonAdsClient loads credentials from env/secrets automatically
+    client = AmazonAdsClient()
     
     print("Requesting campaign report...")
     
