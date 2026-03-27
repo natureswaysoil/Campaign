@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 def load_campaign_ids():
     """Load campaign ID mapping from file"""
     try:
-        with open('campaign_ids.json', 'r') as f:
+        with open('/tmp/campaign_ids.json', 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        logger.error("campaign_ids.json not found. Run fetch_campaign_ids.py first!")
+        logger.error("/tmp/campaign_ids.json not found. Run fetch_campaign_ids.py first!")
         return {}
 
 
@@ -195,4 +195,5 @@ if __name__ == "__main__":
     print(f"\n✓ Success: {success}")
     if errors > 0:
         print(f"✗ Errors: {errors}")
+
 
