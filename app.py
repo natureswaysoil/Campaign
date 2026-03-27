@@ -910,15 +910,19 @@ def api_list_campaigns():
     client = AmazonAdsClient()
     
     try:
-        # List campaigns endpoint for SP API v3
+        # SP v3 campaigns list requires using the list endpoint with query params
+        # The endpoint path should include filtering or we get all campaigns
         response = client.session.get(
-            f"{client.base_url}/sp/campaigns",
+            f"{client.base_url}/sp/campaigns/list",
             headers={
                 "Authorization": f"Bearer {client.access_token}",
                 "Amazon-Advertising-API-ClientId": client.client_id,
                 "Amazon-Advertising-API-Scope": client.profile_id,
                 "Content-Type": "application/vnd.spcampaign.v3+json",
                 "Accept": "application/vnd.spcampaign.v3+json",
+            },
+            params={
+                "maxResults": 100,  # Return up to 100 campaigns
             },
             timeout=30,
         )
