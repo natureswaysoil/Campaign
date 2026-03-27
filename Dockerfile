@@ -15,10 +15,14 @@ COPY app.py .
 COPY run_optimizer.py .
 COPY server.py .
 
+# Copy templates and static files for the dashboard
+COPY templates/ ./templates/
+COPY static/ ./static/
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV GCP_PROJECT_ID=amazon-ppc-bid-optimizer
 ENV PORT=8080
 
-# Run the web server
-CMD ["python", "server.py"]
+# Run the full FastAPI application with uvicorn
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
