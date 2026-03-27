@@ -129,3 +129,28 @@ pre {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Campaign state badges */
+.state-enabled {
+  color: green;
+  font-weight: bold;
+}
+
+.state-paused {
+  color: orange;
+  font-weight: bold;
+}
+
+.state-archived {
+  color: gray;
+  font-style: italic;
+}
+
+#campaignsTable {
+  margin-bottom: 30px;
+}
+
+#campaignsLoading {
+  padding: 20px;
+  color: #666;
+}

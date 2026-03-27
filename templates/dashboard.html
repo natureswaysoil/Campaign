@@ -5,113 +5,146 @@
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-
-  <div class="wrap">
-    <h1>🚀 Amazon Ads Dashboard</h1>
-
-    <button onclick="loadProducts()">Load Products</button>
-
+  <div class="container">
+    <h1>Amazon Ads Campaign Manager</h1>
+    
+    <h2>Existing Campaigns (<span id="campaignCount">0</span>)</h2>
+    <div id="campaignsLoading">Loading campaigns...</div>
+    <table id="campaignsTable" style="display:none;">
+      <thead>
+        <tr>
+          <th>Campaign ID</th>
+          <th>Name</th>
+          <th>State</th>
+          <th>Budget</th>
+          <th>Start Date</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    
+    <h2>Products</h2>
     <table id="productsTable">
       <thead>
         <tr>
-          <th>Product</th>
           <th>SKU</th>
+          <th>Title</th>
           <th>Price</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
-
+    
     <h2>Keywords</h2>
     <div id="keywords"></div>
-
+    
     <h2>Campaign Output</h2>
     <pre id="output"></pre>
   </div>
 
 <script>
+async function loadCampaigns() {
+  try {
+    const res = await fetch('/api/campaigns');
+    const data = await res.json();
+    
+    document.getElementById('campaignsLoading').style.display = 'none';
+    document.getElementById('campaignCount').textContent = data.count;
+    const table = document.getElementById('campaignsTable');
+    table.style.display = 'table';
+    
+    const tbody = table.querySelector("tbody");
+    tbody.innerHTML = "";
+    
+    data.campaigns.forEach(c => {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${c.campaignId || 'N/A'}</td>
+        <td>${c.name || 'N/A'}</td>
+        <td><span class="state-${(c.state || '').toLowerCase()}">${c.state || 'N/A'}</span></td>
+        <td>$${c.budget?.budget || 'N/A'} ${c.budget?.budgetType || ''}</td>
+        <td>${c.startDate || 'N/A'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+    
+    if (data.campaigns.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5">No campaigns found</td></tr>';
+    }
+  } catch (err) {
+    document.getElementById('campaignsLoading').textContent = 'Error loading campaigns: ' + err.message;
+  }
+}
+
 async function loadProducts() {
   const res = await fetch('/api/products');
   const data = await res.json();
-
   const tbody = document.querySelector("#productsTable tbody");
   tbody.innerHTML = "";
-
+  
   data.products.forEach(p => {
     const row = document.createElement("tr");
-
-    const tdTitle = document.createElement("td");
-    tdTitle.textContent = p.title;
-
     const tdSku = document.createElement("td");
     tdSku.textContent = p.sku;
-
+    
+    const tdTitle = document.createElement("td");
+    tdTitle.textContent = p.title;
+    
     const tdPrice = document.createElement("td");
-    tdPrice.textContent = p.price;
-
+    tdPrice.textContent = '$' + p.price;
+    
+    const tdActions = document.createElement("td");
     const btnKeywords = document.createElement("button");
     btnKeywords.textContent = "Keywords";
-    btnKeywords.addEventListener("click", () => getKeywords(p.sku));
-
+    btnKeywords.onclick = () => showKeywords(p.sku);
+    
     const btnLaunch = document.createElement("button");
     btnLaunch.textContent = "Launch";
-    btnLaunch.addEventListener("click", () => createCampaign(p.sku));
-
-    const tdActions = document.createElement("td");
+    btnLaunch.onclick = () => launchCampaign(p.sku);
+    
     tdActions.appendChild(btnKeywords);
     tdActions.appendChild(btnLaunch);
-
-    row.appendChild(tdTitle);
+    
     row.appendChild(tdSku);
+    row.appendChild(tdTitle);
     row.appendChild(tdPrice);
     row.appendChild(tdActions);
-
+    
     tbody.appendChild(row);
   });
 }
 
-async function getKeywords(sku) {
-  const res = await fetch(`/api/generate-keywords/${encodeURIComponent(sku)}`);
+async function showKeywords(sku) {
+  const res = await fetch(`/api/generate-keywords/${sku}`);
   const data = await res.json();
-
-  const box = document.getElementById("keywords");
-  box.innerHTML = "";
-
-  data.keywords.forEach(k => {
-    const span = document.createElement("span");
-    span.className = "chip";
-    span.textContent = k;
-    box.appendChild(span);
-  });
+  document.getElementById("keywords").innerHTML = 
+    `<h3>${data.product.title}</h3><pre>${JSON.stringify(data.keywords, null, 2)}</pre>`;
 }
 
-async function createCampaign(sku) {
-  const output = document.getElementById("output");
-  output.textContent = "Launching campaign...";
-
+async function launchCampaign(sku) {
+  document.getElementById("output").textContent = "Creating campaign...";
   try {
     const res = await fetch('/api/create-campaign-from-product', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sku })
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({product_id: sku})
     });
-
     const data = await res.json();
-    output.textContent = JSON.stringify(data, null, 2);
-
-    if (!res.ok) {
-      alert("Launch failed: " + (data.detail || "Unknown error"));
-      return;
-    }
-
-    alert("Launch completed");
+    document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+    
+    // Reload campaigns to show the new one
+    loadCampaigns();
   } catch (err) {
-    output.textContent = String(err);
-    alert("Launch error: " + err);
+    document.getElementById("output").textContent = "Error: " + err.message;
   }
 }
-</script>
 
+// Load both campaigns and products on page load
+window.onload = () => {
+  loadCampaigns();
+  loadProducts();
+};
+</script>
 </body>
 </html>
