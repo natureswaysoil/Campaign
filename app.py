@@ -912,7 +912,7 @@ def api_list_campaigns():
     try:
         # SP v3 campaigns list requires using the list endpoint with query params
         # The endpoint path should include filtering or we get all campaigns
-        response = client.session.get(
+        response = client.session.post(
             f"{client.base_url}/sp/campaigns/list",
             headers={
                 "Authorization": f"Bearer {client.access_token}",
@@ -921,8 +921,11 @@ def api_list_campaigns():
                 "Content-Type": "application/vnd.spcampaign.v3+json",
                 "Accept": "application/vnd.spcampaign.v3+json",
             },
-            params={
-                "maxResults": 100,  # Return up to 100 campaigns
+            json={
+                "maxResults": 100,
+                "filters": {
+                    "stateFilter": {"include": ["ENABLED", "PAUSED", "ARCHIVED"]}
+                }
             },
             timeout=30,
         )
