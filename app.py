@@ -902,3 +902,36 @@ def api_run_optimizer(
         "classified": classified,
     }
 
+
+
+@app.get("/api/campaigns")
+def api_list_campaigns():
+    """Fetch all campaigns from Amazon Ads API"""
+    client = AmazonAdsClient()
+    
+    try:
+        # List campaigns endpoint for SP API v3
+        response = client.session.get(
+            f"{client.base_url}/sp/campaigns",
+            headers={
+                "Authorization": f"Bearer {client.access_token}",
+                "Amazon-Advertising-API-ClientId": client.client_id,
+                "Amazon-Advertising-API-Scope": client.profile_id,
+                "Content-Type": "application/vnd.spcampaign.v3+json",
+                "Accept": "application/vnd.spcampaign.v3+json",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        
+        # SP v3 returns campaigns in a wrapper
+        data = response.json()
+        campaigns = data.get("campaigns", []) if isinstance(data, dict) else data
+        
+        return {
+            "count": len(campaigns),
+            "campaigns": campaigns,
+        }
+    except Exception as e:
+        logger.error("Failed to fetch campaigns", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
