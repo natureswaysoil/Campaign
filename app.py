@@ -585,24 +585,6 @@ class AmazonAdsClient:
         logger.info(f"Response preview: {str(result)[:300]}")
         return result
 
-    def put(self, endpoint: str, body: Any) -> Any:
-        """PUT request for updating resources"""
-        url = f"{self.base_url}{endpoint}"
-        content_type = self._content_type_for(endpoint)
-        batch_key = self._batch_key_for(endpoint)
-        if batch_key and isinstance(body, list):
-            body = {batch_key: body}
-        logger.info(f"PUT to {endpoint}")
-        logger.info(f"Body preview: {str(body)[:300]}")
-        resp = self.session.put(url, headers=self.headers(content_type), json=body, timeout=60)
-        logger.info(f"Status: {resp.status_code}")
-        if not resp.ok:
-            logger.error(f"Error response: {resp.text}")
-            raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text}")
-        result = resp.json() if resp.text.strip() else None
-        logger.info(f"Response preview: {str(result)[:300]}")
-        return result
-
     def get(self, endpoint: str) -> Any:
         url = f"{self.base_url}{endpoint}"
         content_type = self._content_type_for(endpoint)
@@ -642,6 +624,33 @@ class AmazonAdsClient:
 
     def get_report_status(self, report_id: str) -> Any:
         return self.get(f"{ENDPOINTS['reports']}/{report_id}")
+
+    def request_report(self, report_type: str, config: Dict[str, Any]) -> str:
+        """Generic method to request any report type - returns report_id"""
+        body = {
+            "reportDate": config.get("reportDate", "YESTERDAY"),
+            "configuration": {
+                "adProduct": "SPONSORED_PRODUCTS",
+                "reportTypeId": f"sp{report_type.capitalize()}",
+                "columns": config.get("metrics", "").split(",") if isinstance(config.get("metrics"), str) else config.get("columns", []),
+                "timeUnit": "SUMMARY",
+                "format": "GZIP_JSON",
+            }
+        }
+        response = self.post(ENDPOINTS["reports"], body)
+        report_id = (response or {}).get("reportId")
+        if not report_id:
+            raise RuntimeError(f"No reportId in response: {response}")
+        return report_id
+
+    def download_report(self, report_id: str) -> List[Dict[str, Any]]:
+        """Download and parse a report - returns parsed JSON rows"""
+        status_resp = self.get_report_status(report_id)
+        download_url = status_resp.get("location") or status_resp.get("url")
+        if not download_url:
+            raise RuntimeError(f"No download URL in report response: {status_resp}")
+        content = self.download_binary(download_url)
+        return parse_report_json_bytes(content)
 
 
 def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
