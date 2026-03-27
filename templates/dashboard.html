@@ -8,7 +8,13 @@
   <div class="container">
     <h1>Amazon Ads Campaign Manager</h1>
     
-    <h2>Existing Campaigns (<span id="campaignCount">0</span>)</h2>
+    <div class="optimizer-status">
+      <h2>Daily Optimizer Status</h2>
+      <div id="optimizerStatus">Loading optimizer info...</div>
+    </div>
+    
+    <h2>Active Campaigns (<span id="campaignCount">0</span>)</h2>
+    <p style="color: #666; font-size: 14px;">Showing only ENABLED campaigns</p>
     <div id="campaignsLoading">Loading campaigns...</div>
     <table id="campaignsTable" style="display:none;">
       <thead>
@@ -23,7 +29,7 @@
       <tbody></tbody>
     </table>
     
-    <h2>Products</h2>
+    <h2>Products (<span id="productCount">0</span>)</h2>
     <table id="productsTable">
       <thead>
         <tr>
@@ -44,6 +50,51 @@
   </div>
 
 <script>
+async function loadOptimizerStatus() {
+  try {
+    const res = await fetch('/api/optimizer-status');
+    const data = await res.json();
+    
+    const html = `
+      <div class="optimizer-card">
+        <div class="optimizer-header">
+          <span class="status-badge">Active</span>
+          <strong>${data.description}</strong>
+        </div>
+        <p><strong>Schedule:</strong> ${data.schedule}</p>
+        <p><strong>Analysis Period:</strong> Last ${data.lookback_days} days of search term data</p>
+        
+        <h3>What it does:</h3>
+        
+        <div class="action-card winner">
+          <h4>✅ Promotes Winners</h4>
+          <p><strong>Criteria:</strong> ${data.actions.winners.criteria}</p>
+          <p><strong>Action:</strong> ${data.actions.winners.action}</p>
+          <p><strong>Bid:</strong> ${data.actions.winners.bid_amount}</p>
+        </div>
+        
+        <div class="action-card negative">
+          <h4>🚫 Blocks Poor Performers</h4>
+          <p><strong>Criteria:</strong> ${data.actions.negatives.criteria}</p>
+          <p><strong>Action:</strong> ${data.actions.negatives.action}</p>
+        </div>
+        
+        <div class="action-card hold">
+          <h4>👀 Monitors Middle Performers</h4>
+          <p><strong>Criteria:</strong> ${data.actions.hold.criteria}</p>
+          <p><strong>Action:</strong> ${data.actions.hold.action}</p>
+        </div>
+        
+        <p class="note"><strong>Note:</strong> ${data.note}</p>
+      </div>
+    `;
+    
+    document.getElementById('optimizerStatus').innerHTML = html;
+  } catch (err) {
+    document.getElementById('optimizerStatus').textContent = 'Error loading optimizer status';
+  }
+}
+
 async function loadCampaigns() {
   try {
     const res = await fetch('/api/campaigns');
@@ -62,7 +113,7 @@ async function loadCampaigns() {
       row.innerHTML = `
         <td>${c.campaignId || 'N/A'}</td>
         <td>${c.name || 'N/A'}</td>
-        <td><span class="state-${(c.state || '').toLowerCase()}">${c.state || 'N/A'}</span></td>
+        <td><span class="state-enabled">${c.state || 'N/A'}</span></td>
         <td>$${c.budget?.budget || 'N/A'} ${c.budget?.budgetType || ''}</td>
         <td>${c.startDate || 'N/A'}</td>
       `;
@@ -70,7 +121,7 @@ async function loadCampaigns() {
     });
     
     if (data.campaigns.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5">No campaigns found</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5">No active campaigns found</td></tr>';
     }
   } catch (err) {
     document.getElementById('campaignsLoading').textContent = 'Error loading campaigns: ' + err.message;
@@ -80,6 +131,7 @@ async function loadCampaigns() {
 async function loadProducts() {
   const res = await fetch('/api/products');
   const data = await res.json();
+  document.getElementById('productCount').textContent = data.count;
   const tbody = document.querySelector("#productsTable tbody");
   tbody.innerHTML = "";
   
@@ -133,15 +185,14 @@ async function launchCampaign(sku) {
     const data = await res.json();
     document.getElementById("output").textContent = JSON.stringify(data, null, 2);
     
-    // Reload campaigns to show the new one
     loadCampaigns();
   } catch (err) {
     document.getElementById("output").textContent = "Error: " + err.message;
   }
 }
 
-// Load both campaigns and products on page load
 window.onload = () => {
+  loadOptimizerStatus();
   loadCampaigns();
   loadProducts();
 };

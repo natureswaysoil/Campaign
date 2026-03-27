@@ -154,3 +154,67 @@ pre {
   padding: 20px;
   color: #666;
 }
+
+/* Optimizer Status Section */
+.optimizer-status {
+  background: #f0f7ff;
+  border: 2px solid #0066cc;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 30px;
+}
+
+.optimizer-card {
+  background: white;
+  padding: 20px;
+  border-radius: 6px;
+}
+
+.optimizer-header {
+  margin-bottom: 15px;
+}
+
+.status-badge {
+  background: #28a745;
+  color: white;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: bold;
+  margin-right: 10px;
+}
+
+.action-card {
+  border-left: 4px solid #ddd;
+  padding: 15px;
+  margin: 15px 0;
+  background: #f9f9f9;
+  border-radius: 4px;
+}
+
+.action-card h4 {
+  margin-top: 0;
+}
+
+.action-card.winner {
+  border-left-color: #28a745;
+  background: #f0fff4;
+}
+
+.action-card.negative {
+  border-left-color: #dc3545;
+  background: #fff5f5;
+}
+
+.action-card.hold {
+  border-left-color: #ffc107;
+  background: #fffbf0;
+}
+
+.note {
+  margin-top: 20px;
+  padding: 10px;
+  background: #fff3cd;
+  border-left: 4px solid #ffc107;
+  font-size: 14px;
+}

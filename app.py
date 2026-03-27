@@ -942,3 +942,46 @@ def api_list_campaigns():
     except Exception as e:
         logger.error("Failed to fetch campaigns", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/optimizer-status")
+def api_optimizer_status():
+    """
+    Show what the optimizer does and its configuration.
+    This helps users understand the automated optimization.
+    """
+    config = {
+        "top_performer_roas_min": 3.0,
+        "top_performer_acos_max": 0.35,
+        "profitable_roas_min": 1.0,
+        "profitable_acos_max": 1.0,
+        "marginal_roas_min": 0.5,
+        "marginal_acos_max": 2.0,
+        "min_impressions": 100,
+        "min_clicks": 5,
+    }
+    
+    return {
+        "description": "Daily Optimizer automatically manages your campaigns",
+        "schedule": "Runs daily at 6:00 AM EST",
+        "lookback_days": 14,
+        "actions": {
+            "winners": {
+                "description": "Promotes high-performing search terms as keywords",
+                "criteria": f"ROAS ≥ {config['top_performer_roas_min']} AND at least {config['min_clicks']} clicks",
+                "action": "Adds as EXACT, PHRASE, and BROAD match keywords",
+                "bid_amount": "$0.90 per click"
+            },
+            "negatives": {
+                "description": "Blocks poor-performing search terms",
+                "criteria": f"ROAS < {config['marginal_roas_min']} AND at least {config['min_impressions']} impressions",
+                "action": "Adds as negative keywords to prevent future spend"
+            },
+            "hold": {
+                "description": "Monitors terms with middle performance",
+                "criteria": f"ROAS between {config['marginal_roas_min']} and {config['top_performer_roas_min']}",
+                "action": "No changes - continues monitoring"
+            }
+        },
+        "note": "The optimizer does NOT change bids on existing keywords. It only adds new keywords and negative keywords based on search term performance."
+    }
