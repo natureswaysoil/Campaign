@@ -1,21 +1,21 @@
 # Core Framework
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-
-# HTTP & API
-requests>=2.32.0
-
-# Google Cloud (Secret Manager + Cloud Run)
-google-cloud-secret-manager>=2.20.0
-
-# Templates (Jinja2 for dashboard)
-jinja2>=3.1.0
-
-# Optional but recommended for better performance & security
-pydantic>=2.8.0
-python-multipart>=0.0.9
 gunicorn>=22.0.0
 
-# Development / Testing
-pytest>=8.0.0
-httpx>=0.27.0
+# HTTP Client & Parsing
+requests>=2.32.0
+
+# Google Cloud Secret Manager
+google-cloud-secret-manager>=2.21.0
+
+# Templating for Dashboard
+jinja2>=3.1.0
+
+# Security & Validation
+pydantic>=2.9.0
+python-multipart>=0.0.12
+
+# Optional: Better performance in production
+uvloop>=0.21.0; platform_system != "Windows"
+httptools>=0.6.0
