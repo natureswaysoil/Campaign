@@ -1,35 +1,30 @@
 FROM python:3.12-slim
 
-# Create non-root user for security
+# Create non-root user
 RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /app
 
-# Install system dependencies if needed (usually minimal)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install dependencies
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire project (including templates/ folder)
+# Copy ALL project files (including templates/ folder)
 COPY . .
 
-# Set permissions
+# Fix permissions
 RUN chown -R appuser:appuser /app
 
 USER appuser
 
-# Environment
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080
 
 EXPOSE 8080
 
-# Use Gunicorn with Uvicorn worker (best for Cloud Run)
+# Run with Gunicorn (recommended for Cloud Run)
 CMD ["gunicorn", "app:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", \
