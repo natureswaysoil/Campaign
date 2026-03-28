@@ -1,5 +1,21 @@
-fastapi==0.115.12
-uvicorn[standard]==0.34.0
-requests==2.32.3
-jinja2==3.1.6
-google-cloud-secret-manager==2.24.0
+# Core Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# HTTP & API
+requests>=2.32.0
+
+# Google Cloud (Secret Manager + Cloud Run)
+google-cloud-secret-manager>=2.20.0
+
+# Templates (Jinja2 for dashboard)
+jinja2>=3.1.0
+
+# Optional but recommended for better performance & security
+pydantic>=2.8.0
+python-multipart>=0.0.9
+gunicorn>=22.0.0
+
+# Development / Testing
+pytest>=8.0.0
+httpx>=0.27.0
