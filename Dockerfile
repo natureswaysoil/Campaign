@@ -7,13 +7,13 @@ WORKDIR /app
 
 # Install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy ALL project files (including templates/ folder)
+# Copy everything (including the templates/ folder)
 COPY . .
 
-# Fix permissions
+# Set correct permissions
 RUN chown -R appuser:appuser /app
 
 USER appuser
@@ -24,7 +24,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 EXPOSE 8080
 
-# Run with Gunicorn (recommended for Cloud Run)
+# Run with Gunicorn + Uvicorn (best for Cloud Run)
 CMD ["gunicorn", "app:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", \
