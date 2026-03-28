@@ -5,15 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Amazon Ads Campaign Manager</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         body { font-family: system-ui, sans-serif; }
         .card { transition: all 0.3s; }
         .card:hover { transform: translateY(-4px); }
-        .sparkline { height: 65px; }
-        .good { color: #10b981; }
-        .warning { color: #f59e0b; }
-        .bad { color: #ef4444; }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -21,7 +16,7 @@
         <div class="flex justify-between items-center mb-8">
             <div>
                 <h1 class="text-4xl font-bold text-gray-900">Amazon Ads Campaign Manager</h1>
-                <p class="text-gray-600">Natures Way Soil • Real Performance</p>
+                <p class="text-gray-600">Natures Way Soil • Active Campaigns Only</p>
             </div>
             <button onclick="runOptimizer()" 
                     class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-semibold text-lg shadow-lg">
@@ -35,7 +30,7 @@
         <!-- Active Campaigns -->
         <div class="bg-white rounded-3xl shadow p-8">
             <h2 class="text-2xl font-semibold mb-6">Active Campaigns (<span id="active-count">0</span>)</h2>
-            <div id="campaigns-list" class="grid grid-cols-1 xl:grid-cols-2 gap-6"></div>
+            <div id="campaigns-list" class="grid grid-cols-1 lg:grid-cols-2 gap-6"></div>
         </div>
 
         <div class="mt-8 text-center text-xs text-gray-500">
@@ -57,38 +52,35 @@
                 document.getElementById('last-updated').textContent = new Date().toLocaleString();
             } catch (e) {
                 console.error(e);
-                document.getElementById('campaigns-list').innerHTML = 
-                    `<p class="text-red-500 p-12 text-center">Failed to load data. Check backend logs.</p>`;
+                document.getElementById('campaigns-list').innerHTML = `<p class="text-red-500 p-12 text-center">Error loading data. Check logs.</p>`;
             }
         }
 
         function renderPortfolioSummary(campaigns) {
-            let totalSpend = 0, totalSales = 0, totalClicks = 0;
+            let spend = 0, sales = 0, clicks = 0;
             campaigns.forEach(c => {
-                totalSpend += Number(c.spend || 0);
-                totalSales += Number(c.sales || 0);
-                totalClicks += Number(c.clicks || 0);
+                spend += Number(c.spend || 0);
+                sales += Number(c.sales || 0);
+                clicks += Number(c.clicks || 0);
             });
-
-            const portfolioAcos = totalSales > 0 ? ((totalSpend / totalSales) * 100).toFixed(1) : "0";
-            const acosClass = portfolioAcos < 30 ? 'good' : portfolioAcos < 50 ? 'warning' : 'bad';
+            const acos = sales > 0 ? ((spend / sales) * 100).toFixed(1) : "0";
 
             document.getElementById('portfolio-summary').innerHTML = `
                 <div class="text-center">
-                    <div class="text-gray-500 text-sm">Total Spend (14d)</div>
-                    <div class="text-3xl font-bold">$${totalSpend.toFixed(2)}</div>
+                    <div class="text-gray-500">Total Spend</div>
+                    <div class="text-3xl font-bold">$${spend.toFixed(2)}</div>
                 </div>
                 <div class="text-center">
-                    <div class="text-gray-500 text-sm">Total Sales (14d)</div>
-                    <div class="text-3xl font-bold">$${totalSales.toFixed(2)}</div>
+                    <div class="text-gray-500">Total Sales</div>
+                    <div class="text-3xl font-bold">$${sales.toFixed(2)}</div>
                 </div>
                 <div class="text-center">
-                    <div class="text-gray-500 text-sm">Portfolio ACoS</div>
-                    <div class="text-3xl font-bold ${acosClass}">${portfolioAcos}%</div>
+                    <div class="text-gray-500">Portfolio ACoS</div>
+                    <div class="text-3xl font-bold ${acos < 30 ? 'text-green-600' : acos < 50 ? 'text-amber-600' : 'text-red-600'}">${acos}%</div>
                 </div>
                 <div class="text-center">
-                    <div class="text-gray-500 text-sm">Total Clicks</div>
-                    <div class="text-3xl font-bold">${totalClicks}</div>
+                    <div class="text-gray-500">Total Clicks</div>
+                    <div class="text-3xl font-bold">${clicks}</div>
                 </div>
             `;
         }
@@ -98,34 +90,42 @@
             let html = '';
 
             campaigns.forEach(c => {
-                const name = c.name || 'Unnamed Campaign';
+                const name = c.name || 'Unnamed';
                 const budget = c.budget && c.budget.budget ? `$${c.budget.budget}` : '—';
                 const acos = c.acos !== undefined ? (c.acos * 100).toFixed(1) + '%' : '—';
-                const acosClass = (c.acos || 1) < 0.30 ? 'good' : (c.acos || 1) < 0.50 ? 'warning' : 'bad';
+                const acosClass = (c.acos || 1) < 0.3 ? 'text-green-600' : (c.acos || 1) < 0.5 ? 'text-amber-600' : 'text-red-600';
 
                 html += `
-                    <div class="card border border-gray-200 rounded-3xl p-7 bg-white">
-                        <div class="flex justify-between">
-                            <div class="font-semibold text-lg">${name}</div>
-                            <span class="px-4 py-1 text-xs bg-green-100 text-green-700 rounded-full">ENABLED</span>
-                        </div>
+                    <div class="card border border-gray-200 rounded-3xl p-6 bg-white">
+                        <div class="font-semibold text-lg">${name}</div>
                         <div class="text-xs text-gray-500 mt-1">ID: ${c.campaignId || '—'}</div>
-
                         <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                            <div><div class="text-gray-500">Budget</div><div class="font-medium">${budget}</div></div>
-                            <div><div class="text-gray-500">Spend</div><div class="font-medium">$${Number(c.spend||0).toFixed(2)}</div></div>
-                            <div><div class="text-gray-500">Sales</div><div class="font-medium">$${Number(c.sales||0).toFixed(2)}</div></div>
+                            <div>
+                                <div class="text-gray-500">Budget</div>
+                                <div class="font-medium">${budget}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">Spend</div>
+                                <div class="font-medium">$${Number(c.spend||0).toFixed(2)}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">Sales</div>
+                                <div class="font-medium">$${Number(c.sales||0).toFixed(2)}</div>
+                            </div>
                         </div>
-
                         <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                            <div><div class="text-gray-500">Clicks</div><div class="font-medium">${c.clicks||0}</div></div>
-                            <div><div class="text-gray-500">Orders</div><div class="font-medium">${c.orders||0}</div></div>
-                            <div><div class="text-gray-500">ACoS</div><div class="font-semibold ${acosClass}">${acos}</div></div>
-                        </div>
-
-                        <div class="mt-6">
-                            <div class="text-xs text-gray-500 mb-2">ACoS Trend (14 days)</div>
-                            <canvas id="spark-${c.campaignId}" class="sparkline w-full"></canvas>
+                            <div>
+                                <div class="text-gray-500">Clicks</div>
+                                <div class="font-medium">${c.clicks||0}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">Orders</div>
+                                <div class="font-medium">${c.orders||0}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">ACoS</div>
+                                <div class="font-semibold ${acosClass}">${acos}</div>
+                            </div>
                         </div>
                     </div>`;
             });
@@ -135,21 +135,6 @@
             }
 
             container.innerHTML = html;
-
-            // Render sparklines
-            setTimeout(() => {
-                campaigns.forEach(c => {
-                    const canvas = document.getElementById(`spark-${c.campaignId}`);
-                    if (canvas && c.daily_trend && c.daily_trend.length > 0) {
-                        const trendData = c.daily_trend.map(d => d.acos || 0.4);
-                        new Chart(canvas, {
-                            type: 'line',
-                            data: { labels: Array(trendData.length).fill(''), datasets: [{ data: trendData, borderColor: '#10b981', borderWidth: 2.5, tension: 0.4, pointRadius: 0 }] },
-                            options: { responsive: true, maintainAspectRatio: false, plugins: {legend: {display: false}}, scales: {x: {display: false}, y: {display: false}} }
-                        });
-                    }
-                });
-            }, 200);
         }
 
         async function runOptimizer() {
@@ -158,22 +143,18 @@
             try {
                 const res = await fetch('/api/run-daily-optimization', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                    body: JSON.stringify({ apply_negatives_live: true, apply_winners_live: true, lookback_days: 14 })
+                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${token}`},
+                    body: JSON.stringify({apply_negatives_live: true, apply_winners_live: true, lookback_days: 14})
                 });
-                if (res.ok) {
-                    alert("Optimizer completed!");
-                    fetchData();
-                } else {
-                    alert("Failed to run optimizer");
-                }
+                if (res.ok) alert("Optimizer completed!");
+                fetchData();
             } catch (e) {
                 alert("Error running optimizer");
             }
         }
 
         window.onload = fetchData;
-        setInterval(fetchData, 180000);
+        setInterval(fetchData, 120000);
     </script>
 </body>
 </html>
