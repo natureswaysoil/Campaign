@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Amazon Ads Campaign Optimizer")
 
+# === CRITICAL FIX: Use absolute path for templates ===
+BASE_DIR = Path(__file__).parent.absolute()
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
 # ========================= CONFIG =========================
 PRODUCTS_CSV_URL = os.getenv(
     "PRODUCTS_CSV_URL",
@@ -82,8 +86,6 @@ STOPWORDS = {
 }
 
 OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
-
-templates = Jinja2Templates(directory="templates")
 
 
 # ========================= HELPERS =========================
@@ -521,13 +523,21 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ========================= ROUTES =========================
+# ========================= MAIN ROUTES =========================
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     try:
         return templates.TemplateResponse("dashboard.html", {"request": request})
-    except Exception:
-        return HTMLResponse("<h2>Amazon PPC Optimizer Dashboard</h2><p>Service is running.</p>")
+    except Exception as e:
+        logger.error(f"Template loading failed: {e}")
+        return HTMLResponse(f"""
+            <h2>Amazon PPC Optimizer Dashboard</h2>
+            <p>Service is running.</p>
+            <p style="color: red; margin-top: 20px;">
+                <strong>Template Error:</strong> {str(e)}<br><br>
+                Make sure <code>templates/dashboard.html</code> exists in the project root.
+            </p>
+        """)
 
 
 @app.get("/health")
@@ -721,10 +731,9 @@ def api_list_campaigns():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========================= REAL DAILY PERFORMANCE (NEW) =========================
+# ========================= REAL DAILY PERFORMANCE =========================
 @app.get("/api/campaign-performance")
 def api_campaign_performance():
-    """Return active campaigns with real 14-day summary + daily trend data"""
     client = AmazonAdsClient()
     start_date = iso_date_days_ago(14)
     end_date = today_iso_date()
@@ -750,7 +759,6 @@ def api_campaign_performance():
         return {"count": 0, "campaigns": []}
 
     try:
-        # Request DAILY report for real trends
         body = {
             "startDate": start_date,
             "endDate": end_date,
@@ -769,7 +777,6 @@ def api_campaign_performance():
         if not report_id:
             raise RuntimeError("No reportId returned")
 
-        # Poll
         for _ in range(30):
             status = client.get(f"{ENDPOINTS['reports']}/{report_id}")
             if status.get("status") == "SUCCESS":
@@ -782,7 +789,6 @@ def api_campaign_performance():
         content = client.download_binary(download_url)
         rows = parse_report_json_bytes(content)
 
-        # Group data
         daily_by_campaign = defaultdict(list)
         summary_by_campaign = defaultdict(lambda: {"impressions": 0, "clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0})
 
@@ -806,7 +812,6 @@ def api_campaign_performance():
             s["sales"] += num(row, ["sales14d"], 0)
             s["orders"] += int(num(row, ["purchases14d"], 0))
 
-        # Enrich campaigns
         enriched = []
         for c in campaigns:
             cid = str(c.get("campaignId") or "")
