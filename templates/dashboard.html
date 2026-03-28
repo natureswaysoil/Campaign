@@ -7,130 +7,352 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { font-family: system-ui, sans-serif; }
-        .card { transition: all 0.3s; }
+        .card { transition: all 0.25s ease; }
         .card:hover { transform: translateY(-4px); }
     </style>
 </head>
 <body class="bg-gray-50">
     <div class="max-w-7xl mx-auto px-6 py-8">
-        <div class="flex justify-between items-center mb-8">
+        <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-8">
             <div>
                 <h1 class="text-4xl font-bold text-gray-900">Amazon Ads Campaign Manager</h1>
-                <p class="text-gray-600">Natures Way Soil • Only Active Campaigns</p>
+                <p class="text-gray-600">Nature's Way Soil • ENABLED Campaigns Only</p>
             </div>
-            <button onclick="runOptimizer()" 
-                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-semibold text-lg shadow-lg flex items-center gap-2">
-                ▶️ Run Daily Optimizer Now
-            </button>
+
+            <div class="flex gap-3">
+                <button
+                    onclick="loadDashboard()"
+                    class="bg-white border border-gray-300 hover:bg-gray-100 text-gray-800 px-6 py-3 rounded-2xl font-semibold shadow-sm">
+                    Refresh
+                </button>
+
+                <button
+                    onclick="runOptimizer()"
+                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded-2xl font-semibold shadow-lg flex items-center gap-2">
+                    ▶️ Run Daily Optimizer Now
+                </button>
+            </div>
         </div>
 
         <!-- Summary -->
         <div id="summary" class="bg-white rounded-3xl shadow p-8 mb-10 grid grid-cols-2 md:grid-cols-4 gap-6 text-center"></div>
 
-        <!-- Active Campaigns -->
-        <div class="bg-white rounded-3xl shadow p-8">
-            <h2 class="text-2xl font-semibold mb-6">Active Campaigns (<span id="count">0</span>)</h2>
-            <div id="list" class="grid grid-cols-1 lg:grid-cols-2 gap-6"></div>
+        <!-- Status -->
+        <div id="statusBox" class="bg-white rounded-3xl shadow p-6 mb-8">
+            <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-900">Daily Optimizer Status</h2>
+                    <p class="text-gray-600 mt-1">Dashboard shows ENABLED campaigns only.</p>
+                </div>
+                <div class="text-sm text-gray-500">
+                    Last updated: <span id="time">—</span>
+                </div>
+            </div>
+
+            <div id="optimizerStatus" class="mt-4 text-sm text-gray-700">
+                Loading optimizer status...
+            </div>
         </div>
 
-        <div class="mt-8 text-center text-xs text-gray-500">
-            Last updated: <span id="time"></span>
+        <!-- Active Campaigns -->
+        <div class="bg-white rounded-3xl shadow p-8">
+            <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-3 mb-6">
+                <h2 class="text-2xl font-semibold">
+                    Active Campaigns (<span id="count">0</span>)
+                </h2>
+                <div class="text-sm text-gray-500">
+                    Showing only state = ENABLED
+                </div>
+            </div>
+
+            <div id="list" class="grid grid-cols-1 lg:grid-cols-2 gap-6"></div>
         </div>
     </div>
 
     <script>
+        function escapeHtml(str) {
+            return String(str || '').replace(/[&<>"']/g, function (m) {
+                return ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                })[m];
+            });
+        }
+
+        function toMoney(value) {
+            const n = Number(value || 0);
+            return `$${n.toFixed(2)}`;
+        }
+
+        function toPercent(value, digits = 1) {
+            if (value === undefined || value === null || isNaN(Number(value))) return '—';
+            return `${(Number(value) * 100).toFixed(digits)}%`;
+        }
+
+        function badgeClassForAcos(acos) {
+            if (acos === undefined || acos === null || isNaN(Number(acos))) {
+                return 'text-gray-600';
+            }
+            if (Number(acos) < 0.30) return 'text-green-600';
+            if (Number(acos) < 0.50) return 'text-amber-600';
+            return 'text-red-600';
+        }
+
+        function bidModeBadge(mode) {
+            const clean = String(mode || '').toUpperCase();
+            if (clean === 'PEAK') {
+                return '<span class="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 px-3 py-1 text-xs font-semibold">PEAK</span>';
+            }
+            if (clean === 'OFF_PEAK' || clean === 'OFF-PEAK') {
+                return '<span class="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-semibold">OFF-PEAK</span>';
+            }
+            return '<span class="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-3 py-1 text-xs font-semibold">UNKNOWN</span>';
+        }
+
+        function safeCampaignName(c) {
+            return escapeHtml(c.campaignName || c.name || 'Unnamed Campaign');
+        }
+
+        function renderSummary(campaigns) {
+            let spend = 0;
+            let sales = 0;
+            let clicks = 0;
+            let orders = 0;
+
+            campaigns.forEach(c => {
+                spend += Number(c.spend || 0);
+                sales += Number(c.sales || 0);
+                clicks += Number(c.clicks || 0);
+                orders += Number(c.orders || 0);
+            });
+
+            const acos = sales > 0 ? (spend / sales) : null;
+
+            document.getElementById('summary').innerHTML = `
+                <div>
+                    <div class="text-gray-500 text-sm">Total Spend</div>
+                    <div class="text-3xl font-bold">${toMoney(spend)}</div>
+                </div>
+                <div>
+                    <div class="text-gray-500 text-sm">Total Sales</div>
+                    <div class="text-3xl font-bold">${toMoney(sales)}</div>
+                </div>
+                <div>
+                    <div class="text-gray-500 text-sm">Portfolio ACoS</div>
+                    <div class="text-3xl font-bold ${badgeClassForAcos(acos)}">${acos === null ? '—' : toPercent(acos)}</div>
+                </div>
+                <div>
+                    <div class="text-gray-500 text-sm">Total Clicks / Orders</div>
+                    <div class="text-3xl font-bold">${clicks} / ${orders}</div>
+                </div>
+            `;
+        }
+
+        function renderOptimizerStatus(data) {
+            const statusEl = document.getElementById('optimizerStatus');
+
+            const bidMode = data.bid_mode || data.bidMode || 'UNKNOWN';
+            const peakHours = data.peak_hours_label || data.peakHoursLabel || 'Backend-controlled';
+            const note = data.note || '';
+
+            statusEl.innerHTML = `
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div class="rounded-2xl border border-gray-200 p-4">
+                        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Optimizer</div>
+                        <div class="font-semibold text-gray-900">Enabled Campaign Monitor</div>
+                        <div class="text-sm text-gray-600 mt-1">Promotes winners and blocks poor performers from backend rules.</div>
+                    </div>
+
+                    <div class="rounded-2xl border border-gray-200 p-4">
+                        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Bid Mode</div>
+                        <div>${bidModeBadge(bidMode)}</div>
+                        <div class="text-sm text-gray-600 mt-2">Peak-hour logic: ${escapeHtml(peakHours)}</div>
+                    </div>
+
+                    <div class="rounded-2xl border border-gray-200 p-4">
+                        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Backend Note</div>
+                        <div class="text-sm text-gray-700">${escapeHtml(note || 'No backend note provided.')}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderCampaigns(campaigns) {
+            const listEl = document.getElementById('list');
+
+            if (!campaigns.length) {
+                listEl.innerHTML = `<p class="text-gray-400 p-12 text-center">No active (ENABLED) campaigns found.</p>`;
+                return;
+            }
+
+            let html = '';
+
+            campaigns.forEach(c => {
+                const name = safeCampaignName(c);
+                const campaignId = escapeHtml(c.campaignId || '—');
+                const budget = (c.budget && c.budget.budget !== undefined && c.budget.budget !== null)
+                    ? `$${Number(c.budget.budget).toFixed(2)}`
+                    : '—';
+
+                const spend = toMoney(c.spend || 0);
+                const sales = toMoney(c.sales || 0);
+                const clicks = Number(c.clicks || 0);
+                const orders = Number(c.orders || 0);
+                const acos = c.acos;
+                const acosVal = acos === undefined || acos === null ? '—' : toPercent(acos);
+                const acosClass = badgeClassForAcos(acos);
+
+                // These are optional backend fields for Amazon suggested bids
+                const suggestedLow = c.amazonSuggestedBidLow ?? c.suggestedBidLow ?? c.bid_low ?? null;
+                const suggestedHigh = c.amazonSuggestedBidHigh ?? c.suggestedBidHigh ?? c.bid_high ?? null;
+                const currentBidMode = c.currentBidMode ?? c.bidMode ?? null;
+                const currentAppliedBid = c.currentAppliedBid ?? c.appliedBid ?? null;
+
+                html += `
+                    <div class="card border border-gray-200 rounded-3xl p-6 bg-white shadow-sm">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <div class="font-semibold text-lg leading-tight">${name}</div>
+                                <div class="text-xs text-gray-500 mt-1">ID: ${campaignId}</div>
+                            </div>
+                            <div>${bidModeBadge(currentBidMode || 'UNKNOWN')}</div>
+                        </div>
+
+                        <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
+                            <div>
+                                <div class="text-gray-500">Budget</div>
+                                <div class="font-medium">${budget}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">Spend</div>
+                                <div class="font-medium">${spend}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">Sales</div>
+                                <div class="font-medium">${sales}</div>
+                            </div>
+                        </div>
+
+                        <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
+                            <div>
+                                <div class="text-gray-500">Clicks</div>
+                                <div class="font-medium">${clicks}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">Orders</div>
+                                <div class="font-medium">${orders}</div>
+                            </div>
+                            <div>
+                                <div class="text-gray-500">ACoS</div>
+                                <div class="font-semibold ${acosClass}">${acosVal}</div>
+                            </div>
+                        </div>
+
+                        <div class="mt-6 border-t border-gray-100 pt-4">
+                            <div class="text-sm font-semibold text-gray-800 mb-3">Amazon Suggested Bid Window</div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                <div>
+                                    <div class="text-gray-500">Suggested Low</div>
+                                    <div class="font-medium">${suggestedLow === null ? '—' : toMoney(suggestedLow)}</div>
+                                </div>
+                                <div>
+                                    <div class="text-gray-500">Suggested High</div>
+                                    <div class="font-medium">${suggestedHigh === null ? '—' : toMoney(suggestedHigh)}</div>
+                                </div>
+                                <div>
+                                    <div class="text-gray-500">Applied Bid</div>
+                                    <div class="font-medium">${currentAppliedBid === null ? '—' : toMoney(currentAppliedBid)}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            listEl.innerHTML = html;
+        }
+
         async function loadDashboard() {
             try {
                 const res = await fetch('/api/campaign-performance');
-                const data = await res.json();
-                const campaigns = data.campaigns || [];
+                const text = await res.text();
+
+                let data = {};
+                try {
+                    data = JSON.parse(text);
+                } catch {
+                    throw new Error(`Invalid JSON from /api/campaign-performance: ${text}`);
+                }
+
+                if (!res.ok) {
+                    throw new Error(data.detail || text || 'Failed to load dashboard data');
+                }
+
+                const campaigns = (data.campaigns || []).filter(c => String(c.state || '').toUpperCase() === 'ENABLED');
 
                 document.getElementById('count').textContent = campaigns.length;
                 document.getElementById('time').textContent = new Date().toLocaleString();
 
-                // Portfolio Summary
-                let spend = 0, sales = 0, clicks = 0;
-                campaigns.forEach(c => {
-                    spend += Number(c.spend || 0);
-                    sales += Number(c.sales || 0);
-                    clicks += Number(c.clicks || 0);
-                });
-                const acos = sales > 0 ? ((spend / sales) * 100).toFixed(1) : "0";
-
-                document.getElementById('summary').innerHTML = `
-                    <div>
-                        <div class="text-gray-500 text-sm">Total Spend (14d)</div>
-                        <div class="text-3xl font-bold">$${spend.toFixed(2)}</div>
-                    </div>
-                    <div>
-                        <div class="text-gray-500 text-sm">Total Sales (14d)</div>
-                        <div class="text-3xl font-bold">$${sales.toFixed(2)}</div>
-                    </div>
-                    <div>
-                        <div class="text-gray-500 text-sm">Portfolio ACoS</div>
-                        <div class="text-3xl font-bold ${acos < 30 ? 'text-green-600' : acos < 50 ? 'text-amber-600' : 'text-red-600'}">${acos}%</div>
-                    </div>
-                    <div>
-                        <div class="text-gray-500 text-sm">Total Clicks</div>
-                        <div class="text-3xl font-bold">${clicks}</div>
-                    </div>
-                `;
-
-                // Campaign List - Only Active
-                let html = '';
-                campaigns.forEach(c => {
-                    const name = c.name || 'Unnamed Campaign';
-                    const budget = c.budget && c.budget.budget ? `$${c.budget.budget}` : '—';
-                    const acosVal = c.acos !== undefined ? (c.acos * 100).toFixed(1) + '%' : '—';
-                    const acosClass = (c.acos || 1) < 0.3 ? 'text-green-600' : (c.acos || 1) < 0.5 ? 'text-amber-600' : 'text-red-600';
-
-                    html += `
-                        <div class="card border border-gray-200 rounded-3xl p-6 bg-white">
-                            <div class="font-semibold text-lg leading-tight">${name}</div>
-                            <div class="text-xs text-gray-500 mt-1">ID: ${c.campaignId || '—'}</div>
-                            <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                                <div><div class="text-gray-500">Budget</div><div class="font-medium">${budget}</div></div>
-                                <div><div class="text-gray-500">Spend</div><div class="font-medium">$${Number(c.spend||0).toFixed(2)}</div></div>
-                                <div><div class="text-gray-500">Sales</div><div class="font-medium">$${Number(c.sales||0).toFixed(2)}</div></div>
-                            </div>
-                            <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                                <div><div class="text-gray-500">Clicks</div><div class="font-medium">${c.clicks||0}</div></div>
-                                <div><div class="text-gray-500">Orders</div><div class="font-medium">${c.orders||0}</div></div>
-                                <div><div class="text-gray-500">ACoS</div><div class="font-semibold ${acosClass}">${acosVal}</div></div>
-                            </div>
-                        </div>`;
-                });
-
-                if (campaigns.length === 0) {
-                    html = `<p class="text-gray-400 p-12 text-center">No active (ENABLED) campaigns found.</p>`;
-                }
-                document.getElementById('list').innerHTML = html;
+                renderSummary(campaigns);
+                renderOptimizerStatus(data);
+                renderCampaigns(campaigns);
 
             } catch (err) {
                 console.error(err);
-                document.getElementById('list').innerHTML = `<p class="text-red-500 p-12 text-center">Failed to load data from backend.</p>`;
+                document.getElementById('summary').innerHTML = `
+                    <div class="col-span-full text-red-500 text-center p-8">
+                        Failed to load summary from backend.
+                    </div>
+                `;
+                document.getElementById('optimizerStatus').innerHTML = `
+                    <div class="text-red-500">Failed to load optimizer status.</div>
+                `;
+                document.getElementById('list').innerHTML = `
+                    <p class="text-red-500 p-12 text-center">Failed to load data from backend.</p>
+                `;
             }
         }
 
         async function runOptimizer() {
             const token = prompt("Enter your DAILY_OPTIMIZER_TOKEN:");
             if (!token) return;
+
             try {
                 const res = await fetch('/api/run-daily-optimization', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                    body: JSON.stringify({ apply_negatives_live: true, apply_winners_live: true, lookback_days: 14 })
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        apply_negatives_live: true,
+                        apply_winners_live: true,
+                        lookback_days: 14
+                    })
                 });
-                if (res.ok) alert("✅ Optimizer completed successfully!");
-                loadDashboard();
+
+                const text = await res.text();
+
+                if (!res.ok) {
+                    alert("❌ Optimizer error:\\n\\n" + text);
+                    return;
+                }
+
+                alert("✅ Optimizer completed successfully!");
+                await loadDashboard();
+
             } catch (e) {
-                alert("Failed to run optimizer. Check token.");
+                console.error(e);
+                alert("❌ Failed to run optimizer. Check token or backend.");
             }
         }
 
-        // Load dashboard
         window.onload = loadDashboard;
-        setInterval(loadDashboard, 120000); // refresh every 2 minutes
+        setInterval(loadDashboard, 120000);
     </script>
 </body>
 </html>
