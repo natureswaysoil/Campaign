@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Amazon Ads Campaign Manager</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         body { font-family: system-ui, sans-serif; }
         .card { transition: all 0.3s; }
         .card:hover { transform: translateY(-4px); }
+        .sparkline { height: 65px; }
         .good { color: #10b981; }
         .warning { color: #f59e0b; }
         .bad { color: #ef4444; }
@@ -19,7 +21,7 @@
         <div class="flex justify-between items-center mb-8">
             <div>
                 <h1 class="text-4xl font-bold text-gray-900">Amazon Ads Campaign Manager</h1>
-                <p class="text-gray-600">Natures Way Soil • Live Performance Overview</p>
+                <p class="text-gray-600">Natures Way Soil • Real-time Performance Overview</p>
             </div>
             <button onclick="runOptimizer()" 
                     class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-semibold text-lg shadow-lg flex items-center gap-3 transition">
@@ -27,38 +29,40 @@
             </button>
         </div>
 
+        <!-- Portfolio Summary -->
+        <div id="portfolio-summary" class="bg-white rounded-3xl shadow p-8 mb-10 grid grid-cols-2 md:grid-cols-4 gap-6">
+            <!-- Filled by JavaScript -->
+        </div>
+
         <!-- Optimizer Status -->
         <div class="bg-white rounded-3xl shadow p-8 mb-10">
             <h2 class="text-2xl font-semibold mb-6">Daily Optimizer Status</h2>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
                 <div><span class="font-medium">Schedule:</span> Daily at 6:00 AM EST</div>
-                <div><span class="font-medium">Lookback:</span> Last 14 days</div>
-                <div><span class="font-medium">Bidding Strategy:</span> <span class="text-emerald-600">Dynamic (Peak hours high bid • Off-peak low bid)</span></div>
+                <div><span class="font-medium">Analysis Period:</span> Last 14 days</div>
+                <div><span class="font-medium">Bidding Strategy:</span> <span class="text-emerald-600">Dynamic Peak / Off-Peak</span></div>
             </div>
-            <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
                 <div class="bg-emerald-50 p-5 rounded-2xl">
                     <p class="font-semibold text-emerald-700">✅ Promotes Winners</p>
-                    <p class="text-sm">High ROAS search terms → new keywords</p>
+                    <p class="text-xs">High-performing search terms → new keywords</p>
                 </div>
                 <div class="bg-amber-50 p-5 rounded-2xl">
-                    <p class="font-semibold text-amber-700">🚫 Adds Negatives</p>
-                    <p class="text-sm">Poor performing terms blocked</p>
+                    <p class="font-semibold text-amber-700">🚫 Blocks Poor Performers</p>
+                    <p class="text-xs">Zero-order high-click terms → negative keywords</p>
                 </div>
                 <div class="bg-blue-50 p-5 rounded-2xl">
                     <p class="font-semibold text-blue-700">Dynamic Bidding Active</p>
-                    <p class="text-sm">Time-of-day based bid adjustment</p>
+                    <p class="text-xs">Time-of-day based bid adjustment</p>
                 </div>
             </div>
         </div>
 
-        <!-- Active Campaigns with Performance -->
+        <!-- Active Campaigns -->
         <div class="bg-white rounded-3xl shadow p-8">
-            <div class="flex justify-between mb-6">
-                <h2 class="text-2xl font-semibold">Active Campaigns (<span id="active-count">0</span>)</h2>
-                <p class="text-sm text-gray-500">Only ENABLED campaigns • Last 14 days performance</p>
-            </div>
-            <div id="campaigns-list" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <!-- Filled by JavaScript -->
+            <h2 class="text-2xl font-semibold mb-6">Active Campaigns (<span id="active-count">0</span>)</h2>
+            <div id="campaigns-list" class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <!-- Populated by JavaScript -->
             </div>
         </div>
 
@@ -70,21 +74,52 @@
     <script>
         async function fetchData() {
             try {
-                const res = await fetch('/api/campaigns');
+                const res = await fetch('/api/campaign-performance');
                 const data = await res.json();
 
-                const active = (data.campaigns || []).filter(c => 
-                    (c.state || "").toUpperCase() === "ENABLED"
-                );
-
+                const active = data.campaigns || [];
                 document.getElementById('active-count').textContent = active.length;
+
+                renderPortfolioSummary(active);
                 renderCampaigns(active);
                 document.getElementById('last-updated').textContent = new Date().toLocaleString();
             } catch (e) {
                 console.error(e);
                 document.getElementById('campaigns-list').innerHTML = 
-                    `<p class="col-span-2 text-red-500 p-12 text-center">Failed to load campaign data.</p>`;
+                    `<p class="col-span-2 text-red-500 p-12 text-center">Failed to load campaign performance data.</p>`;
             }
+        }
+
+        function renderPortfolioSummary(campaigns) {
+            let totalSpend = 0, totalSales = 0, totalClicks = 0;
+            campaigns.forEach(c => {
+                totalSpend += c.spend || 0;
+                totalSales += c.sales || 0;
+                totalClicks += c.clicks || 0;
+            });
+
+            const portfolioAcos = totalSales > 0 ? ((totalSpend / totalSales) * 100).toFixed(1) : "0";
+            const acosClass = portfolioAcos < 30 ? 'good' : portfolioAcos < 50 ? 'warning' : 'bad';
+
+            const html = `
+                <div class="text-center">
+                    <div class="text-gray-500 text-sm">Total Spend (14d)</div>
+                    <div class="text-3xl font-bold">$${parseFloat(totalSpend).toFixed(2)}</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-gray-500 text-sm">Total Sales (14d)</div>
+                    <div class="text-3xl font-bold">$${parseFloat(totalSales).toFixed(2)}</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-gray-500 text-sm">Portfolio ACoS</div>
+                    <div class="text-3xl font-bold ${acosClass}">${portfolioAcos}%</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-gray-500 text-sm">Total Clicks</div>
+                    <div class="text-3xl font-bold">${totalClicks}</div>
+                </div>
+            `;
+            document.getElementById('portfolio-summary').innerHTML = html;
         }
 
         function renderCampaigns(campaigns) {
@@ -95,11 +130,11 @@
                 const name = c.name || 'Unnamed Campaign';
                 const budget = c.budget?.budget ? `$${c.budget.budget}` : '—';
                 const acos = c.acos !== undefined ? (c.acos * 100).toFixed(1) + '%' : '—';
-                const acosClass = c.acos < 0.30 ? 'good' : c.acos < 0.50 ? 'warning' : 'bad';
+                const acosClass = (c.acos || 1) < 0.30 ? 'good' : (c.acos || 1) < 0.50 ? 'warning' : 'bad';
 
                 html += `
                     <div class="card border border-gray-200 rounded-3xl p-7 bg-white">
-                        <div class="flex justify-between">
+                        <div class="flex justify-between items-start">
                             <div class="font-semibold text-lg leading-tight flex-1">${name}</div>
                             <span class="px-4 py-1 text-xs font-medium bg-green-100 text-green-700 rounded-full">ENABLED</span>
                         </div>
@@ -111,16 +146,16 @@
                                 <div class="font-medium">${budget} DAILY</div>
                             </div>
                             <div>
-                                <div class="text-gray-500">Spend (14d)</div>
+                                <div class="text-gray-500">Spend</div>
                                 <div class="font-medium">$${Number(c.spend || 0).toFixed(2)}</div>
                             </div>
                             <div>
-                                <div class="text-gray-500">Sales (14d)</div>
+                                <div class="text-gray-500">Sales</div>
                                 <div class="font-medium">$${Number(c.sales || 0).toFixed(2)}</div>
                             </div>
                         </div>
 
-                        <div class="mt-6 pt-6 border-t grid grid-cols-3 gap-4 text-sm">
+                        <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
                             <div>
                                 <div class="text-gray-500">Clicks</div>
                                 <div class="font-medium">${c.clicks || 0}</div>
@@ -135,6 +170,12 @@
                             </div>
                         </div>
 
+                        <!-- Real Daily ACoS Trend -->
+                        <div class="mt-6">
+                            <div class="text-xs text-gray-500 mb-2">ACoS Trend (Last 14 days)</div>
+                            <canvas id="spark-${c.campaignId}" class="sparkline w-full"></canvas>
+                        </div>
+
                         <div class="mt-6 text-xs text-emerald-600 font-medium">
                             Dynamic bidding active • Peak / Off-peak adjustment
                         </div>
@@ -142,25 +183,65 @@
             });
 
             if (campaigns.length === 0) {
-                html = `<p class="col-span-2 text-center py-20 text-gray-400">No active campaigns found.</p>`;
+                html = `<p class="col-span-2 text-center py-20 text-gray-400">No active (ENABLED) campaigns found.</p>`;
             }
 
             container.innerHTML = html;
+
+            // Render sparklines after DOM is updated
+            setTimeout(() => {
+                campaigns.forEach(c => renderSparkline(c));
+            }, 150);
+        }
+
+        function renderSparkline(campaign) {
+            const canvasId = `spark-${campaign.campaignId}`;
+            const canvas = document.getElementById(canvasId);
+            if (!canvas || !campaign.daily_trend || campaign.daily_trend.length === 0) return;
+
+            const trendData = campaign.daily_trend.map(d => d.acos !== null && d.acos !== undefined ? d.acos : 0.45);
+
+            new Chart(canvas, {
+                type: 'line',
+                data: {
+                    labels: campaign.daily_trend.map(d => d.date ? d.date.slice(5) : ''),
+                    datasets: [{
+                        data: trendData,
+                        borderColor: (campaign.acos || 0.45) < 0.35 ? '#10b981' : '#f59e0b',
+                        borderWidth: 2.8,
+                        tension: 0.4,
+                        pointRadius: 0,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { 
+                        legend: { display: false },
+                        tooltip: { enabled: true, displayColors: false }
+                    },
+                    scales: {
+                        x: { display: false },
+                        y: { display: false, min: 0, max: Math.max(...trendData, 0.8) + 0.1 }
+                    }
+                }
+            });
         }
 
         async function runOptimizer() {
-            const token = prompt("Enter your DAILY_OPTIMIZER_TOKEN:");
+            const token = prompt("Enter your DAILY_OPTIMIZER_TOKEN to run the optimizer:");
             if (!token) return;
 
             const btn = document.querySelector('button[onclick="runOptimizer()"]');
-            const original = btn.innerHTML;
+            const originalText = btn.innerHTML;
             btn.disabled = true;
             btn.innerHTML = "Running Optimizer...";
 
             try {
                 const res = await fetch('/api/run-daily-optimization', {
                     method: 'POST',
-                    headers: { 
+                    headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${token}`
                     },
@@ -173,20 +254,20 @@
                 });
 
                 if (res.ok) {
-                    alert("✅ Optimizer completed successfully!");
-                    fetchData(); // Refresh
+                    alert("✅ Daily Optimizer completed successfully!");
+                    fetchData(); // Refresh dashboard
                 } else {
-                    alert("Failed to run optimizer. Check token.");
+                    alert("Failed to run optimizer. Please check your token.");
                 }
             } catch (e) {
-                alert("Error running optimizer.");
+                alert("Error connecting to optimizer.");
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = original;
+                btn.innerHTML = originalText;
             }
         }
 
-        // Auto refresh every 3 minutes
+        // Initial load + auto refresh every 3 minutes
         window.onload = fetchData;
         setInterval(fetchData, 180000);
     </script>
