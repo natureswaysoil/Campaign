@@ -1,201 +1,253 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Amazon Ads Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Amazon PPC Optimizer Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; }
+        .card { transition: all 0.3s; }
+        .card:hover { transform: translateY(-4px); }
+        .run-btn {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.85; }
+        }
+    </style>
 </head>
-<body>
-  <div class="container">
-    <h1>Amazon Ads Campaign Manager</h1>
-    
-    <div class="optimizer-status">
-      <h2>Daily Optimizer Status</h2>
-      <div id="optimizerStatus">Loading optimizer info...</div>
+<body class="bg-gray-50">
+    <div class="max-w-7xl mx-auto px-6 py-8">
+        <div class="flex justify-between items-center mb-8">
+            <div>
+                <h1 class="text-4xl font-bold text-gray-900">Amazon PPC Optimizer</h1>
+                <p class="text-gray-600 mt-1">Natures Way Soil • Live Dashboard</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <button onclick="runOptimizer()" 
+                        class="run-btn bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-semibold text-lg shadow-lg flex items-center gap-3 transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7-7 7M5 12h14" />
+                    </svg>
+                    Run Optimizer Now
+                </button>
+                <span id="last-updated" class="text-sm text-gray-500"></span>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-10" id="stats"></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Active Campaigns -->
+            <div class="lg:col-span-2 bg-white rounded-3xl shadow p-6 card">
+                <h2 class="text-2xl font-semibold mb-6 flex items-center gap-2">
+                    <span class="text-green-500">●</span>
+                    Active Campaigns
+                </h2>
+                <div id="campaigns-list" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+            </div>
+
+            <!-- Optimizer Performance Chart -->
+            <div class="bg-white rounded-3xl shadow p-6 card">
+                <h2 class="text-2xl font-semibold mb-4">Recent Optimizer Performance</h2>
+                <canvas id="performanceChart" height="260"></canvas>
+            </div>
+        </div>
+
+        <!-- Recent Optimizer Runs -->
+        <div class="mt-10 bg-white rounded-3xl shadow p-6 card">
+            <h2 class="text-2xl font-semibold mb-6">Optimizer Run History</h2>
+            <div id="history-list" class="space-y-6"></div>
+        </div>
     </div>
-    
-    <h2>Active Campaigns (<span id="campaignCount">0</span>)</h2>
-    <p style="color: #666; font-size: 14px;">Showing only ENABLED campaigns</p>
-    <div id="campaignsLoading">Loading campaigns...</div>
-    <table id="campaignsTable" style="display:none;">
-      <thead>
-        <tr>
-          <th>Campaign ID</th>
-          <th>Name</th>
-          <th>State</th>
-          <th>Budget</th>
-          <th>Start Date</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-    
-    <h2>Products (<span id="productCount">0</span>)</h2>
-    <table id="productsTable">
-      <thead>
-        <tr>
-          <th>SKU</th>
-          <th>Title</th>
-          <th>Price</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-    
-    <h2>Keywords</h2>
-    <div id="keywords"></div>
-    
-    <h2>Campaign Output</h2>
-    <pre id="output"></pre>
-  </div>
 
-<script>
-async function loadOptimizerStatus() {
-  try {
-    const res = await fetch('/api/optimizer-status');
-    const data = await res.json();
-    
-    const html = `
-      <div class="optimizer-card">
-        <div class="optimizer-header">
-          <span class="status-badge">Active</span>
-          <strong>${data.description}</strong>
-        </div>
-        <p><strong>Schedule:</strong> ${data.schedule}</p>
-        <p><strong>Analysis Period:</strong> Last ${data.lookback_days} days of search term data</p>
-        
-        <h3>What it does:</h3>
-        
-        <div class="action-card winner">
-          <h4>✅ Promotes Winners</h4>
-          <p><strong>Criteria:</strong> ${data.actions.winners.criteria}</p>
-          <p><strong>Action:</strong> ${data.actions.winners.action}</p>
-          <p><strong>Bid:</strong> ${data.actions.winners.bid_amount}</p>
-        </div>
-        
-        <div class="action-card negative">
-          <h4>🚫 Blocks Poor Performers</h4>
-          <p><strong>Criteria:</strong> ${data.actions.negatives.criteria}</p>
-          <p><strong>Action:</strong> ${data.actions.negatives.action}</p>
-        </div>
-        
-        <div class="action-card hold">
-          <h4>👀 Monitors Middle Performers</h4>
-          <p><strong>Criteria:</strong> ${data.actions.hold.criteria}</p>
-          <p><strong>Action:</strong> ${data.actions.hold.action}</p>
-        </div>
-        
-        <p class="note"><strong>Note:</strong> ${data.note}</p>
-      </div>
-    `;
-    
-    document.getElementById('optimizerStatus').innerHTML = html;
-  } catch (err) {
-    document.getElementById('optimizerStatus').textContent = 'Error loading optimizer status';
-  }
-}
+    <script>
+        let performanceChart = null;
 
-async function loadCampaigns() {
-  try {
-    const res = await fetch('/api/campaigns');
-    const data = await res.json();
-    
-    document.getElementById('campaignsLoading').style.display = 'none';
-    document.getElementById('campaignCount').textContent = data.count;
-    const table = document.getElementById('campaignsTable');
-    table.style.display = 'table';
-    
-    const tbody = table.querySelector("tbody");
-    tbody.innerHTML = "";
-    
-    data.campaigns.forEach(c => {
-      const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>${c.campaignId || 'N/A'}</td>
-        <td>${c.name || 'N/A'}</td>
-        <td><span class="state-enabled">${c.state || 'N/A'}</span></td>
-        <td>$${c.budget?.budget || 'N/A'} ${c.budget?.budgetType || ''}</td>
-        <td>${c.startDate || 'N/A'}</td>
-      `;
-      tbody.appendChild(row);
-    });
-    
-    if (data.campaigns.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5">No active campaigns found</td></tr>';
-    }
-  } catch (err) {
-    document.getElementById('campaignsLoading').textContent = 'Error loading campaigns: ' + err.message;
-  }
-}
+        async function fetchData() {
+            try {
+                const [campaignsRes, historyRes] = await Promise.all([
+                    fetch('/api/campaigns'),
+                    fetch('/api/optimizer-history')
+                ]);
 
-async function loadProducts() {
-  const res = await fetch('/api/products');
-  const data = await res.json();
-  document.getElementById('productCount').textContent = data.count;
-  const tbody = document.querySelector("#productsTable tbody");
-  tbody.innerHTML = "";
-  
-  data.products.forEach(p => {
-    const row = document.createElement("tr");
-    const tdSku = document.createElement("td");
-    tdSku.textContent = p.sku;
-    
-    const tdTitle = document.createElement("td");
-    tdTitle.textContent = p.title;
-    
-    const tdPrice = document.createElement("td");
-    tdPrice.textContent = '$' + p.price;
-    
-    const tdActions = document.createElement("td");
-    const btnKeywords = document.createElement("button");
-    btnKeywords.textContent = "Keywords";
-    btnKeywords.onclick = () => showKeywords(p.sku);
-    
-    const btnLaunch = document.createElement("button");
-    btnLaunch.textContent = "Launch";
-    btnLaunch.onclick = () => launchCampaign(p.sku);
-    
-    tdActions.appendChild(btnKeywords);
-    tdActions.appendChild(btnLaunch);
-    
-    row.appendChild(tdSku);
-    row.appendChild(tdTitle);
-    row.appendChild(tdPrice);
-    row.appendChild(tdActions);
-    
-    tbody.appendChild(row);
-  });
-}
+                const campaignsData = await campaignsRes.json();
+                const historyData = await historyRes.json();
 
-async function showKeywords(sku) {
-  const res = await fetch(`/api/generate-keywords/${sku}`);
-  const data = await res.json();
-  document.getElementById("keywords").innerHTML = 
-    `<h3>${data.product.title}</h3><pre>${JSON.stringify(data.keywords, null, 2)}</pre>`;
-}
+                renderStats(campaignsData);
+                renderCampaigns(campaignsData);
+                renderHistory(historyData.history || []);
+                renderChart(historyData.history || []);
 
-async function launchCampaign(sku) {
-  document.getElementById("output").textContent = "Creating campaign...";
-  try {
-    const res = await fetch('/api/create-campaign-from-product', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({product_id: sku})
-    });
-    const data = await res.json();
-    document.getElementById("output").textContent = JSON.stringify(data, null, 2);
-    
-    loadCampaigns();
-  } catch (err) {
-    document.getElementById("output").textContent = "Error: " + err.message;
-  }
-}
+                document.getElementById('last-updated').textContent = 
+                    `Last updated: ${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
+            } catch (err) {
+                console.error("Failed to fetch data:", err);
+                document.getElementById('campaigns-list').innerHTML = 
+                    `<p class="text-red-500 p-4">Error loading data. Backend may be restarting.</p>`;
+            }
+        }
 
-window.onload = () => {
-  loadOptimizerStatus();
-  loadCampaigns();
-  loadProducts();
-};
-</script>
+        function renderStats(data) {
+            const html = `
+                <div class="bg-white p-6 rounded-2xl shadow border border-gray-100">
+                    <p class="text-gray-500 text-sm">Active Campaigns</p>
+                    <p class="text-5xl font-bold text-gray-900">${data.count || 0}</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow border border-gray-100">
+                    <p class="text-gray-500 text-sm">Last Winners Added</p>
+                    <p class="text-5xl font-bold text-emerald-600">0</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow border border-gray-100">
+                    <p class="text-gray-500 text-sm">Last Negatives Added</p>
+                    <p class="text-5xl font-bold text-amber-600">0</p>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow border border-gray-100">
+                    <p class="text-gray-500 text-sm">Avg ACOS Target</p>
+                    <p class="text-5xl font-bold text-blue-600">≤ 35%</p>
+                </div>
+            `;
+            document.getElementById('stats').innerHTML = html;
+        }
+
+        function renderCampaigns(data) {
+            const container = document.getElementById('campaigns-list');
+            let html = '';
+            (data.campaigns || []).forEach(c => {
+                html += `
+                    <div class="border border-gray-200 rounded-2xl p-5 bg-white">
+                        <div class="font-semibold text-lg leading-tight">${c.name || 'Unnamed Campaign'}</div>
+                        <div class="text-xs text-gray-500 mt-2 font-mono">${c.campaignId || '—'}</div>
+                        <div class="mt-4 flex justify-between text-sm">
+                            <span class="text-gray-500">Budget</span>
+                            <span class="font-medium">$${c.budget?.budget || '—'}</span>
+                        </div>
+                    </div>`;
+            });
+            container.innerHTML = html || '<p class="text-gray-400 col-span-2 p-8 text-center">No active campaigns found.</p>';
+        }
+
+        function renderHistory(history) {
+            const container = document.getElementById('history-list');
+            if (history.length === 0) {
+                container.innerHTML = `<p class="text-gray-400 text-center py-12">No optimizer runs yet.<br>Click "Run Optimizer Now" to begin.</p>`;
+                return;
+            }
+
+            let html = '';
+            history.slice(0, 10).forEach((run, index) => {
+                const time = new Date(run.timestamp).toLocaleString();
+                html += `
+                    <div class="flex items-start gap-6 p-5 bg-gray-50 rounded-2xl border border-gray-100">
+                        <div class="flex-1">
+                            <div class="text-xs text-gray-500">${time}</div>
+                            <div class="font-medium mt-1">${run.rows_analyzed} search terms analyzed</div>
+                        </div>
+                        <div class="text-right space-y-1">
+                            <div class="text-emerald-600 font-semibold">+${run.winners_applied} Winners</div>
+                            <div class="text-amber-600">-${run.negatives_applied} Negatives</div>
+                        </div>
+                    </div>`;
+            });
+            container.innerHTML = html;
+        }
+
+        function renderChart(history) {
+            const ctx = document.getElementById('performanceChart');
+            if (performanceChart) performanceChart.destroy();
+
+            const labels = history.slice(0, 8).map(h => new Date(h.timestamp).toLocaleDateString([], {month:'short', day:'numeric'}));
+            const winnersData = history.slice(0, 8).map(h => h.winners_applied || 0);
+            const negativesData = history.slice(0, 8).map(h => h.negatives_applied || 0);
+
+            performanceChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels.length ? labels : ['No data yet'],
+                    datasets: [
+                        {
+                            label: 'Winners Added',
+                            data: winnersData,
+                            backgroundColor: '#10b981',
+                            borderRadius: 6,
+                        },
+                        {
+                            label: 'Negatives Added',
+                            data: negativesData,
+                            backgroundColor: '#f59e0b',
+                            borderRadius: 6,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'top' },
+                        tooltip: { mode: 'index' }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, ticks: { stepSize: 1 } }
+                    }
+                }
+            });
+        }
+
+        async function runOptimizer() {
+            const button = document.querySelector('button[onclick="runOptimizer()"]');
+            const originalText = button.innerHTML;
+
+            button.disabled = true;
+            button.innerHTML = `
+                <svg class="animate-spin h-6 w-6 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+                Running Optimizer...
+            `;
+
+            try {
+                const res = await fetch('/api/run-daily-optimization', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + prompt("Enter your DAILY_OPTIMIZER_TOKEN:", "")
+                    },
+                    body: JSON.stringify({
+                        apply_negatives_live: true,
+                        apply_winners_live: true,
+                        winner_bid: 0.90,
+                        lookback_days: 14
+                    })
+                });
+
+                if (!res.ok) throw new Error("Failed to run optimizer");
+
+                const result = await res.json();
+                alert(`✅ Optimizer completed successfully!\n\n` +
+                      `Winners Found: ${result.winners}\n` +
+                      `Negatives Found: ${result.negatives}\n` +
+                      `Winners Applied: ${result.winners_applied?.length || 0}\n` +
+                      `Negatives Applied: ${result.negatives_applied?.length || 0}`);
+
+                // Refresh dashboard
+                await fetchData();
+            } catch (err) {
+                alert("❌ Failed to run optimizer.\nMake sure your DAILY_OPTIMIZER_TOKEN is correct.");
+                console.error(err);
+            } finally {
+                button.disabled = false;
+                button.innerHTML = originalText;
+            }
+        }
+
+        // Auto refresh every 90 seconds
+        window.onload = fetchData;
+        setInterval(fetchData, 90000);
+    </script>
 </body>
 </html>
