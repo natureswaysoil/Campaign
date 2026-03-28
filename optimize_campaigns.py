@@ -1,6 +1,5 @@
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 import csv
 import datetime
 import gzip
@@ -26,7 +25,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Amazon Ads Campaign Optimizer")
 
 BASE_DIR = Path(__file__).parent.absolute()
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 PRODUCTS_CSV_URL = os.getenv(
     "PRODUCTS_CSV_URL",
@@ -51,13 +49,9 @@ ENDPOINTS = {
     "keywords": "/sp/keywords",
     "negative_keywords": "/sp/campaignNegativeKeywords",
     "reports": "/reporting/reports",
-
-    # Recommendation / update helpers
     "campaigns_list": "/sp/campaigns/list",
     "keywords_list": "/sp/keywords/list",
     "keywords_update": "/sp/keywords",
-    # This is the common SP keyword recommendation path pattern.
-    # If a tenant/version differs, code falls back safely.
     "keyword_bid_recommendations": "/sp/keywords/bidRecommendations",
 }
 
@@ -93,11 +87,10 @@ STOPWORDS = {
 
 OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
 
-# Time-of-day bid settings
-PEAK_HOURS_START = int(os.getenv("PEAK_HOURS_START", "18"))   # 6 PM
-PEAK_HOURS_END = int(os.getenv("PEAK_HOURS_END", "23"))       # 11 PM
-OFF_PEAK_START = int(os.getenv("OFF_PEAK_START", "0"))        # midnight
-OFF_PEAK_END = int(os.getenv("OFF_PEAK_END", "6"))            # 6 AM
+PEAK_HOURS_START = int(os.getenv("PEAK_HOURS_START", "18"))
+PEAK_HOURS_END = int(os.getenv("PEAK_HOURS_END", "23"))
+OFF_PEAK_START = int(os.getenv("OFF_PEAK_START", "0"))
+OFF_PEAK_END = int(os.getenv("OFF_PEAK_END", "6"))
 DEFAULT_NORMAL_BID_MULTIPLIER = float(os.getenv("DEFAULT_NORMAL_BID_MULTIPLIER", "1.0"))
 
 
@@ -449,10 +442,6 @@ class AmazonAdsClient:
         keyword_text: str,
         match_type: str = "EXACT",
     ) -> Dict[str, float]:
-        """
-        Best-effort call for live bid recommendations.
-        Falls back to {} if the endpoint/content type is unavailable for this account/version.
-        """
         body = {
             "recommendations": [
                 {
@@ -487,23 +476,9 @@ class AmazonAdsClient:
             return {}
 
         first = items[0] if isinstance(items[0], dict) else {}
-        low = (
-            first.get("suggestedBidLow")
-            or first.get("low")
-            or first.get("rangeStart")
-            or first.get("min")
-        )
-        high = (
-            first.get("suggestedBidHigh")
-            or first.get("high")
-            or first.get("rangeEnd")
-            or first.get("max")
-        )
-        suggested = (
-            first.get("suggestedBid")
-            or first.get("recommendedBid")
-            or first.get("bid")
-        )
+        low = first.get("suggestedBidLow") or first.get("low") or first.get("rangeStart") or first.get("min")
+        high = first.get("suggestedBidHigh") or first.get("high") or first.get("rangeEnd") or first.get("max")
+        suggested = first.get("suggestedBid") or first.get("recommendedBid") or first.get("bid")
 
         out: Dict[str, float] = {}
         if low is not None:
@@ -515,10 +490,6 @@ class AmazonAdsClient:
         return out
 
     def update_keyword_bids(self, keyword_updates: List[Dict[str, Any]]) -> Any:
-        """
-        Expects rows like:
-        {"keywordId": "123", "campaignId": "456", "adGroupId": "789", "bid": 0.91, "state": "ENABLED"}
-        """
         if not keyword_updates:
             return {"updated": 0}
         return self.post(
@@ -710,7 +681,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }]
     client.post(ENDPOINTS["product_ads"], product_ad_payload)
 
-    keywords_resp = None
     bid_preview = []
     if keywords:
         kw_rows = []
@@ -758,7 +728,7 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
                 "bid_mode": mode,
             })
 
-        keywords_resp = client.post(ENDPOINTS["keywords"], kw_rows)
+        client.post(ENDPOINTS["keywords"], kw_rows)
 
     return {
         "message": "Campaign created successfully",
@@ -774,20 +744,21 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
+def dashboard():
     try:
-        return templates.TemplateResponse("dashboard.html", {"request": request})
+        dashboard_path = BASE_DIR / "templates" / "dashboard.html"
+        return HTMLResponse(dashboard_path.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.error(f"Template loading failed: {type(e).__name__} - {e}")
+        logger.error(f"Dashboard loading failed: {type(e).__name__} - {e}")
         return HTMLResponse(f"""
             <h2>Amazon PPC Optimizer Dashboard</h2>
             <p>Service is running.</p>
             <p style="color: red; margin: 20px 0;">
-                <strong>Template Error:</strong> {type(e).__name__}<br>
+                <strong>Dashboard Load Error:</strong> {type(e).__name__}<br>
                 {str(e)}
             </p>
             <p>Base directory: {BASE_DIR}</p>
-            <p>Templates directory: {BASE_DIR / "templates"}</p>
+            <p>Dashboard path: {BASE_DIR / "templates" / "dashboard.html"}</p>
         """)
 
 
@@ -978,7 +949,6 @@ def api_run_optimizer(
                 "bid_details": detail_rows[:10],
             })
 
-    # Optional live retune of existing enabled keyword bids
     if payload.get("retune_existing_keyword_bids", False):
         try:
             enabled_campaigns = client.list_enabled_campaigns(max_results=100)
@@ -1101,7 +1071,6 @@ def api_campaign_performance():
         }
 
     try:
-        # Summary report for totals
         summary_body = {
             "startDate": start_date,
             "endDate": end_date,
@@ -1133,7 +1102,6 @@ def api_campaign_performance():
         summary_content = client.download_binary(status.get("location") or status.get("url"))
         summary_rows = parse_report_json_bytes(summary_content)
 
-        # Daily report for trend only
         daily_body = {
             "startDate": start_date,
             "endDate": end_date,
@@ -1202,7 +1170,6 @@ def api_campaign_performance():
             spend_total = summary.get("spend", 0)
             fallback_bid = float(c.get("budget", {}).get("budget") or 0) / 25.0 if c.get("budget") else 0.85
 
-            # Best-effort recommendation preview from first available keyword
             suggested_low = 0.0
             suggested_high = 0.0
             current_applied_bid = round(fallback_bid, 2)
