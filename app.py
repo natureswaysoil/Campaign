@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request, Header
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 import csv
 import datetime
@@ -13,6 +13,7 @@ import os
 import re
 import time
 import unicodedata
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import requests
@@ -49,7 +50,6 @@ ENDPOINTS = {
     "reports": "/reporting/reports",
 }
 
-# Content types for SP v3 batch endpoints
 ENDPOINT_CONTENT_TYPES = {
     "/sp/campaigns": "application/vnd.spcampaign.v3+json",
     "/sp/adGroups": "application/vnd.spadgroup.v3+json",
@@ -58,7 +58,6 @@ ENDPOINT_CONTENT_TYPES = {
     "/sp/campaignNegativeKeywords": "application/vnd.spcampaignnegativekeyword.v3+json",
 }
 
-# Batch key mapping for v3 API
 ENDPOINT_BATCH_KEYS = {
     "/sp/campaigns": "campaigns",
     "/sp/adGroups": "adGroups",
@@ -80,6 +79,9 @@ STOPWORDS = {
     "soil", "organic", "liquid", "natural", "plants", "plant", "garden", "lawn",
     "safe", "kids", "pets", "beneficial", "nature", "way"
 }
+
+# Optimizer history log
+OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
 
 templates = Jinja2Templates(directory="templates")
 
@@ -224,6 +226,30 @@ def generate_keywords(product: Dict[str, Any]) -> List[str]:
     return clean_keywords[:30]
 
 
+# ========================= OPTIMIZER HISTORY =========================
+def load_optimizer_history() -> List[Dict]:
+    if OPTIMIZER_LOG_FILE.exists():
+        try:
+            with open(OPTIMIZER_LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load optimizer history: {e}")
+            return []
+    return []
+
+
+def save_optimizer_history(entry: Dict):
+    history = load_optimizer_history()
+    history.append(entry)
+    if len(history) > 30:
+        history = history[-30:]
+    try:
+        with open(OPTIMIZER_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, default=str)
+    except Exception as e:
+        logger.warning(f"Failed to save optimizer history: {e}")
+
+
 # ========================= PRODUCT LOADING =========================
 def load_products() -> List[Dict[str, str]]:
     r = requests.get(PRODUCTS_CSV_URL, timeout=30)
@@ -320,24 +346,13 @@ class AmazonAdsClient:
         wrapped = self._wrap_batch(endpoint, body)
         content_type = self._content_type_for(endpoint)
 
-        logger.info(f"POST {endpoint} | Body size: {len(str(wrapped))}")
+        logger.info(f"POST {endpoint}")
         resp = self.session.post(url, headers=self.headers(content_type), json=wrapped, timeout=60)
 
         if not resp.ok:
-            logger.error(f"API Error {resp.status_code}: {resp.text}")
+            logger.error(f"API Error {resp.status_code}: {resp.text[:400]}")
             raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text[:500]}")
 
-        return resp.json() if resp.text.strip() else None
-
-    def put(self, endpoint: str, body: Any):
-        # Similar to post but using PUT
-        url = f"{self.base_url}{endpoint}"
-        wrapped = self._wrap_batch(endpoint, body)
-        content_type = self._content_type_for(endpoint)
-
-        resp = self.session.put(url, headers=self.headers(content_type), json=wrapped, timeout=60)
-        if not resp.ok:
-            raise RuntimeError(f"PUT failed {resp.status_code}: {resp.text[:500]}")
         return resp.json() if resp.text.strip() else None
 
     def get(self, endpoint: str):
@@ -345,7 +360,7 @@ class AmazonAdsClient:
         content_type = self._content_type_for(endpoint)
         resp = self.session.get(url, headers=self.headers(content_type), timeout=60)
         if not resp.ok:
-            raise RuntimeError(f"GET failed {resp.status_code}: {resp.text}")
+            raise RuntimeError(f"GET failed {resp.status_code}: {resp.text[:300]}")
         return resp.json() if resp.text.strip() else None
 
     def download_binary(self, url: str) -> bytes:
@@ -354,20 +369,17 @@ class AmazonAdsClient:
         return resp.content
 
 
-# ========================= KEYWORD & REPORT HELPERS =========================
+# ========================= UTILITY FUNCTIONS =========================
 def extract_first_id(payload: Any) -> int:
     if isinstance(payload, dict):
         for batch_key, item_key in BATCH_ITEM_KEYS.items():
             if batch_key in payload:
                 inner = payload[batch_key]
-                if isinstance(inner, dict) and "success" in inner:
-                    success = inner["success"]
-                    if success and isinstance(success[0], dict):
-                        item = success[0].get(item_key, success[0])
-                        for k in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
-                            if k in item:
-                                return int(item[k])
-        # flat fallback
+                if isinstance(inner, dict) and "success" in inner and inner["success"]:
+                    item = inner["success"][0].get(item_key, inner["success"][0])
+                    for k in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
+                        if k in item:
+                            return int(item[k])
         for k in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
             if k in payload:
                 return int(payload[k])
@@ -377,30 +389,9 @@ def extract_first_id(payload: Any) -> int:
 def keyword_rows(keywords: List[str], campaign_id: int, ad_group_id: int, bid: float) -> List[Dict]:
     rows = []
     for kw in keywords:
-        rows.append({
-            "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
-            "keywordText": kw,
-            "matchType": "EXACT",
-            "state": "ENABLED",
-            "bid": round(bid * 1.15, 2),
-        })
-        rows.append({
-            "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
-            "keywordText": kw,
-            "matchType": "PHRASE",
-            "state": "ENABLED",
-            "bid": round(bid, 2),
-        })
-        rows.append({
-            "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
-            "keywordText": kw,
-            "matchType": "BROAD",
-            "state": "ENABLED",
-            "bid": round(bid * 0.85, 2),
-        })
+        rows.append({"campaignId": str(campaign_id), "adGroupId": str(ad_group_id), "keywordText": kw, "matchType": "EXACT",  "state": "ENABLED", "bid": round(bid * 1.15, 2)})
+        rows.append({"campaignId": str(campaign_id), "adGroupId": str(ad_group_id), "keywordText": kw, "matchType": "PHRASE", "state": "ENABLED", "bid": round(bid, 2)})
+        rows.append({"campaignId": str(campaign_id), "adGroupId": str(ad_group_id), "keywordText": kw, "matchType": "BROAD",  "state": "ENABLED", "bid": round(bid * 0.85, 2)})
     return rows
 
 
@@ -441,7 +432,7 @@ def text(row: Dict, keys: List[str], default: str = "") -> str:
     return default
 
 
-def classify_terms(rows: List[Dict], lookback_days: int = 14):
+def classify_terms(rows: List[Dict]):
     winners, negatives, hold = [], [], []
     for row in rows:
         term = text(row, ["Customer Search Term", "searchTerm", "Search Term"])
@@ -493,9 +484,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     start_date = today_iso_date()
     keywords = generate_keywords(product)
 
-    logger.info(f"Creating campaign for SKU: {product.get('sku')}")
-
-    # Create Campaign
     campaign_payload = [{
         "name": f"{sanitize_campaign_name(product.get('title'))[:100]} | MANUAL | {start_date}",
         "targetingType": "MANUAL",
@@ -506,7 +494,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
     campaign_id = extract_first_id(campaign_resp)
 
-    # Create Ad Group
     ad_group_payload = [{
         "name": "Main Ad Group",
         "campaignId": str(campaign_id),
@@ -516,7 +503,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
     ad_group_id = extract_first_id(ad_group_resp)
 
-    # Create Product Ad
     product_ad_payload = [{
         "campaignId": str(campaign_id),
         "adGroupId": str(ad_group_id),
@@ -525,7 +511,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }]
     product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
 
-    # Add Keywords
     keywords_resp = None
     if keywords:
         kw_rows = keyword_rows(keywords, campaign_id, ad_group_id, product["suggested_bid"])
@@ -539,7 +524,6 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "campaign_id": campaign_id,
         "ad_group_id": ad_group_id,
         "keywords_count": len(keywords),
-        "campaign_response": campaign_resp,
     }
 
 
@@ -549,7 +533,7 @@ def dashboard(request: Request):
     try:
         return templates.TemplateResponse("dashboard.html", {"request": request})
     except Exception:
-        return HTMLResponse("<h2>Amazon Ads Optimizer Dashboard</h2><p>Service is running. Check /api/products or /docs for API.</p>")
+        return HTMLResponse("<h2>Amazon PPC Optimizer Dashboard</h2><p>Service is running.</p>")
 
 
 @app.get("/health")
@@ -624,7 +608,6 @@ def api_run_optimizer(
     start_date = iso_date_days_ago(lookback_days)
     end_date = today_iso_date()
 
-    # Request report
     report_resp = client.post(ENDPOINTS["reports"], {
         "startDate": start_date,
         "endDate": end_date,
@@ -640,49 +623,118 @@ def api_run_optimizer(
 
     report_id = (report_resp or {}).get("reportId")
     if not report_id:
-        raise HTTPException(500, "Failed to get reportId")
+        raise HTTPException(status_code=500, detail="Failed to request report ID")
 
-    # Poll for completion
-    for _ in range(30):  # max ~5 minutes
-        status = client.get(f"{ENDPOINTS['reports']}/{report_id}")
-        if status.get("status") == "SUCCESS":
+    # Poll for report
+    for _ in range(30):
+        status_resp = client.get(f"{ENDPOINTS['reports']}/{report_id}")
+        if status_resp.get("status") == "SUCCESS":
             break
-        if status.get("status") in ("FAILURE", "CANCELLED"):
-            raise HTTPException(500, "Report generation failed")
+        if status_resp.get("status") in ("FAILURE", "CANCELLED"):
+            raise HTTPException(status_code=500, detail="Report generation failed")
         time.sleep(10)
     else:
-        raise HTTPException(504, "Report timeout")
+        raise HTTPException(status_code=504, detail="Report generation timed out")
 
-    # Download & classify
-    content = client.download_binary(status.get("location") or status.get("url"))
+    content = client.download_binary(status_resp.get("location") or status_resp.get("url"))
     rows = parse_report_json_bytes(content)
     classified = classify_terms(rows)
 
-    # Apply negatives / winners if requested
-    negatives_applied = winners_applied = []
+    winners_applied = []
+    negatives_applied = []
 
     if apply_negatives and classified["negatives"]:
-        # Group by campaign and add negatives
-        pass  # implement similar to your original if needed
+        by_campaign: Dict[int, List[str]] = {}
+        for item in classified["negatives"]:
+            cid = item.get("campaign_id")
+            if cid:
+                by_campaign.setdefault(cid, []).append(item["term"])
+        for cid, terms in by_campaign.items():
+            neg_rows = negative_keyword_rows(unique_in_order(terms), cid)
+            client.post(ENDPOINTS["negative_keywords"], neg_rows)
+            negatives_applied.append({"campaign_id": cid, "count": len(terms), "terms_sample": terms[:8]})
 
     if apply_winners and classified["winners"]:
-        # Group by ad group and add keywords
-        pass
+        by_adgroup: Dict[int, Dict] = {}
+        for item in classified["winners"]:
+            agid = item.get("ad_group_id")
+            cid = item.get("campaign_id")
+            if agid and cid:
+                if agid not in by_adgroup:
+                    by_adgroup[agid] = {"campaign_id": cid, "terms": []}
+                by_adgroup[agid]["terms"].append(item["term"])
+        for agid, data in by_adgroup.items():
+            kw_rows = keyword_rows(unique_in_order(data["terms"]), data["campaign_id"], agid, winner_bid)
+            client.post(ENDPOINTS["keywords"], kw_rows)
+            winners_applied.append({"ad_group_id": agid, "campaign_id": data["campaign_id"], "count": len(data["terms"]), "terms_sample": data["terms"][:8]})
+
+    # Save history
+    run_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "lookback_days": lookback_days,
+        "rows_analyzed": len(rows),
+        "winners_found": len(classified["winners"]),
+        "negatives_found": len(classified["negatives"]),
+        "winners_applied": len(winners_applied),
+        "negatives_applied": len(negatives_applied),
+        "winners_details": winners_applied,
+        "negatives_details": negatives_applied,
+        "apply_winners_live": apply_winners,
+        "apply_negatives_live": apply_negatives
+    }
+    save_optimizer_history(run_entry)
 
     return {
+        "success": True,
         "report_id": report_id,
         "date_range": {"start": start_date, "end": end_date},
         "rows_analyzed": len(rows),
         "winners": len(classified["winners"]),
         "negatives": len(classified["negatives"]),
-        "hold": len(classified["hold"]),
-        "classified": classified,
+        "winners_applied_count": len(winners_applied),
+        "negatives_applied_count": len(negatives_applied),
+        "winners_applied": winners_applied,
+        "negatives_applied": negatives_applied
     }
 
 
-@app.get("/docs")
-def docs_redirect():
-    return JSONResponse({"message": "Visit /docs for interactive Swagger UI"})
+@app.get("/api/optimizer-history")
+def api_optimizer_history():
+    """Return optimizer run history for dashboard"""
+    history = load_optimizer_history()
+    return {
+        "history": history,
+        "count": len(history),
+        "latest_run": history[-1] if history else None
+    }
+
+
+@app.get("/api/campaigns")
+def api_list_campaigns():
+    client = AmazonAdsClient()
+    try:
+        response = client.session.post(
+            f"{client.base_url}/sp/campaigns/list",
+            headers={
+                "Authorization": f"Bearer {client.access_token}",
+                "Amazon-Advertising-API-ClientId": client.client_id,
+                "Amazon-Advertising-API-Scope": client.profile_id,
+                "Content-Type": "application/vnd.spcampaign.v3+json",
+                "Accept": "application/vnd.spcampaign.v3+json",
+            },
+            json={
+                "maxResults": 100,
+                "filters": {"stateFilter": {"include": ["ENABLED"]}}
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        campaigns = data.get("campaigns", []) if isinstance(data, dict) else data
+        return {"count": len(campaigns), "campaigns": campaigns}
+    except Exception as e:
+        logger.error("Failed to fetch campaigns", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
