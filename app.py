@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Amazon Ads Campaign Optimizer")
 
-# === CRITICAL FIX: Use absolute path for templates ===
+# CRITICAL FIX: Use absolute path for templates (fixes Cloud Run issues)
 BASE_DIR = Path(__file__).parent.absolute()
-templates = Jinja2Templates(directory=BASE_DIR / "templates")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 # ========================= CONFIG =========================
 PRODUCTS_CSV_URL = os.getenv(
@@ -523,20 +523,22 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ========================= MAIN ROUTES =========================
+# ========================= ROUTES =========================
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     try:
         return templates.TemplateResponse("dashboard.html", {"request": request})
     except Exception as e:
-        logger.error(f"Template loading failed: {e}")
+        logger.error(f"Template loading failed: {type(e).__name__} - {e}")
         return HTMLResponse(f"""
             <h2>Amazon PPC Optimizer Dashboard</h2>
             <p>Service is running.</p>
-            <p style="color: red; margin-top: 20px;">
-                <strong>Template Error:</strong> {str(e)}<br><br>
-                Make sure <code>templates/dashboard.html</code> exists in the project root.
+            <p style="color: red; margin: 20px 0;">
+                <strong>Template Error:</strong> {type(e).__name__}<br>
+                {str(e)}
             </p>
+            <p>Base directory: {BASE_DIR}</p>
+            <p>Templates directory: {BASE_DIR / "templates"}</p>
         """)
 
 
@@ -734,6 +736,7 @@ def api_list_campaigns():
 # ========================= REAL DAILY PERFORMANCE =========================
 @app.get("/api/campaign-performance")
 def api_campaign_performance():
+    """Return active campaigns with real 14-day summary + daily trend data for sparklines"""
     client = AmazonAdsClient()
     start_date = iso_date_days_ago(14)
     end_date = today_iso_date()
