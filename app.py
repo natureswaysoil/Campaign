@@ -15,6 +15,7 @@ import time
 import unicodedata
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from collections import defaultdict
 
 import requests
 from google.cloud import secretmanager
@@ -80,7 +81,6 @@ STOPWORDS = {
     "safe", "kids", "pets", "beneficial", "nature", "way"
 }
 
-# Optimizer history log
 OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
 
 templates = Jinja2Templates(directory="templates")
@@ -232,8 +232,7 @@ def load_optimizer_history() -> List[Dict]:
         try:
             with open(OPTIMIZER_LOG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load optimizer history: {e}")
+        except Exception:
             return []
     return []
 
@@ -346,13 +345,10 @@ class AmazonAdsClient:
         wrapped = self._wrap_batch(endpoint, body)
         content_type = self._content_type_for(endpoint)
 
-        logger.info(f"POST {endpoint}")
         resp = self.session.post(url, headers=self.headers(content_type), json=wrapped, timeout=60)
-
         if not resp.ok:
             logger.error(f"API Error {resp.status_code}: {resp.text[:400]}")
             raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text[:500]}")
-
         return resp.json() if resp.text.strip() else None
 
     def get(self, endpoint: str):
@@ -438,12 +434,10 @@ def classify_terms(rows: List[Dict]):
         term = text(row, ["Customer Search Term", "searchTerm", "Search Term"])
         if not term:
             continue
-
         clicks = int(num(row, ["Clicks", "clicks"], 0))
         cost = num(row, ["Spend", "Cost", "cost", "spend"], 0.0)
         sales = num(row, ["7 Day Total Sales", "14 Day Total Sales", "sales7d", "sales"], 0.0)
         orders = int(num(row, ["7 Day Total Orders (#)", "14 Day Total Orders (#)", "orders", "purchases7d"], 0))
-
         acos = (cost / sales) if sales > 0 else None
 
         result = {
@@ -625,7 +619,6 @@ def api_run_optimizer(
     if not report_id:
         raise HTTPException(status_code=500, detail="Failed to request report ID")
 
-    # Poll for report
     for _ in range(30):
         status_resp = client.get(f"{ENDPOINTS['reports']}/{report_id}")
         if status_resp.get("status") == "SUCCESS":
@@ -668,7 +661,6 @@ def api_run_optimizer(
             client.post(ENDPOINTS["keywords"], kw_rows)
             winners_applied.append({"ad_group_id": agid, "campaign_id": data["campaign_id"], "count": len(data["terms"]), "terms_sample": data["terms"][:8]})
 
-    # Save history
     run_entry = {
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "lookback_days": lookback_days,
@@ -700,13 +692,8 @@ def api_run_optimizer(
 
 @app.get("/api/optimizer-history")
 def api_optimizer_history():
-    """Return optimizer run history for dashboard"""
     history = load_optimizer_history()
-    return {
-        "history": history,
-        "count": len(history),
-        "latest_run": history[-1] if history else None
-    }
+    return {"history": history, "count": len(history)}
 
 
 @app.get("/api/campaigns")
@@ -722,10 +709,7 @@ def api_list_campaigns():
                 "Content-Type": "application/vnd.spcampaign.v3+json",
                 "Accept": "application/vnd.spcampaign.v3+json",
             },
-            json={
-                "maxResults": 100,
-                "filters": {"stateFilter": {"include": ["ENABLED"]}}
-            },
+            json={"maxResults": 100, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
             timeout=30,
         )
         response.raise_for_status()
@@ -735,35 +719,17 @@ def api_list_campaigns():
     except Exception as e:
         logger.error("Failed to fetch campaigns", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-# ========================= PERFORMANCE REPORTING =========================
-def request_campaign_performance_report(client: AmazonAdsClient, start_date: str, end_date: str):
-    """Request a campaign-level performance report (last 14 days)"""
-    body = {
-        "startDate": start_date,
-        "endDate": end_date,
-        "configuration": {
-            "adProduct": "SPONSORED_PRODUCTS",
-            "groupBy": ["campaign"],
-            "columns": [
-                "campaignId", "campaignName", "impressions", "clicks", "cost",
-                "sales14d", "purchases14d", "attributedSales14d", "attributedPurchases14d"
-            ],
-            "reportTypeId": "spCampaigns",
-            "timeUnit": "SUMMARY",
-            "format": "GZIP_JSON",
-        }
-    }
-    return client.post(ENDPOINTS["reports"], body)
 
 
+# ========================= REAL DAILY PERFORMANCE (NEW) =========================
 @app.get("/api/campaign-performance")
 def api_campaign_performance():
-    """Return active campaigns enriched with real performance metrics (last 14 days)"""
+    """Return active campaigns with real 14-day summary + daily trend data"""
     client = AmazonAdsClient()
     start_date = iso_date_days_ago(14)
     end_date = today_iso_date()
 
-    # 1. Get list of campaigns
+    # Get active campaigns
     list_resp = client.session.post(
         f"{client.base_url}/sp/campaigns/list",
         headers={
@@ -773,10 +739,7 @@ def api_campaign_performance():
             "Content-Type": "application/vnd.spcampaign.v3+json",
             "Accept": "application/vnd.spcampaign.v3+json",
         },
-        json={
-            "maxResults": 100,
-            "filters": {"stateFilter": {"include": ["ENABLED"]}}
-        },
+        json={"maxResults": 100, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
         timeout=30,
     )
     list_resp.raise_for_status()
@@ -786,63 +749,89 @@ def api_campaign_performance():
     if not campaigns:
         return {"count": 0, "campaigns": []}
 
-    # 2. Request performance report
     try:
-        report_resp = request_campaign_performance_report(client, start_date, end_date)
+        # Request DAILY report for real trends
+        body = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "configuration": {
+                "adProduct": "SPONSORED_PRODUCTS",
+                "groupBy": ["campaign"],
+                "columns": ["campaignId", "campaignName", "date", "impressions", "clicks", "cost", "sales14d", "purchases14d"],
+                "reportTypeId": "spCampaigns",
+                "timeUnit": "DAILY",
+                "format": "GZIP_JSON",
+            }
+        }
+
+        report_resp = client.post(ENDPOINTS["reports"], body)
         report_id = report_resp.get("reportId")
         if not report_id:
             raise RuntimeError("No reportId returned")
 
-        # Poll for report (max ~5 minutes)
+        # Poll
         for _ in range(30):
             status = client.get(f"{ENDPOINTS['reports']}/{report_id}")
             if status.get("status") == "SUCCESS":
                 break
             time.sleep(10)
         else:
-            raise RuntimeError("Report timed out")
+            raise RuntimeError("Report timeout")
 
-        # Download and parse
         download_url = status.get("location") or status.get("url")
         content = client.download_binary(download_url)
         rows = parse_report_json_bytes(content)
 
-        # Build lookup map by campaignId
-        perf_map = {}
+        # Group data
+        daily_by_campaign = defaultdict(list)
+        summary_by_campaign = defaultdict(lambda: {"impressions": 0, "clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0})
+
         for row in rows:
             cid = str(row.get("campaignId") or "")
-            if cid:
-                perf_map[cid] = {
-                    "impressions": int(num(row, ["impressions"], 0)),
-                    "clicks": int(num(row, ["clicks"], 0)),
-                    "spend": round(num(row, ["cost", "spend"], 0), 2),
-                    "sales": round(num(row, ["sales14d", "attributedSales14d"], 0), 2),
-                    "orders": int(num(row, ["purchases14d", "attributedPurchases14d"], 0)),
-                }
+            if not cid:
+                continue
 
-        # Merge performance into campaigns
+            daily = {
+                "date": row.get("date"),
+                "spend": round(num(row, ["cost", "spend"], 0), 2),
+                "sales": round(num(row, ["sales14d"], 0), 2),
+                "acos": round(num(row, ["cost"], 0) / num(row, ["sales14d"], 1), 4) if num(row, ["sales14d"], 0) > 0 else None,
+            }
+            daily_by_campaign[cid].append(daily)
+
+            s = summary_by_campaign[cid]
+            s["impressions"] += int(num(row, ["impressions"], 0))
+            s["clicks"] += int(num(row, ["clicks"], 0))
+            s["spend"] += num(row, ["cost", "spend"], 0)
+            s["sales"] += num(row, ["sales14d"], 0)
+            s["orders"] += int(num(row, ["purchases14d"], 0))
+
+        # Enrich campaigns
         enriched = []
         for c in campaigns:
             cid = str(c.get("campaignId") or "")
-            perf = perf_map.get(cid, {})
-            acos = (perf.get("spend", 0) / perf.get("sales", 1)) if perf.get("sales", 0) > 0 else None
+            summary = summary_by_campaign.get(cid, {})
+            daily_data = sorted(daily_by_campaign.get(cid, []), key=lambda x: x.get("date") or "")
+
+            acos = (summary.get("spend", 0) / summary.get("sales", 1)) if summary.get("sales", 0) > 0 else None
 
             enriched.append({
                 **c,
-                "impressions": perf.get("impressions", 0),
-                "clicks": perf.get("clicks", 0),
-                "spend": perf.get("spend", 0),
-                "sales": perf.get("sales", 0),
-                "orders": perf.get("orders", 0),
+                "impressions": summary.get("impressions", 0),
+                "clicks": summary.get("clicks", 0),
+                "spend": round(summary.get("spend", 0), 2),
+                "sales": round(summary.get("sales", 0), 2),
+                "orders": summary.get("orders", 0),
                 "acos": round(acos, 4) if acos is not None else None,
+                "daily_trend": daily_data
             })
 
         return {"count": len(enriched), "campaigns": enriched}
 
     except Exception as e:
-        logger.error(f"Performance report failed: {e}", exc_info=True)
-        # Fallback: return campaigns without metrics
-        return {"count": len(campaigns), "campaigns": campaigns, "note": "Performance data unavailable"}
+        logger.error(f"Daily performance report failed: {e}", exc_info=True)
+        return {"count": len(campaigns), "campaigns": campaigns, "note": "Trend data unavailable"}
+
 
 if __name__ == "__main__":
     import uvicorn
