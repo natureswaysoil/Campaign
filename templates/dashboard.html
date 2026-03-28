@@ -8,7 +8,7 @@
     <style>
         body { font-family: system-ui, sans-serif; }
         .card { transition: all 0.3s; }
-        .card:hover { transform: translateY(-2px); }
+        .card:hover { transform: translateY(-4px); }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -16,16 +16,16 @@
         <div class="flex justify-between items-center mb-8">
             <div>
                 <h1 class="text-4xl font-bold text-gray-900">Amazon Ads Campaign Manager</h1>
-                <p class="text-gray-600">Natures Way Soil • Active Campaigns Only</p>
+                <p class="text-gray-600">Natures Way Soil • Only Active Campaigns</p>
             </div>
             <button onclick="runOptimizer()" 
-                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-semibold text-lg shadow-lg">
+                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-semibold text-lg shadow-lg flex items-center gap-2">
                 ▶️ Run Daily Optimizer Now
             </button>
         </div>
 
         <!-- Summary -->
-        <div id="summary" class="bg-white rounded-3xl shadow p-8 mb-10 grid grid-cols-2 md:grid-cols-4 gap-6"></div>
+        <div id="summary" class="bg-white rounded-3xl shadow p-8 mb-10 grid grid-cols-2 md:grid-cols-4 gap-6 text-center"></div>
 
         <!-- Active Campaigns -->
         <div class="bg-white rounded-3xl shadow p-8">
@@ -48,7 +48,7 @@
                 document.getElementById('count').textContent = campaigns.length;
                 document.getElementById('time').textContent = new Date().toLocaleString();
 
-                // Summary
+                // Portfolio Summary
                 let spend = 0, sales = 0, clicks = 0;
                 campaigns.forEach(c => {
                     spend += Number(c.spend || 0);
@@ -58,25 +58,25 @@
                 const acos = sales > 0 ? ((spend / sales) * 100).toFixed(1) : "0";
 
                 document.getElementById('summary').innerHTML = `
-                    <div class="text-center">
-                        <div class="text-gray-500">Total Spend</div>
+                    <div>
+                        <div class="text-gray-500 text-sm">Total Spend (14d)</div>
                         <div class="text-3xl font-bold">$${spend.toFixed(2)}</div>
                     </div>
-                    <div class="text-center">
-                        <div class="text-gray-500">Total Sales</div>
+                    <div>
+                        <div class="text-gray-500 text-sm">Total Sales (14d)</div>
                         <div class="text-3xl font-bold">$${sales.toFixed(2)}</div>
                     </div>
-                    <div class="text-center">
-                        <div class="text-gray-500">Portfolio ACoS</div>
+                    <div>
+                        <div class="text-gray-500 text-sm">Portfolio ACoS</div>
                         <div class="text-3xl font-bold ${acos < 30 ? 'text-green-600' : acos < 50 ? 'text-amber-600' : 'text-red-600'}">${acos}%</div>
                     </div>
-                    <div class="text-center">
-                        <div class="text-gray-500">Total Clicks</div>
+                    <div>
+                        <div class="text-gray-500 text-sm">Total Clicks</div>
                         <div class="text-3xl font-bold">${clicks}</div>
                     </div>
                 `;
 
-                // Campaigns list
+                // Campaign List - Only Active
                 let html = '';
                 campaigns.forEach(c => {
                     const name = c.name || 'Unnamed Campaign';
@@ -86,34 +86,34 @@
 
                     html += `
                         <div class="card border border-gray-200 rounded-3xl p-6 bg-white">
-                            <div class="font-semibold">${name}</div>
+                            <div class="font-semibold text-lg leading-tight">${name}</div>
                             <div class="text-xs text-gray-500 mt-1">ID: ${c.campaignId || '—'}</div>
                             <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                                <div><div class="text-gray-500">Budget</div><div>${budget}</div></div>
-                                <div><div class="text-gray-500">Spend</div><div>$${Number(c.spend||0).toFixed(2)}</div></div>
-                                <div><div class="text-gray-500">Sales</div><div>$${Number(c.sales||0).toFixed(2)}</div></div>
+                                <div><div class="text-gray-500">Budget</div><div class="font-medium">${budget}</div></div>
+                                <div><div class="text-gray-500">Spend</div><div class="font-medium">$${Number(c.spend||0).toFixed(2)}</div></div>
+                                <div><div class="text-gray-500">Sales</div><div class="font-medium">$${Number(c.sales||0).toFixed(2)}</div></div>
                             </div>
                             <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                                <div><div class="text-gray-500">Clicks</div><div>${c.clicks||0}</div></div>
-                                <div><div class="text-gray-500">Orders</div><div>${c.orders||0}</div></div>
+                                <div><div class="text-gray-500">Clicks</div><div class="font-medium">${c.clicks||0}</div></div>
+                                <div><div class="text-gray-500">Orders</div><div class="font-medium">${c.orders||0}</div></div>
                                 <div><div class="text-gray-500">ACoS</div><div class="font-semibold ${acosClass}">${acosVal}</div></div>
                             </div>
                         </div>`;
                 });
 
                 if (campaigns.length === 0) {
-                    html = `<p class="text-gray-400 p-12 text-center">No active campaigns found.</p>`;
+                    html = `<p class="text-gray-400 p-12 text-center">No active (ENABLED) campaigns found.</p>`;
                 }
                 document.getElementById('list').innerHTML = html;
 
             } catch (err) {
                 console.error(err);
-                document.getElementById('list').innerHTML = `<p class="text-red-500 p-12 text-center">Failed to load data.</p>`;
+                document.getElementById('list').innerHTML = `<p class="text-red-500 p-12 text-center">Failed to load data from backend.</p>`;
             }
         }
 
         async function runOptimizer() {
-            const token = prompt("Enter DAILY_OPTIMIZER_TOKEN:");
+            const token = prompt("Enter your DAILY_OPTIMIZER_TOKEN:");
             if (!token) return;
             try {
                 const res = await fetch('/api/run-daily-optimization', {
@@ -121,16 +121,16 @@
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                     body: JSON.stringify({ apply_negatives_live: true, apply_winners_live: true, lookback_days: 14 })
                 });
-                if (res.ok) alert("Optimizer finished!");
+                if (res.ok) alert("✅ Optimizer completed successfully!");
                 loadDashboard();
             } catch (e) {
-                alert("Failed to run optimizer");
+                alert("Failed to run optimizer. Check token.");
             }
         }
 
-        // Load on start and refresh every 2 minutes
+        // Load dashboard
         window.onload = loadDashboard;
-        setInterval(loadDashboard, 120000);
+        setInterval(loadDashboard, 120000); // refresh every 2 minutes
     </script>
 </body>
 </html>
