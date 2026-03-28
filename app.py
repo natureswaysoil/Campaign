@@ -735,7 +735,114 @@ def api_list_campaigns():
     except Exception as e:
         logger.error("Failed to fetch campaigns", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+# ========================= PERFORMANCE REPORTING =========================
+def request_campaign_performance_report(client: AmazonAdsClient, start_date: str, end_date: str):
+    """Request a campaign-level performance report (last 14 days)"""
+    body = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["campaign"],
+            "columns": [
+                "campaignId", "campaignName", "impressions", "clicks", "cost",
+                "sales14d", "purchases14d", "attributedSales14d", "attributedPurchases14d"
+            ],
+            "reportTypeId": "spCampaigns",
+            "timeUnit": "SUMMARY",
+            "format": "GZIP_JSON",
+        }
+    }
+    return client.post(ENDPOINTS["reports"], body)
 
+
+@app.get("/api/campaign-performance")
+def api_campaign_performance():
+    """Return active campaigns enriched with real performance metrics (last 14 days)"""
+    client = AmazonAdsClient()
+    start_date = iso_date_days_ago(14)
+    end_date = today_iso_date()
+
+    # 1. Get list of campaigns
+    list_resp = client.session.post(
+        f"{client.base_url}/sp/campaigns/list",
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Amazon-Advertising-API-ClientId": client.client_id,
+            "Amazon-Advertising-API-Scope": client.profile_id,
+            "Content-Type": "application/vnd.spcampaign.v3+json",
+            "Accept": "application/vnd.spcampaign.v3+json",
+        },
+        json={
+            "maxResults": 100,
+            "filters": {"stateFilter": {"include": ["ENABLED"]}}
+        },
+        timeout=30,
+    )
+    list_resp.raise_for_status()
+    data = list_resp.json()
+    campaigns = data.get("campaigns", []) if isinstance(data, dict) else data
+
+    if not campaigns:
+        return {"count": 0, "campaigns": []}
+
+    # 2. Request performance report
+    try:
+        report_resp = request_campaign_performance_report(client, start_date, end_date)
+        report_id = report_resp.get("reportId")
+        if not report_id:
+            raise RuntimeError("No reportId returned")
+
+        # Poll for report (max ~5 minutes)
+        for _ in range(30):
+            status = client.get(f"{ENDPOINTS['reports']}/{report_id}")
+            if status.get("status") == "SUCCESS":
+                break
+            time.sleep(10)
+        else:
+            raise RuntimeError("Report timed out")
+
+        # Download and parse
+        download_url = status.get("location") or status.get("url")
+        content = client.download_binary(download_url)
+        rows = parse_report_json_bytes(content)
+
+        # Build lookup map by campaignId
+        perf_map = {}
+        for row in rows:
+            cid = str(row.get("campaignId") or "")
+            if cid:
+                perf_map[cid] = {
+                    "impressions": int(num(row, ["impressions"], 0)),
+                    "clicks": int(num(row, ["clicks"], 0)),
+                    "spend": round(num(row, ["cost", "spend"], 0), 2),
+                    "sales": round(num(row, ["sales14d", "attributedSales14d"], 0), 2),
+                    "orders": int(num(row, ["purchases14d", "attributedPurchases14d"], 0)),
+                }
+
+        # Merge performance into campaigns
+        enriched = []
+        for c in campaigns:
+            cid = str(c.get("campaignId") or "")
+            perf = perf_map.get(cid, {})
+            acos = (perf.get("spend", 0) / perf.get("sales", 1)) if perf.get("sales", 0) > 0 else None
+
+            enriched.append({
+                **c,
+                "impressions": perf.get("impressions", 0),
+                "clicks": perf.get("clicks", 0),
+                "spend": perf.get("spend", 0),
+                "sales": perf.get("sales", 0),
+                "orders": perf.get("orders", 0),
+                "acos": round(acos, 4) if acos is not None else None,
+            })
+
+        return {"count": len(enriched), "campaigns": enriched}
+
+    except Exception as e:
+        logger.error(f"Performance report failed: {e}", exc_info=True)
+        # Fallback: return campaigns without metrics
+        return {"count": len(campaigns), "campaigns": campaigns, "note": "Performance data unavailable"}
 
 if __name__ == "__main__":
     import uvicorn
