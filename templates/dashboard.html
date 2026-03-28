@@ -66,7 +66,6 @@
         </div>
     </div>
 
-    {% raw %}
     <script>
         function escapeHtml(str) {
             return String(str || '').replace(/[&<>"']/g, function (m) {
@@ -82,12 +81,12 @@
 
         function toMoney(value) {
             const n = Number(value || 0);
-            return `$${n.toFixed(2)}`;
+            return '$' + n.toFixed(2);
         }
 
         function toPercent(value, digits = 1) {
             if (value === undefined || value === null || isNaN(Number(value))) return '—';
-            return `${(Number(value) * 100).toFixed(digits)}%`;
+            return (Number(value) * 100).toFixed(digits) + '%';
         }
 
         function badgeClassForAcos(acos) {
@@ -123,7 +122,7 @@
             let clicks = 0;
             let orders = 0;
 
-            campaigns.forEach(c => {
+            campaigns.forEach(function (c) {
                 spend += Number(c.spend || 0);
                 sales += Number(c.sales || 0);
                 clicks += Number(c.clicks || 0);
@@ -132,24 +131,23 @@
 
             const acos = sales > 0 ? (spend / sales) : null;
 
-            document.getElementById('summary').innerHTML = `
-                <div>
-                    <div class="text-gray-500 text-sm">Total Spend</div>
-                    <div class="text-3xl font-bold">${toMoney(spend)}</div>
-                </div>
-                <div>
-                    <div class="text-gray-500 text-sm">Total Sales</div>
-                    <div class="text-3xl font-bold">${toMoney(sales)}</div>
-                </div>
-                <div>
-                    <div class="text-gray-500 text-sm">Portfolio ACoS</div>
-                    <div class="text-3xl font-bold ${badgeClassForAcos(acos)}">${acos === null ? '—' : toPercent(acos)}</div>
-                </div>
-                <div>
-                    <div class="text-gray-500 text-sm">Total Clicks / Orders</div>
-                    <div class="text-3xl font-bold">${clicks} / ${orders}</div>
-                </div>
-            `;
+            document.getElementById('summary').innerHTML =
+                '<div>' +
+                    '<div class="text-gray-500 text-sm">Total Spend</div>' +
+                    '<div class="text-3xl font-bold">' + toMoney(spend) + '</div>' +
+                '</div>' +
+                '<div>' +
+                    '<div class="text-gray-500 text-sm">Total Sales</div>' +
+                    '<div class="text-3xl font-bold">' + toMoney(sales) + '</div>' +
+                '</div>' +
+                '<div>' +
+                    '<div class="text-gray-500 text-sm">Portfolio ACoS</div>' +
+                    '<div class="text-3xl font-bold ' + badgeClassForAcos(acos) + '">' + (acos === null ? '—' : toPercent(acos)) + '</div>' +
+                '</div>' +
+                '<div>' +
+                    '<div class="text-gray-500 text-sm">Total Clicks / Orders</div>' +
+                    '<div class="text-3xl font-bold">' + clicks + ' / ' + orders + '</div>' +
+                '</div>';
         }
 
         function renderOptimizerStatus(data) {
@@ -159,43 +157,40 @@
             const peakHours = data.peak_hours_label || data.peakHoursLabel || 'Backend-controlled';
             const note = data.note || '';
 
-            statusEl.innerHTML = `
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div class="rounded-2xl border border-gray-200 p-4">
-                        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Optimizer</div>
-                        <div class="font-semibold text-gray-900">Enabled Campaign Monitor</div>
-                        <div class="text-sm text-gray-600 mt-1">Promotes winners and blocks poor performers from backend rules.</div>
-                    </div>
-
-                    <div class="rounded-2xl border border-gray-200 p-4">
-                        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Bid Mode</div>
-                        <div>${bidModeBadge(bidMode)}</div>
-                        <div class="text-sm text-gray-600 mt-2">Peak-hour logic: ${escapeHtml(peakHours)}</div>
-                    </div>
-
-                    <div class="rounded-2xl border border-gray-200 p-4">
-                        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Backend Note</div>
-                        <div class="text-sm text-gray-700">${escapeHtml(note || 'No backend note provided.')}</div>
-                    </div>
-                </div>
-            `;
+            statusEl.innerHTML =
+                '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
+                    '<div class="rounded-2xl border border-gray-200 p-4">' +
+                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Optimizer</div>' +
+                        '<div class="font-semibold text-gray-900">Enabled Campaign Monitor</div>' +
+                        '<div class="text-sm text-gray-600 mt-1">Promotes winners and blocks poor performers from backend rules.</div>' +
+                    '</div>' +
+                    '<div class="rounded-2xl border border-gray-200 p-4">' +
+                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Bid Mode</div>' +
+                        '<div>' + bidModeBadge(bidMode) + '</div>' +
+                        '<div class="text-sm text-gray-600 mt-2">Peak-hour logic: ' + escapeHtml(peakHours) + '</div>' +
+                    '</div>' +
+                    '<div class="rounded-2xl border border-gray-200 p-4">' +
+                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Backend Note</div>' +
+                        '<div class="text-sm text-gray-700">' + escapeHtml(note || 'No backend note provided.') + '</div>' +
+                    '</div>' +
+                '</div>';
         }
 
         function renderCampaigns(campaigns) {
             const listEl = document.getElementById('list');
 
             if (!campaigns.length) {
-                listEl.innerHTML = `<p class="text-gray-400 p-12 text-center">No active (ENABLED) campaigns found.</p>`;
+                listEl.innerHTML = '<p class="text-gray-400 p-12 text-center">No active (ENABLED) campaigns found.</p>';
                 return;
             }
 
             let html = '';
 
-            campaigns.forEach(c => {
+            campaigns.forEach(function (c) {
                 const name = safeCampaignName(c);
                 const campaignId = escapeHtml(c.campaignId || '—');
                 const budget = (c.budget && c.budget.budget !== undefined && c.budget.budget !== null)
-                    ? `$${Number(c.budget.budget).toFixed(2)}`
+                    ? '$' + Number(c.budget.budget).toFixed(2)
                     : '—';
 
                 const spend = toMoney(c.spend || 0);
@@ -211,66 +206,64 @@
                 const currentBidMode = c.currentBidMode ?? c.bidMode ?? null;
                 const currentAppliedBid = c.currentAppliedBid ?? c.appliedBid ?? null;
 
-                html += `
-                    <div class="card border border-gray-200 rounded-3xl p-6 bg-white shadow-sm">
-                        <div class="flex items-start justify-between gap-3">
-                            <div>
-                                <div class="font-semibold text-lg leading-tight">${name}</div>
-                                <div class="text-xs text-gray-500 mt-1">ID: ${campaignId}</div>
-                            </div>
-                            <div>${bidModeBadge(currentBidMode || 'UNKNOWN')}</div>
-                        </div>
+                html +=
+                    '<div class="card border border-gray-200 rounded-3xl p-6 bg-white shadow-sm">' +
+                        '<div class="flex items-start justify-between gap-3">' +
+                            '<div>' +
+                                '<div class="font-semibold text-lg leading-tight">' + name + '</div>' +
+                                '<div class="text-xs text-gray-500 mt-1">ID: ' + campaignId + '</div>' +
+                            '</div>' +
+                            '<div>' + bidModeBadge(currentBidMode || 'UNKNOWN') + '</div>' +
+                        '</div>' +
 
-                        <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                            <div>
-                                <div class="text-gray-500">Budget</div>
-                                <div class="font-medium">${budget}</div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500">Spend</div>
-                                <div class="font-medium">${spend}</div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500">Sales</div>
-                                <div class="font-medium">${sales}</div>
-                            </div>
-                        </div>
+                        '<div class="mt-6 grid grid-cols-3 gap-4 text-sm">' +
+                            '<div>' +
+                                '<div class="text-gray-500">Budget</div>' +
+                                '<div class="font-medium">' + budget + '</div>' +
+                            '</div>' +
+                            '<div>' +
+                                '<div class="text-gray-500">Spend</div>' +
+                                '<div class="font-medium">' + spend + '</div>' +
+                            '</div>' +
+                            '<div>' +
+                                '<div class="text-gray-500">Sales</div>' +
+                                '<div class="font-medium">' + sales + '</div>' +
+                            '</div>' +
+                        '</div>' +
 
-                        <div class="mt-6 grid grid-cols-3 gap-4 text-sm">
-                            <div>
-                                <div class="text-gray-500">Clicks</div>
-                                <div class="font-medium">${clicks}</div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500">Orders</div>
-                                <div class="font-medium">${orders}</div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500">ACoS</div>
-                                <div class="font-semibold ${acosClass}">${acosVal}</div>
-                            </div>
-                        </div>
+                        '<div class="mt-6 grid grid-cols-3 gap-4 text-sm">' +
+                            '<div>' +
+                                '<div class="text-gray-500">Clicks</div>' +
+                                '<div class="font-medium">' + clicks + '</div>' +
+                            '</div>' +
+                            '<div>' +
+                                '<div class="text-gray-500">Orders</div>' +
+                                '<div class="font-medium">' + orders + '</div>' +
+                            '</div>' +
+                            '<div>' +
+                                '<div class="text-gray-500">ACoS</div>' +
+                                '<div class="font-semibold ' + acosClass + '">' + acosVal + '</div>' +
+                            '</div>' +
+                        '</div>' +
 
-                        <div class="mt-6 border-t border-gray-100 pt-4">
-                            <div class="text-sm font-semibold text-gray-800 mb-3">Amazon Suggested Bid Window</div>
-
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                                <div>
-                                    <div class="text-gray-500">Suggested Low</div>
-                                    <div class="font-medium">${suggestedLow === null ? '—' : toMoney(suggestedLow)}</div>
-                                </div>
-                                <div>
-                                    <div class="text-gray-500">Suggested High</div>
-                                    <div class="font-medium">${suggestedHigh === null ? '—' : toMoney(suggestedHigh)}</div>
-                                </div>
-                                <div>
-                                    <div class="text-gray-500">Applied Bid</div>
-                                    <div class="font-medium">${currentAppliedBid === null ? '—' : toMoney(currentAppliedBid)}</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
+                        '<div class="mt-6 border-t border-gray-100 pt-4">' +
+                            '<div class="text-sm font-semibold text-gray-800 mb-3">Amazon Suggested Bid Window</div>' +
+                            '<div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">' +
+                                '<div>' +
+                                    '<div class="text-gray-500">Suggested Low</div>' +
+                                    '<div class="font-medium">' + (suggestedLow === null ? '—' : toMoney(suggestedLow)) + '</div>' +
+                                '</div>' +
+                                '<div>' +
+                                    '<div class="text-gray-500">Suggested High</div>' +
+                                    '<div class="font-medium">' + (suggestedHigh === null ? '—' : toMoney(suggestedHigh)) + '</div>' +
+                                '</div>' +
+                                '<div>' +
+                                    '<div class="text-gray-500">Applied Bid</div>' +
+                                    '<div class="font-medium">' + (currentAppliedBid === null ? '—' : toMoney(currentAppliedBid)) + '</div>' +
+                                '</div>' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>';
             });
 
             listEl.innerHTML = html;
@@ -284,17 +277,17 @@
                 let data = {};
                 try {
                     data = JSON.parse(text);
-                } catch {
-                    throw new Error(`Invalid JSON from /api/campaign-performance: ${text}`);
+                } catch (e) {
+                    throw new Error('Invalid JSON from /api/campaign-performance: ' + text);
                 }
 
                 if (!res.ok) {
                     throw new Error(data.detail || text || 'Failed to load dashboard data');
                 }
 
-                const campaigns = (data.campaigns || []).filter(
-                    c => String(c.state || '').toUpperCase() === 'ENABLED'
-                );
+                const campaigns = (data.campaigns || []).filter(function (c) {
+                    return String(c.state || '').toUpperCase() === 'ENABLED';
+                });
 
                 document.getElementById('count').textContent = campaigns.length;
                 document.getElementById('time').textContent = new Date().toLocaleString();
@@ -305,22 +298,17 @@
 
             } catch (err) {
                 console.error(err);
-                document.getElementById('summary').innerHTML = `
-                    <div class="col-span-full text-red-500 text-center p-8">
-                        Failed to load summary from backend.
-                    </div>
-                `;
-                document.getElementById('optimizerStatus').innerHTML = `
-                    <div class="text-red-500">Failed to load optimizer status.</div>
-                `;
-                document.getElementById('list').innerHTML = `
-                    <p class="text-red-500 p-12 text-center">Failed to load data from backend.</p>
-                `;
+                document.getElementById('summary').innerHTML =
+                    '<div class="col-span-full text-red-500 text-center p-8">Failed to load summary from backend.</div>';
+                document.getElementById('optimizerStatus').innerHTML =
+                    '<div class="text-red-500">Failed to load optimizer status.</div>';
+                document.getElementById('list').innerHTML =
+                    '<p class="text-red-500 p-12 text-center">Failed to load data from backend.</p>';
             }
         }
 
         async function runOptimizer() {
-            const token = prompt("Enter your DAILY_OPTIMIZER_TOKEN:");
+            const token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
             if (!token) return;
 
             try {
@@ -328,7 +316,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
+                        'Authorization': 'Bearer ' + token
                     },
                     body: JSON.stringify({
                         apply_negatives_live: true,
@@ -340,22 +328,21 @@
                 const text = await res.text();
 
                 if (!res.ok) {
-                    alert("❌ Optimizer error:\n\n" + text);
+                    alert('❌ Optimizer error:\n\n' + text);
                     return;
                 }
 
-                alert("✅ Optimizer completed successfully!");
+                alert('✅ Optimizer completed successfully!');
                 await loadDashboard();
 
             } catch (e) {
                 console.error(e);
-                alert("❌ Failed to run optimizer. Check token or backend.");
+                alert('❌ Failed to run optimizer. Check token or backend.');
             }
         }
 
         window.onload = loadDashboard;
         setInterval(loadDashboard, 120000);
     </script>
-    {% endraw %}
 </body>
 </html>
