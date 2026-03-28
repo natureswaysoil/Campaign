@@ -34,10 +34,8 @@
             </div>
         </div>
 
-        <!-- Summary -->
         <div id="summary" class="bg-white rounded-3xl shadow p-8 mb-10 grid grid-cols-2 md:grid-cols-4 gap-6 text-center"></div>
 
-        <!-- Status -->
         <div id="statusBox" class="bg-white rounded-3xl shadow p-6 mb-8">
             <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
                 <div>
@@ -54,7 +52,6 @@
             </div>
         </div>
 
-        <!-- Active Campaigns -->
         <div class="bg-white rounded-3xl shadow p-8">
             <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-3 mb-6">
                 <h2 class="text-2xl font-semibold">
@@ -69,16 +66,17 @@
         </div>
     </div>
 
+    {% raw %}
     <script>
         function escapeHtml(str) {
             return String(str || '').replace(/[&<>"']/g, function (m) {
-                return ({
+                return {
                     '&': '&amp;',
                     '<': '&lt;',
                     '>': '&gt;',
                     '"': '&quot;',
                     "'": '&#39;'
-                })[m];
+                }[m];
             });
         }
 
@@ -108,6 +106,9 @@
             }
             if (clean === 'OFF_PEAK' || clean === 'OFF-PEAK') {
                 return '<span class="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-semibold">OFF-PEAK</span>';
+            }
+            if (clean === 'NORMAL') {
+                return '<span class="inline-flex items-center rounded-full bg-blue-100 text-blue-700 px-3 py-1 text-xs font-semibold">NORMAL</span>';
             }
             return '<span class="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-3 py-1 text-xs font-semibold">UNKNOWN</span>';
         }
@@ -205,7 +206,6 @@
                 const acosVal = acos === undefined || acos === null ? '—' : toPercent(acos);
                 const acosClass = badgeClassForAcos(acos);
 
-                // These are optional backend fields for Amazon suggested bids
                 const suggestedLow = c.amazonSuggestedBidLow ?? c.suggestedBidLow ?? c.bid_low ?? null;
                 const suggestedHigh = c.amazonSuggestedBidHigh ?? c.suggestedBidHigh ?? c.bid_high ?? null;
                 const currentBidMode = c.currentBidMode ?? c.bidMode ?? null;
@@ -292,7 +292,9 @@
                     throw new Error(data.detail || text || 'Failed to load dashboard data');
                 }
 
-                const campaigns = (data.campaigns || []).filter(c => String(c.state || '').toUpperCase() === 'ENABLED');
+                const campaigns = (data.campaigns || []).filter(
+                    c => String(c.state || '').toUpperCase() === 'ENABLED'
+                );
 
                 document.getElementById('count').textContent = campaigns.length;
                 document.getElementById('time').textContent = new Date().toLocaleString();
@@ -338,7 +340,7 @@
                 const text = await res.text();
 
                 if (!res.ok) {
-                    alert("❌ Optimizer error:\\n\\n" + text);
+                    alert("❌ Optimizer error:\n\n" + text);
                     return;
                 }
 
@@ -354,5 +356,6 @@
         window.onload = loadDashboard;
         setInterval(loadDashboard, 120000);
     </script>
+    {% endraw %}
 </body>
 </html>
