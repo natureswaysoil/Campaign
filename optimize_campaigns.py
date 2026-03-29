@@ -1,15 +1,13 @@
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, JSONResponse
-import csv
 import datetime
 import gzip
 import hmac
-import io
 import json
 import logging
 import os
+import re
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,11 +28,6 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-PRODUCTS_CSV_URL = os.getenv(
-    "PRODUCTS_CSV_URL",
-    "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv",
-)
-
 OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
 
 PEAK_START = int(os.getenv("PEAK_HOURS_START", "18"))
@@ -52,8 +45,6 @@ DEFAULT_FALLBACK_BID = float(os.getenv("DEFAULT_FALLBACK_BID", "0.75"))
 
 MEDIA_TYPES = {
     "campaigns_v3": "application/vnd.spcampaign.v3+json",
-    "adgroups_v3": "application/vnd.spadgroup.v3+json",
-    "productads_v3": "application/vnd.spproductad.v3+json",
     "keywords_v3": "application/vnd.spkeyword.v3+json",
     "neg_keywords_v3": "application/vnd.spcampaignnegativekeyword.v3+json",
     "json": "application/json",
@@ -185,8 +176,8 @@ def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]
     hold: List[Dict[str, Any]] = []
 
     for row in rows:
-        term = text(row, ["Customer Search Term", "searchTerm", "Search Term"])
-        if not term:
+        term_value = text(row, ["Customer Search Term", "searchTerm", "Search Term"])
+        if not term_value:
             continue
 
         clicks = int(num(row, ["Clicks", "clicks"], 0))
@@ -196,7 +187,7 @@ def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]
         acos = (cost / sales) if sales > 0 else None
 
         result = {
-            "term": term,
+            "term": term_value,
             "campaign_id": int(num(row, ["Campaign Id", "campaignId"], 0)),
             "ad_group_id": int(num(row, ["Ad Group Id", "adGroupId"], 0)),
             "clicks": clicks,
@@ -219,13 +210,6 @@ def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]
             hold.append({**result, "reason": "hold"})
 
     return {"winners": winners, "negatives": negatives, "hold": hold}
-
-
-def load_products() -> List[Dict[str, str]]:
-    response = requests.get(PRODUCTS_CSV_URL, timeout=30)
-    response.raise_for_status()
-    reader = csv.DictReader(io.StringIO(response.text))
-    return [{(k or "").strip(): (v or "").strip() for k, v in row.items()} for row in reader]
 
 
 class AmazonAdsClient:
@@ -392,32 +376,46 @@ class AmazonAdsClient:
             return {}
 
     def request_report(self, body: Dict[str, Any]) -> str:
-        data = self.post(
-            "/reporting/reports",
-            body,
-            content_type=MEDIA_TYPES["json"],
-            accept=MEDIA_TYPES["json"],
-        )
-        report_id = data.get("reportId")
-        if not report_id:
-            raise RuntimeError(f"Failed to request report ID: {data}")
-        return report_id
+        try:
+            data = self.post(
+                "/reporting/reports",
+                body,
+                content_type=MEDIA_TYPES["json"],
+                accept=MEDIA_TYPES["json"],
+            )
+            report_id = data.get("reportId")
+            if not report_id:
+                raise RuntimeError(f"Failed to request report ID: {data}")
+            return report_id
+        except Exception as e:
+            msg = str(e)
+            if '"code":"425"' in msg and "duplicate of" in msg.lower():
+                match = re.search(r'duplicate of\s*:\s*([a-f0-9-]+)', msg, re.I)
+                if match:
+                    logger.info("Using existing duplicate report ID: %s", match.group(1))
+                    return match.group(1)
+            raise
 
-    def wait_for_report(self, report_id: str, timeout_loops: int = 30) -> str:
+    def wait_for_report(self, report_id: str, timeout_loops: int = 60, sleep_seconds: int = 10) -> str:
         for _ in range(timeout_loops):
             status = self.get_json(
                 f"/reporting/reports/{report_id}",
                 accept=MEDIA_TYPES["json"],
             )
-            if status.get("status") == "SUCCESS":
+
+            state = status.get("status")
+            if state == "SUCCESS":
                 location = status.get("location") or status.get("url")
                 if not location:
                     raise RuntimeError(f"Report SUCCESS but no download URL: {status}")
                 return location
-            if status.get("status") in {"FAILURE", "CANCELLED"}:
+
+            if state in {"FAILURE", "CANCELLED"}:
                 raise RuntimeError(f"Report failed: {status}")
-            time.sleep(10)
-        raise RuntimeError("Report generation timed out")
+
+            time.sleep(sleep_seconds)
+
+        raise RuntimeError(f"Report generation timed out for reportId={report_id}")
 
 
 def keyword_create_rows(
@@ -489,55 +487,17 @@ def optimizer_history() -> Dict[str, Any]:
     return {"history": history, "count": len(history)}
 
 
-@app.get("/api/products")
-def api_products() -> Dict[str, Any]:
-    products = load_products()
-    return {"count": len(products), "products": products}
-
-
 @app.get("/api/campaign-performance")
 def campaign_performance() -> JSONResponse:
     try:
         client = AmazonAdsClient()
         campaigns = client.list_campaigns()
-
-        start_date = iso_date_days_ago(14)
-        end_date = today_iso_date()
-
-        report_id = client.request_report({
-            "startDate": start_date,
-            "endDate": end_date,
-            "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "groupBy": ["campaign"],
-                "columns": ["campaignId", "campaignName", "impressions", "clicks", "cost", "sales7d", "purchases7d"],
-                "reportTypeId": "spCampaigns",
-                "timeUnit": "SUMMARY",
-                "format": "GZIP_JSON",
-            }
-        })
-        report_url = client.wait_for_report(report_id)
-        summary_rows = parse_report_json_bytes(client.download_binary(report_url))
-
-        summary_by_campaign: Dict[str, Dict[str, Any]] = {}
-        for row in summary_rows:
-            cid = str(row.get("campaignId") or "")
-            if not cid:
-                continue
-            summary_by_campaign[cid] = {
-                "impressions": int(num(row, ["impressions"], 0)),
-                "clicks": int(num(row, ["clicks"], 0)),
-                "spend": round(num(row, ["cost", "spend"], 0), 2),
-                "sales": round(num(row, ["sales7d", "sales"], 0), 2),
-                "orders": int(num(row, ["purchases7d", "orders"], 0)),
-            }
+        mode = get_bid_mode()
 
         results: List[Dict[str, Any]] = []
-        mode = get_bid_mode()
 
         for c in campaigns:
             cid = str(c.get("campaignId") or "")
-            summary = summary_by_campaign.get(cid, {})
             bid_low = None
             bid_high = None
             applied = None
@@ -560,18 +520,14 @@ def campaign_performance() -> JSONResponse:
                 bid_high = high
                 applied = applied_bid
 
-            sales = float(summary.get("sales", 0))
-            spend = float(summary.get("spend", 0))
-            acos = round(spend / sales, 4) if sales > 0 else None
-
             results.append({
                 **c,
-                "impressions": summary.get("impressions", 0),
-                "clicks": summary.get("clicks", 0),
-                "spend": round(spend, 2),
-                "sales": round(sales, 2),
-                "orders": summary.get("orders", 0),
-                "acos": acos,
+                "impressions": 0,
+                "clicks": 0,
+                "spend": 0,
+                "sales": 0,
+                "orders": 0,
+                "acos": None,
                 "amazonSuggestedBidLow": bid_low,
                 "amazonSuggestedBidHigh": bid_high,
                 "currentAppliedBid": applied,
@@ -583,7 +539,7 @@ def campaign_performance() -> JSONResponse:
             "count": len(results),
             "bid_mode": mode,
             "peak_hours_label": f"{PEAK_START}:00–{PEAK_END}:59",
-            "note": "Totals come from a 14-day SUMMARY report.",
+            "note": "Light dashboard mode: campaign list + bid preview only.",
         })
     except Exception as e:
         logger.exception("Campaign performance failed")
@@ -637,13 +593,14 @@ def run_daily_optimization(
                     by_campaign.setdefault(cid, []).append(item["term"])
 
             for cid, terms in by_campaign.items():
-                neg_rows = negative_keyword_rows(unique_in_order(terms), cid)
+                neg_terms = unique_in_order(terms)
+                neg_rows = negative_keyword_rows(neg_terms, cid)
                 if neg_rows:
                     client.create_negative_keywords(neg_rows)
                     negatives_applied.append({
                         "campaign_id": cid,
                         "count": len(neg_rows),
-                        "terms_sample": terms[:10],
+                        "terms_sample": neg_terms[:10],
                     })
 
         if apply_winners and classified["winners"]:
