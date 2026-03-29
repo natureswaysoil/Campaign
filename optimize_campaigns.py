@@ -200,53 +200,59 @@ def dashboard():
 
 @app.get("/api/campaign-performance")
 def campaign_performance():
-    client = AmazonAdsClient()
-    campaigns = client.list_campaigns()
+    try:
+        client = AmazonAdsClient()
+        campaigns = client.list_campaigns()
 
-    results = []
+        results = []
 
-    for c in campaigns:
-        cid = c.get("campaignId")
+        for c in campaigns:
+            cid = c.get("campaignId")
+            keywords = client.get_keywords(cid)
 
-        keywords = client.get_keywords(cid)
+            bid_low = None
+            bid_high = None
+            applied = None
 
-        bid_low = None
-        bid_high = None
-        applied = None
+            if keywords:
+                kw = keywords[0]
 
-        if keywords:
-            kw = keywords[0]
+                rec = client.get_bid_recommendation(
+                    cid,
+                    kw.get("adGroupId"),
+                    kw.get("keywordText")
+                )
 
-            rec = client.get_bid_recommendation(
-                cid,
-                kw.get("adGroupId"),
-                kw.get("keywordText")
-            )
+                applied = choose_bid(rec, kw.get("bid") or 0.75)
+                bid_low = rec.get("low")
+                bid_high = rec.get("high")
 
-            applied = choose_bid(rec, kw.get("bid") or 0.75)
-            bid_low = rec.get("low")
-            bid_high = rec.get("high")
+            results.append({
+                **c,
+                "spend": 0,
+                "sales": 0,
+                "clicks": 0,
+                "orders": 0,
+                "acos": None,
+                "amazonSuggestedBidLow": bid_low,
+                "amazonSuggestedBidHigh": bid_high,
+                "currentAppliedBid": applied,
+                "currentBidMode": get_bid_mode()
+            })
 
-        results.append({
-            **c,
-            "spend": 0,
-            "sales": 0,
-            "clicks": 0,
-            "orders": 0,
-            "acos": None,
-            "amazonSuggestedBidLow": bid_low,
-            "amazonSuggestedBidHigh": bid_high,
-            "currentAppliedBid": applied,
-            "currentBidMode": get_bid_mode()
-        })
+        return {
+            "campaigns": results,
+            "count": len(results),
+            "bid_mode": get_bid_mode(),
+            "peak_hours_label": "6pm–11pm"
+        }
 
-    return {
-        "campaigns": results,
-        "count": len(results),
-        "bid_mode": get_bid_mode(),
-        "peak_hours_label": "6pm–11pm"
-    }
-
+    except Exception as e:
+        logger.exception("Campaign performance failed")
+        return {
+            "error": True,
+            "message": str(e)
+        }
 # -----------------------
 # HEALTH
 # -----------------------
