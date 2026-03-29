@@ -87,31 +87,96 @@ class AmazonAdsClient:
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             },
+            timeout=30,
         )
         r.raise_for_status()
         return r.json()["access_token"]
 
-    def headers(self):
+    def headers(self, content_type="application/json", accept=None):
         return {
             "Authorization": f"Bearer {self.token}",
             "Amazon-Advertising-API-ClientId": self.client_id,
             "Amazon-Advertising-API-Scope": self.profile_id,
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
+            "Accept": accept or content_type,
         }
 
-    def post(self, endpoint, body):
+    def post(self, endpoint, body, content_type="application/json", accept=None):
         url = f"{self.base_url}{endpoint}"
-        r = requests.post(url, headers=self.headers(), json=body)
+        r = requests.post(
+            url,
+            headers=self.headers(content_type=content_type, accept=accept),
+            json=body,
+            timeout=60,
+        )
         if not r.ok:
             raise RuntimeError(r.text)
-        return r.json()
+        return r.json() if r.text.strip() else {}
 
-    def get(self, endpoint):
+    def get(self, endpoint, accept="application/json"):
         url = f"{self.base_url}{endpoint}"
-        r = requests.get(url, headers=self.headers())
+        r = requests.get(
+            url,
+            headers=self.headers(content_type="application/json", accept=accept),
+            timeout=60,
+        )
         if not r.ok:
             raise RuntimeError(r.text)
-        return r.json()
+        return r.json() if r.text.strip() else {}
+
+    def list_campaigns(self):
+        return self.post(
+            "/sp/campaigns/list",
+            {
+                "maxResults": 100,
+                "filters": {"stateFilter": {"include": ["ENABLED"]}}
+            },
+            content_type="application/vnd.spcampaign.v3+json",
+            accept="application/vnd.spcampaign.v3+json",
+        ).get("campaigns", [])
+
+    def get_keywords(self, campaign_id):
+        return self.post(
+            "/sp/keywords/list",
+            {
+                "maxResults": 50,
+                "filters": {
+                    "campaignIdFilter": {"include": [str(campaign_id)]}
+                }
+            },
+            content_type="application/vnd.spkeyword.v3+json",
+            accept="application/vnd.spkeyword.v3+json",
+        ).get("keywords", [])
+
+    def get_bid_recommendation(self, campaign_id, ad_group_id, keyword):
+        try:
+            data = self.post(
+                "/sp/keywords/bidRecommendations",
+                {
+                    "recommendations": [{
+                        "campaignId": str(campaign_id),
+                        "adGroupId": str(ad_group_id),
+                        "keywordText": keyword,
+                        "matchType": "PHRASE"
+                    }]
+                },
+                content_type="application/vnd.spkeyword.v3+json",
+                accept="application/vnd.spkeyword.v3+json",
+            )
+
+            recs = data.get("recommendations", [])
+            if not recs:
+                return {}
+
+            rec = recs[0]
+            return {
+                "low": rec.get("suggestedBidLow"),
+                "high": rec.get("suggestedBidHigh"),
+                "suggested": rec.get("suggestedBid")
+            }
+        except Exception:
+            return {}
+
 
     # -----------------------
     # CAMPAIGNS
