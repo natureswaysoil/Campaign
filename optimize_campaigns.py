@@ -97,7 +97,7 @@ def load_optimizer_history() -> List[Dict[str, Any]]:
 def save_optimizer_history(entry: Dict[str, Any]) -> None:
     history = load_optimizer_history()
     history.append(entry)
-    history = history[-30:]
+    history = history[-50:]
     try:
         OPTIMIZER_LOG_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
     except Exception as e:
@@ -426,17 +426,14 @@ class AmazonAdsClient:
                 f"/reporting/reports/{report_id}",
                 accept=MEDIA_TYPES["json"],
             )
-
             state = status.get("status")
             if state == "SUCCESS":
                 location = status.get("location") or status.get("url")
                 if not location:
                     raise RuntimeError(f"Report SUCCESS but no download URL: {status}")
                 return location
-
             if state in {"FAILURE", "CANCELLED"}:
                 raise RuntimeError(f"Report failed: {status}")
-
             time.sleep(sleep_seconds)
 
         raise RuntimeError(f"Report generation timed out for reportId={report_id}")
@@ -598,6 +595,166 @@ def build_dashboard_cache(lookback_days: int = 14) -> Dict[str, Any]:
     return cache
 
 
+def fetch_search_term_classification(lookback_days: int) -> Tuple[AmazonAdsClient, Dict[str, Any], str, str, List[Dict[str, Any]]]:
+    client = AmazonAdsClient()
+    start_date = iso_date_days_ago(lookback_days)
+    end_date = today_iso_date()
+
+    report_id = client.request_report({
+        "startDate": start_date,
+        "endDate": end_date,
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["searchTerm"],
+            "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
+            "reportTypeId": "spSearchTerm",
+            "timeUnit": "SUMMARY",
+            "format": "GZIP_JSON",
+        }
+    })
+    report_url = client.wait_for_report(report_id)
+    rows = parse_report_json_bytes(client.download_binary(report_url))
+    classified = classify_terms(rows)
+    return client, classified, report_id, start_date, end_date
+
+
+def apply_negatives_step(client: AmazonAdsClient, classified: Dict[str, Any]) -> List[Dict[str, Any]]:
+    negatives_applied: List[Dict[str, Any]] = []
+    if not classified["negatives"]:
+        return negatives_applied
+
+    by_campaign: Dict[int, List[str]] = {}
+    for item in classified["negatives"]:
+        cid = item.get("campaign_id")
+        if cid:
+            by_campaign.setdefault(cid, []).append(item["term"])
+
+    for cid, terms in by_campaign.items():
+        neg_terms = unique_in_order(terms)
+        neg_rows = negative_keyword_rows(neg_terms, cid)
+        if neg_rows:
+            client.create_negative_keywords(neg_rows)
+            negatives_applied.append({
+                "campaign_id": cid,
+                "count": len(neg_rows),
+                "terms_sample": neg_terms[:10],
+            })
+
+    return negatives_applied
+
+
+def apply_winners_step(client: AmazonAdsClient, classified: Dict[str, Any], fallback_winner_bid: float) -> List[Dict[str, Any]]:
+    winners_applied: List[Dict[str, Any]] = []
+    if not classified["winners"]:
+        return winners_applied
+
+    by_adgroup: Dict[int, Dict[str, Any]] = {}
+    for item in classified["winners"]:
+        agid = item.get("ad_group_id")
+        cid = item.get("campaign_id")
+        if agid and cid:
+            by_adgroup.setdefault(agid, {"campaign_id": cid, "terms": []})
+            by_adgroup[agid]["terms"].append(item["term"])
+
+    for agid, data in by_adgroup.items():
+        terms = unique_in_order(data["terms"])
+        bid_map: Dict[str, float] = {}
+        bid_details: List[Dict[str, Any]] = []
+
+        for term in terms:
+            rec = client.get_bid_recommendation(
+                str(data["campaign_id"]),
+                str(agid),
+                term,
+                "PHRASE",
+            )
+            low, high, applied = choose_bid(rec, fallback_winner_bid)
+            bid_map[term] = applied
+            bid_details.append({
+                "term": term,
+                "suggested_low": low,
+                "suggested_high": high,
+                "applied_bid": applied,
+                "bid_mode": get_bid_mode(),
+            })
+
+        rows_to_create = keyword_create_rows(
+            terms,
+            int(data["campaign_id"]),
+            int(agid),
+            bid_map,
+        )
+        if rows_to_create:
+            client.create_keywords(rows_to_create)
+            winners_applied.append({
+                "campaign_id": data["campaign_id"],
+                "ad_group_id": agid,
+                "count": len(terms),
+                "terms_sample": terms[:10],
+                "bid_details": bid_details[:10],
+            })
+
+    return winners_applied
+
+
+def retune_existing_bids_step(client: AmazonAdsClient) -> List[Dict[str, Any]]:
+    bids_updated: List[Dict[str, Any]] = []
+    campaigns = client.list_campaigns()
+
+    for c in campaigns[:50]:
+        cid = str(c.get("campaignId") or "")
+        if not cid:
+            continue
+
+        try:
+            keywords = client.list_keywords(cid)
+        except Exception:
+            continue
+
+        update_rows: List[Dict[str, Any]] = []
+        for kw in keywords[:100]:
+            keyword_id = kw.get("keywordId")
+            ad_group_id = kw.get("adGroupId")
+            keyword_text = kw.get("keywordText")
+            match_type = kw.get("matchType", "PHRASE")
+            current_bid = float(kw.get("bid") or DEFAULT_FALLBACK_BID)
+
+            if not keyword_id or not ad_group_id or not keyword_text:
+                continue
+
+            rec = client.get_bid_recommendation(
+                cid,
+                str(ad_group_id),
+                str(keyword_text),
+                str(match_type),
+            )
+            low, high, applied = choose_bid(rec, current_bid)
+
+            update_rows.append({
+                "keywordId": str(keyword_id),
+                "campaignId": str(cid),
+                "adGroupId": str(ad_group_id),
+                "bid": applied,
+                "state": kw.get("state", "ENABLED"),
+            })
+
+            bids_updated.append({
+                "campaign_id": cid,
+                "keyword_id": str(keyword_id),
+                "keyword_text": str(keyword_text),
+                "match_type": str(match_type),
+                "suggested_low": low,
+                "suggested_high": high,
+                "applied_bid": applied,
+                "bid_mode": get_bid_mode(),
+            })
+
+        if update_rows:
+            client.update_keywords(update_rows)
+
+    return bids_updated
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
     path = BASE_DIR / "templates" / "dashboard.html"
@@ -638,9 +795,118 @@ def refresh_dashboard_cache(authorization: Optional[str] = Header(default=None))
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
 
 
-@app.get("/api/campaign-performance")
-def campaign_performance() -> JSONResponse:
-    return JSONResponse(read_cache())
+@app.post("/api/apply-negatives")
+def apply_negatives(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization)
+    try:
+        lookback_days = int(payload.get("lookback_days", 14))
+        refresh_cache_after = bool(payload.get("refresh_cache_after", True))
+
+        client, classified, report_id, start_date, end_date = fetch_search_term_classification(lookback_days)
+        negatives_applied = apply_negatives_step(client, classified)
+
+        cache_result = None
+        if refresh_cache_after:
+            try:
+                cache_result = build_dashboard_cache(lookback_days=14)
+            except Exception as e:
+                logger.warning("Cache refresh after negatives failed: %s", e)
+
+        entry = {
+            "timestamp": utc_now_iso(),
+            "action": "apply_negatives",
+            "lookback_days": lookback_days,
+            "negatives_found": len(classified["negatives"]),
+            "negatives_applied_count": len(negatives_applied),
+        }
+        save_optimizer_history(entry)
+
+        return JSONResponse({
+            "success": True,
+            "action": "apply_negatives",
+            "report_id": report_id,
+            "date_range": {"start": start_date, "end": end_date},
+            "negatives_found": len(classified["negatives"]),
+            "negatives_applied_count": len(negatives_applied),
+            "negatives_applied": negatives_applied,
+            "cache_refreshed": cache_result is not None,
+        })
+    except Exception as e:
+        logger.exception("Apply negatives failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/apply-winners")
+def apply_winners(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization)
+    try:
+        lookback_days = int(payload.get("lookback_days", 14))
+        fallback_winner_bid = float(payload.get("winner_bid", DEFAULT_WINNER_BID))
+        refresh_cache_after = bool(payload.get("refresh_cache_after", True))
+
+        client, classified, report_id, start_date, end_date = fetch_search_term_classification(lookback_days)
+        winners_applied = apply_winners_step(client, classified, fallback_winner_bid)
+
+        cache_result = None
+        if refresh_cache_after:
+            try:
+                cache_result = build_dashboard_cache(lookback_days=14)
+            except Exception as e:
+                logger.warning("Cache refresh after winners failed: %s", e)
+
+        entry = {
+            "timestamp": utc_now_iso(),
+            "action": "apply_winners",
+            "lookback_days": lookback_days,
+            "winners_found": len(classified["winners"]),
+            "winners_applied_count": len(winners_applied),
+        }
+        save_optimizer_history(entry)
+
+        return JSONResponse({
+            "success": True,
+            "action": "apply_winners",
+            "report_id": report_id,
+            "date_range": {"start": start_date, "end": end_date},
+            "winners_found": len(classified["winners"]),
+            "winners_applied_count": len(winners_applied),
+            "winners_applied": winners_applied,
+            "cache_refreshed": cache_result is not None,
+        })
+    except Exception as e:
+        logger.exception("Apply winners failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/retune-existing-bids")
+def retune_existing_bids(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization)
+    try:
+        client = AmazonAdsClient()
+        bids_updated = retune_existing_bids_step(client)
+
+        entry = {
+            "timestamp": utc_now_iso(),
+            "action": "retune_existing_bids",
+            "existing_keyword_bids_updated": len(bids_updated),
+        }
+        save_optimizer_history(entry)
+
+        return JSONResponse({
+            "success": True,
+            "action": "retune_existing_bids",
+            "existing_keyword_bids_updated": len(bids_updated),
+            "bids_updated_sample": bids_updated[:20],
+        })
+    except Exception as e:
+        logger.exception("Retune existing bids failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
 
 
 @app.post("/api/run-daily-optimization")
@@ -651,155 +917,27 @@ def run_daily_optimization(
     verify_internal_token(authorization)
 
     try:
-        apply_negatives = bool(payload.get("apply_negatives_live", False))
-        apply_winners = bool(payload.get("apply_winners_live", False))
+        apply_negatives_live = bool(payload.get("apply_negatives_live", True))
+        apply_winners_live = bool(payload.get("apply_winners_live", True))
         retune_existing = bool(payload.get("retune_existing_keyword_bids", False))
         lookback_days = int(payload.get("lookback_days", 14))
         fallback_winner_bid = float(payload.get("winner_bid", DEFAULT_WINNER_BID))
         refresh_cache_after = bool(payload.get("refresh_cache_after", True))
 
-        client = AmazonAdsClient()
-        mode = get_bid_mode()
-        start_date = iso_date_days_ago(lookback_days)
-        end_date = today_iso_date()
+        client, classified, report_id, start_date, end_date = fetch_search_term_classification(lookback_days)
 
-        report_id = client.request_report({
-            "startDate": start_date,
-            "endDate": end_date,
-            "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "groupBy": ["searchTerm"],
-                "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
-                "reportTypeId": "spSearchTerm",
-                "timeUnit": "SUMMARY",
-                "format": "GZIP_JSON",
-            }
-        })
-        report_url = client.wait_for_report(report_id)
-        rows = parse_report_json_bytes(client.download_binary(report_url))
-        classified = classify_terms(rows)
+        negatives_applied = []
+        winners_applied = []
+        bids_updated = []
 
-        negatives_applied: List[Dict[str, Any]] = []
-        winners_applied: List[Dict[str, Any]] = []
-        bids_updated: List[Dict[str, Any]] = []
+        if apply_negatives_live:
+            negatives_applied = apply_negatives_step(client, classified)
 
-        if apply_negatives and classified["negatives"]:
-            by_campaign: Dict[int, List[str]] = {}
-            for item in classified["negatives"]:
-                cid = item.get("campaign_id")
-                if cid:
-                    by_campaign.setdefault(cid, []).append(item["term"])
-
-            for cid, terms in by_campaign.items():
-                neg_terms = unique_in_order(terms)
-                neg_rows = negative_keyword_rows(neg_terms, cid)
-                if neg_rows:
-                    client.create_negative_keywords(neg_rows)
-                    negatives_applied.append({
-                        "campaign_id": cid,
-                        "count": len(neg_rows),
-                        "terms_sample": neg_terms[:10],
-                    })
-
-        if apply_winners and classified["winners"]:
-            by_adgroup: Dict[int, Dict[str, Any]] = {}
-            for item in classified["winners"]:
-                agid = item.get("ad_group_id")
-                cid = item.get("campaign_id")
-                if agid and cid:
-                    by_adgroup.setdefault(agid, {"campaign_id": cid, "terms": []})
-                    by_adgroup[agid]["terms"].append(item["term"])
-
-            for agid, data in by_adgroup.items():
-                terms = unique_in_order(data["terms"])
-                bid_map: Dict[str, float] = {}
-                bid_details: List[Dict[str, Any]] = []
-
-                for term in terms:
-                    rec = client.get_bid_recommendation(
-                        str(data["campaign_id"]),
-                        str(agid),
-                        term,
-                        "PHRASE",
-                    )
-                    low, high, applied = choose_bid(rec, fallback_winner_bid)
-                    bid_map[term] = applied
-                    bid_details.append({
-                        "term": term,
-                        "suggested_low": low,
-                        "suggested_high": high,
-                        "applied_bid": applied,
-                        "bid_mode": mode,
-                    })
-
-                rows_to_create = keyword_create_rows(
-                    terms,
-                    int(data["campaign_id"]),
-                    int(agid),
-                    bid_map,
-                )
-                if rows_to_create:
-                    client.create_keywords(rows_to_create)
-                    winners_applied.append({
-                        "campaign_id": data["campaign_id"],
-                        "ad_group_id": agid,
-                        "count": len(terms),
-                        "terms_sample": terms[:10],
-                        "bid_details": bid_details[:10],
-                    })
+        if apply_winners_live:
+            winners_applied = apply_winners_step(client, classified, fallback_winner_bid)
 
         if retune_existing:
-            campaigns = client.list_campaigns()
-            for c in campaigns[:50]:
-                cid = str(c.get("campaignId") or "")
-                if not cid:
-                    continue
-
-                try:
-                    keywords = client.list_keywords(cid)
-                except Exception:
-                    continue
-
-                update_rows: List[Dict[str, Any]] = []
-                for kw in keywords[:100]:
-                    keyword_id = kw.get("keywordId")
-                    ad_group_id = kw.get("adGroupId")
-                    keyword_text = kw.get("keywordText")
-                    match_type = kw.get("matchType", "PHRASE")
-                    current_bid = float(kw.get("bid") or DEFAULT_FALLBACK_BID)
-
-                    if not keyword_id or not ad_group_id or not keyword_text:
-                        continue
-
-                    rec = client.get_bid_recommendation(
-                        cid,
-                        str(ad_group_id),
-                        str(keyword_text),
-                        str(match_type),
-                    )
-                    low, high, applied = choose_bid(rec, current_bid)
-
-                    update_rows.append({
-                        "keywordId": str(keyword_id),
-                        "campaignId": str(cid),
-                        "adGroupId": str(ad_group_id),
-                        "bid": applied,
-                        "state": kw.get("state", "ENABLED"),
-                    })
-
-                    bids_updated.append({
-                        "campaign_id": cid,
-                        "keyword_id": str(keyword_id),
-                        "keyword_text": str(keyword_text),
-                        "match_type": str(match_type),
-                        "suggested_low": low,
-                        "suggested_high": high,
-                        "applied_bid": applied,
-                        "bid_mode": mode,
-                    })
-
-                if update_rows:
-                    client.update_keywords(update_rows)
+            bids_updated = retune_existing_bids_step(client)
 
         cache_result = None
         if refresh_cache_after:
@@ -808,35 +946,34 @@ def run_daily_optimization(
             except Exception as e:
                 logger.warning("Cache refresh after optimization failed: %s", e)
 
-        run_entry = {
+        entry = {
             "timestamp": utc_now_iso(),
+            "action": "run_daily_optimization",
             "lookback_days": lookback_days,
-            "rows_analyzed": len(rows),
             "winners_found": len(classified["winners"]),
             "negatives_found": len(classified["negatives"]),
             "winners_applied_count": len(winners_applied),
             "negatives_applied_count": len(negatives_applied),
             "existing_keyword_bids_updated": len(bids_updated),
-            "bid_mode": mode,
+            "bid_mode": get_bid_mode(),
         }
-        save_optimizer_history(run_entry)
+        save_optimizer_history(entry)
 
         return JSONResponse({
             "success": True,
+            "action": "run_daily_optimization",
             "report_id": report_id,
             "date_range": {"start": start_date, "end": end_date},
-            "rows_analyzed": len(rows),
             "winners_found": len(classified["winners"]),
             "negatives_found": len(classified["negatives"]),
             "winners_applied_count": len(winners_applied),
             "negatives_applied_count": len(negatives_applied),
             "existing_keyword_bids_updated": len(bids_updated),
-            "bid_mode": mode,
+            "bid_mode": get_bid_mode(),
             "winners_applied": winners_applied,
             "negatives_applied": negatives_applied,
             "bids_updated_sample": bids_updated[:20],
             "cache_refreshed": cache_result is not None,
-            "cache_refreshed_at": cache_result.get("refreshed_at") if cache_result else None,
         })
     except Exception as e:
         logger.exception("Daily optimization failed")
