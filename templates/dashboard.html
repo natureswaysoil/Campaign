@@ -30,9 +30,24 @@
                     Refresh Metrics Cache
                 </button>
 
-                <button onclick="runOptimizer()"
-                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded-2xl font-semibold shadow-lg flex items-center gap-2">
-                    ▶️ Run Daily Optimizer Now
+                <button onclick="applyNegativesNow()"
+                    class="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
+                    Apply Negatives
+                </button>
+
+                <button onclick="applyWinnersNow()"
+                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
+                    Add Winners
+                </button>
+
+                <button onclick="retuneBidsNow()"
+                    class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
+                    Retune Existing Bids
+                </button>
+
+                <button onclick="runFullOptimizationNow()"
+                    class="bg-slate-800 hover:bg-slate-900 text-white px-8 py-3 rounded-2xl font-semibold shadow-lg flex items-center gap-2">
+                    ▶️ Run Full Optimization
                 </button>
             </div>
         </div>
@@ -42,8 +57,8 @@
         <div id="statusBox" class="bg-white rounded-3xl shadow p-6 mb-8">
             <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
                 <div>
-                    <h2 class="text-xl font-semibold text-gray-900">Daily Optimizer Status</h2>
-                    <p class="text-gray-600 mt-1">Dashboard shows cached Amazon metrics plus live control actions.</p>
+                    <h2 class="text-xl font-semibold text-gray-900">Optimizer Status</h2>
+                    <p class="text-gray-600 mt-1">Run jobs one step at a time or use the full optimization button.</p>
                 </div>
                 <div class="text-sm text-gray-500">
                     Page loaded: <span id="time">—</span><br>
@@ -52,7 +67,7 @@
             </div>
 
             <div id="optimizerStatus" class="mt-4 text-sm text-gray-700">
-                Loading optimizer status...
+                Loading status...
             </div>
         </div>
 
@@ -147,14 +162,15 @@
             const peakHours = data.peak_hours_label || 'Backend-controlled';
             const note = data.note || '';
             const refreshed = data.refreshed_at || '—';
+
             document.getElementById('cacheTime').textContent = refreshed;
 
             statusEl.innerHTML =
                 '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
                     '<div class="rounded-2xl border border-gray-200 p-4">' +
-                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Optimizer</div>' +
-                        '<div class="font-semibold text-gray-900">Cached Dashboard Mode</div>' +
-                        '<div class="text-sm text-gray-600 mt-1">Metrics are read from cache. Live actions still run instantly.</div>' +
+                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Mode</div>' +
+                        '<div class="font-semibold text-gray-900">One-Step Dashboard Control</div>' +
+                        '<div class="text-sm text-gray-600 mt-1">Run negatives, winners, bids, or full optimization individually.</div>' +
                     '</div>' +
                     '<div class="rounded-2xl border border-gray-200 p-4">' +
                         '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Bid Mode</div>' +
@@ -265,67 +281,85 @@
             }
         }
 
-        async function runOptimizer() {
+        function getToken() {
             const token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
+            return token || null;
+        }
+
+        async function postAction(url, body, successMessage) {
+            const token = getToken();
             if (!token) return;
 
             try {
-                const res = await fetch('/api/run-daily-optimization', {
+                const res = await fetch(url, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': 'Bearer ' + token
                     },
-                    body: JSON.stringify({
-                        apply_negatives_live: true,
-                        apply_winners_live: true,
-                        retune_existing_keyword_bids: false,
-                        lookback_days: 14,
-                        winner_bid: 0.90,
-                        refresh_cache_after: true
-                    })
+                    body: JSON.stringify(body || {})
                 });
 
                 const data = await res.json();
                 if (!res.ok || data.error) {
-                    alert('❌ Optimizer error:\n\n' + (data.message || JSON.stringify(data)));
+                    alert('❌ Error:\n\n' + (data.message || JSON.stringify(data)));
                     return;
                 }
 
-                alert('✅ Optimizer completed successfully!');
+                alert(successMessage);
                 await loadDashboardData();
 
             } catch (e) {
                 console.error(e);
-                alert('❌ Failed to run optimizer. Check token or backend.');
+                alert('❌ Request failed.');
             }
         }
 
         async function refreshCacheNow() {
-            const token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
-            if (!token) return;
+            await postAction(
+                '/api/refresh-dashboard-cache',
+                {},
+                '✅ Metrics cache refreshed!'
+            );
+        }
 
-            try {
-                const res = await fetch('/api/refresh-dashboard-cache', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + token
-                    }
-                });
+        async function applyNegativesNow() {
+            await postAction(
+                '/api/apply-negatives',
+                { lookback_days: 14, refresh_cache_after: true },
+                '✅ Negatives applied!'
+            );
+        }
 
-                const data = await res.json();
-                if (!res.ok || data.error) {
-                    alert('❌ Cache refresh error:\n\n' + (data.message || JSON.stringify(data)));
-                    return;
-                }
+        async function applyWinnersNow() {
+            await postAction(
+                '/api/apply-winners',
+                { lookback_days: 14, winner_bid: 0.90, refresh_cache_after: true },
+                '✅ Winners added!'
+            );
+        }
 
-                alert('✅ Metrics cache refreshed!');
-                await loadDashboardData();
+        async function retuneBidsNow() {
+            await postAction(
+                '/api/retune-existing-bids',
+                {},
+                '✅ Existing bids retuned!'
+            );
+        }
 
-            } catch (e) {
-                console.error(e);
-                alert('❌ Failed to refresh metrics cache.');
-            }
+        async function runFullOptimizationNow() {
+            await postAction(
+                '/api/run-daily-optimization',
+                {
+                    apply_negatives_live: true,
+                    apply_winners_live: true,
+                    retune_existing_keyword_bids: false,
+                    lookback_days: 14,
+                    winner_bid: 0.90,
+                    refresh_cache_after: true
+                },
+                '✅ Full optimization completed!'
+            );
         }
 
         window.onload = loadDashboardData;
