@@ -1,38 +1,26 @@
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse
-import csv
+import os
+import requests
 import datetime
-import gzip
-import hmac
-import html
-import io
 import json
 import logging
-import os
-import re
-import time
-import unicodedata
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
-from collections import defaultdict
 
-import requests
-from google.cloud import secretmanager
+# -----------------------
+# BASIC SETUP
+# -----------------------
+
+app = FastAPI(title="Amazon PPC Optimizer")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Amazon Ads Campaign Optimizer")
+BASE_DIR = Path(__file__).parent
 
-BASE_DIR = Path(__file__).parent.absolute()
-
-PRODUCTS_CSV_URL = os.getenv(
-    "PRODUCTS_CSV_URL",
-    "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv",
-)
-
-USE_SECRET_MANAGER = True
-GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+# -----------------------
+# AMAZON CONFIG
+# -----------------------
 
 TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 
@@ -42,292 +30,56 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-ENDPOINTS = {
-    "campaigns": "/sp/campaigns",
-    "ad_groups": "/sp/adGroups",
-    "product_ads": "/sp/productAds",
-    "keywords": "/sp/keywords",
-    "negative_keywords": "/sp/campaignNegativeKeywords",
-    "reports": "/reporting/reports",
-    "campaigns_list": "/sp/campaigns/list",
-    "keywords_list": "/sp/keywords/list",
-    "keywords_update": "/sp/keywords",
-    "keyword_bid_recommendations": "/sp/keywords/bidRecommendations",
-}
+# -----------------------
+# ENV / SECRETS
+# -----------------------
 
-ENDPOINT_CONTENT_TYPES = {
-    "/sp/campaigns": "application/vnd.spcampaign.v3+json",
-    "/sp/adGroups": "application/vnd.spadgroup.v3+json",
-    "/sp/productAds": "application/vnd.spproductad.v3+json",
-    "/sp/keywords": "application/vnd.spkeyword.v3+json",
-    "/sp/campaignNegativeKeywords": "application/vnd.spcampaignnegativekeyword.v3+json",
-}
-
-ENDPOINT_BATCH_KEYS = {
-    "/sp/campaigns": "campaigns",
-    "/sp/adGroups": "adGroups",
-    "/sp/productAds": "productAds",
-    "/sp/keywords": "keywords",
-    "/sp/campaignNegativeKeywords": "campaignNegativeKeywords",
-}
-
-BATCH_ITEM_KEYS = {
-    "campaigns": "campaign",
-    "adGroups": "adGroup",
-    "productAds": "productAd",
-    "keywords": "keyword",
-    "campaignNegativeKeywords": "campaignNegativeKeyword",
-}
-
-STOPWORDS = {
-    "the", "and", "for", "with", "from", "your", "you", "our", "this", "that",
-    "soil", "organic", "liquid", "natural", "plants", "plant", "garden", "lawn",
-    "safe", "kids", "pets", "beneficial", "nature", "way"
-}
-
-OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
-
-PEAK_HOURS_START = int(os.getenv("PEAK_HOURS_START", "18"))
-PEAK_HOURS_END = int(os.getenv("PEAK_HOURS_END", "23"))
-OFF_PEAK_START = int(os.getenv("OFF_PEAK_START", "0"))
-OFF_PEAK_END = int(os.getenv("OFF_PEAK_END", "6"))
-DEFAULT_NORMAL_BID_MULTIPLIER = float(os.getenv("DEFAULT_NORMAL_BID_MULTIPLIER", "1.0"))
-
-
-def get_secret(project_id: str, secret_id: str) -> str:
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
-    response = client.access_secret_version(request={"name": name})
-    return response.payload.data.decode("utf-8").strip()
-
-
-def load_env_or_secret(name: str, default: Optional[str] = None) -> str:
-    value = os.getenv(name)
-    if value:
-        return value.strip()
-
-    if USE_SECRET_MANAGER and GCP_PROJECT_ID:
-        try:
-            return get_secret(GCP_PROJECT_ID, name)
-        except Exception as e:
-            logger.warning(f"Secret Manager failed for {name}: {e}")
-
+def get_env(name, default=None):
+    val = os.getenv(name)
+    if val:
+        return val.strip()
     if default is not None:
         return default
+    raise RuntimeError(f"Missing env var: {name}")
 
-    raise RuntimeError(f"Missing required config: {name}")
+# -----------------------
+# TIME LOGIC (PEAK / OFF PEAK)
+# -----------------------
 
+PEAK_START = 18
+PEAK_END = 23
 
-def optional_env_or_secret(name: str, default: Optional[str] = None) -> Optional[str]:
-    try:
-        return load_env_or_secret(name, default)
-    except Exception:
-        return default
+OFF_START = 0
+OFF_END = 6
 
+def current_hour():
+    return datetime.datetime.now().hour
 
-def today_iso_date() -> str:
-    return datetime.date.today().isoformat()
-
-
-def iso_date_days_ago(days: int) -> str:
-    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
-
-
-def now_et_hour() -> int:
-    try:
-        eastern = datetime.timezone(datetime.timedelta(hours=-4))
-        return datetime.datetime.now(eastern).hour
-    except Exception:
-        return datetime.datetime.now().hour
-
-
-def current_bid_mode() -> str:
-    hour = now_et_hour()
-    if PEAK_HOURS_START <= hour <= PEAK_HOURS_END:
+def get_bid_mode():
+    h = current_hour()
+    if PEAK_START <= h <= PEAK_END:
         return "PEAK"
-    if OFF_PEAK_START <= hour <= OFF_PEAK_END:
+    if OFF_START <= h <= OFF_END:
         return "OFF_PEAK"
     return "NORMAL"
 
-
-def normalize(text: str) -> str:
-    text = (text or "").lower()
-    text = re.sub(r"[^a-z0-9\s-]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-_UNICODE_TO_ASCII = {
-    "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-    "\u2013": "-", "\u2014": "-", "\u2026": "...",
-    "\u00ae": "", "\u2122": "",
-}
-
-
-def sanitize_campaign_name(name: Optional[str]) -> str:
-    name = html.unescape(name or "")
-    for char, repl in _UNICODE_TO_ASCII.items():
-        name = name.replace(char, repl)
-    name = unicodedata.normalize("NFKD", name)
-    name = name.encode("ascii", errors="ignore").decode("ascii")
-    return re.sub(r"\s+", " ", name).strip()
-
-
-def unique_in_order(items: List[str]) -> List[str]:
-    seen = set()
-    return [item for item in items if item and item not in seen and not seen.add(item)]
-
-
-def truthy(v: str) -> bool:
-    return str(v).strip().lower() in {"true", "yes", "1", "y", "active"}
-
-
-def budget_from_price(price_value: str) -> float:
-    try:
-        price = float(str(price_value).replace("$", "").replace(",", "").strip())
-        if price < 15:
-            return 12.0
-        if price < 25:
-            return 18.0
-        if price < 40:
-            return 25.0
-        return 35.0
-    except Exception:
-        return 25.0
-
-
-def bid_from_price(price_value: str) -> float:
-    try:
-        price = float(str(price_value).replace("$", "").replace(",", "").strip())
-        if price < 15:
-            return 0.55
-        if price < 25:
-            return 0.75
-        if price < 40:
-            return 0.95
-        return 1.10
-    except Exception:
-        return 0.85
-
-
-def parse_keyword_cell(value: str) -> List[str]:
-    if not value:
-        return []
-    parts = re.split(r"[\n,;|]+", value)
-    return [normalize(p) for p in parts if normalize(p)]
-
-
-def title_ngrams(title: str) -> List[str]:
-    clean = normalize(title)
-    words = [w for w in clean.split() if w not in STOPWORDS and len(w) > 2]
-    phrases = [clean] if clean else []
-    for n in (2, 3):
-        for i in range(len(words) - n + 1):
-            phrases.append(" ".join(words[i:i + n]))
-    return phrases
-
-
-def keyword_hints_from_category(category: str) -> List[str]:
-    c = normalize(category)
-    hints = []
-    if "dog" in c or "pet" in c:
-        hints += ["dog urine neutralizer", "dog urine lawn repair", "pet urine grass treatment"]
-    if "pasture" in c or "hay" in c or "lawn" in c:
-        hints += ["pasture fertilizer", "hay fertilizer", "liquid lawn fertilizer", "grass fertilizer"]
-    if "bone" in c or "bloom" in c:
-        hints += ["liquid bone meal", "phosphorus fertilizer", "bloom fertilizer"]
-    return hints
-
-
-def generate_keywords(product: Dict[str, Any]) -> List[str]:
-    merged = []
-    merged.extend(parse_keyword_cell(product.get("keywords", "")))
-    merged.extend(parse_keyword_cell(product.get("research_keywords", "")))
-    merged.extend(title_ngrams(product.get("title", "")))
-    merged.extend(keyword_hints_from_category(product.get("category", "")))
-
-    clean_keywords = []
-    seen = set()
-    for kw in merged:
-        kw = normalize(kw)
-        if not kw or len(kw) < 3 or len(kw) > 40 or kw in seen:
-            continue
-        seen.add(kw)
-        clean_keywords.append(kw)
-    return clean_keywords[:30]
-
-
-def load_optimizer_history() -> List[Dict]:
-    if OPTIMIZER_LOG_FILE.exists():
-        try:
-            with open(OPTIMIZER_LOG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
-
-def save_optimizer_history(entry: Dict):
-    history = load_optimizer_history()
-    history.append(entry)
-    if len(history) > 30:
-        history = history[-30:]
-    try:
-        with open(OPTIMIZER_LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2, default=str)
-    except Exception as e:
-        logger.warning(f"Failed to save optimizer history: {e}")
-
-
-def load_products() -> List[Dict[str, str]]:
-    r = requests.get(PRODUCTS_CSV_URL, timeout=30)
-    r.raise_for_status()
-    reader = csv.DictReader(io.StringIO(r.text))
-    return [{k.strip(): (v or "").strip() for k, v in row.items()} for row in reader]
-
-
-def normalized_product(product: Dict[str, str]) -> Dict[str, Any]:
-    return {
-        "product_id": product.get("Product_ID", ""),
-        "sku": product.get("SKU", ""),
-        "asin": product.get("ASIN", ""),
-        "title": product.get("Title", ""),
-        "price": product.get("Selling_Price", ""),
-        "active": truthy(product.get("Active", "TRUE")),
-        "category": product.get("Category", ""),
-        "keywords": product.get("Keywords", ""),
-        "research_keywords": product.get("Research_Keywords", ""),
-        "suggested_budget": budget_from_price(product.get("Selling_Price", "")),
-        "suggested_bid": bid_from_price(product.get("Selling_Price", "")),
-        "raw": product,
-    }
-
-
-def find_product(key: str) -> Dict[str, Any]:
-    key = key.lower().strip()
-    for row in load_products():
-        p = normalized_product(row)
-        if p["product_id"].lower() == key or p["sku"].lower() == key:
-            return p
-    raise HTTPException(status_code=404, detail="Product not found")
-
+# -----------------------
+# AMAZON CLIENT
+# -----------------------
 
 class AmazonAdsClient:
     def __init__(self):
-        self.client_id = load_env_or_secret("AMAZON_ADS_CLIENT_ID")
-        self.client_secret = load_env_or_secret("AMAZON_ADS_CLIENT_SECRET")
-        self.refresh_token = load_env_or_secret("AMAZON_ADS_REFRESH_TOKEN")
-        self.profile_id = load_env_or_secret("AMAZON_ADS_PROFILE_ID")
-        self.region = load_env_or_secret("AMAZON_ADS_REGION", "na").lower()
-
-        if self.region not in BASE_URLS:
-            raise RuntimeError("AMAZON_ADS_REGION must be 'na', 'eu', or 'fe'")
+        self.client_id = get_env("AMAZON_ADS_CLIENT_ID")
+        self.client_secret = get_env("AMAZON_ADS_CLIENT_SECRET")
+        self.refresh_token = get_env("AMAZON_ADS_REFRESH_TOKEN")
+        self.profile_id = get_env("AMAZON_ADS_PROFILE_ID")
+        self.region = get_env("AMAZON_ADS_REGION", "na")
 
         self.base_url = BASE_URLS[self.region]
-        self.access_token = self._get_token()
-        self.session = requests.Session()
+        self.token = self.get_token()
 
-    def _get_token(self) -> str:
-        resp = requests.post(
+    def get_token(self):
+        r = requests.post(
             TOKEN_URL,
             data={
                 "grant_type": "refresh_token",
@@ -335,896 +87,170 @@ class AmazonAdsClient:
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             },
-            timeout=30,
         )
-        resp.raise_for_status()
-        token = resp.json().get("access_token")
-        if not token:
-            raise RuntimeError("Failed to obtain access token")
-        return token
+        r.raise_for_status()
+        return r.json()["access_token"]
 
-    def headers(self, content_type: str = "application/json") -> Dict[str, str]:
+    def headers(self):
         return {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {self.token}",
             "Amazon-Advertising-API-ClientId": self.client_id,
             "Amazon-Advertising-API-Scope": self.profile_id,
-            "Content-Type": content_type,
-            "Accept": content_type,
+            "Content-Type": "application/json",
         }
 
-    def _content_type_for(self, endpoint: str) -> str:
-        for path, ct in ENDPOINT_CONTENT_TYPES.items():
-            if endpoint.startswith(path):
-                return ct
-        return "application/json"
-
-    def _batch_key_for(self, endpoint: str) -> Optional[str]:
-        return ENDPOINT_BATCH_KEYS.get(endpoint)
-
-    def _wrap_batch(self, endpoint: str, body: Any) -> Any:
-        batch_key = self._batch_key_for(endpoint)
-        if batch_key and isinstance(body, list):
-            return {batch_key: body}
-        return body
-
-    def post(self, endpoint: str, body: Any, content_type_override: Optional[str] = None):
+    def post(self, endpoint, body):
         url = f"{self.base_url}{endpoint}"
-        wrapped = self._wrap_batch(endpoint, body)
-        content_type = content_type_override or self._content_type_for(endpoint)
+        r = requests.post(url, headers=self.headers(), json=body)
+        if not r.ok:
+            raise RuntimeError(r.text)
+        return r.json()
 
-        resp = self.session.post(url, headers=self.headers(content_type), json=wrapped, timeout=60)
-        if not resp.ok:
-            logger.error(f"API Error {resp.status_code}: {resp.text[:400]}")
-            raise RuntimeError(f"Amazon Ads API error {resp.status_code}: {resp.text[:500]}")
-        return resp.json() if resp.text.strip() else None
-
-    def get(self, endpoint: str):
+    def get(self, endpoint):
         url = f"{self.base_url}{endpoint}"
-        content_type = self._content_type_for(endpoint)
-        resp = self.session.get(url, headers=self.headers(content_type), timeout=60)
-        if not resp.ok:
-            raise RuntimeError(f"GET failed {resp.status_code}: {resp.text[:300]}")
-        return resp.json() if resp.text.strip() else None
+        r = requests.get(url, headers=self.headers())
+        if not r.ok:
+            raise RuntimeError(r.text)
+        return r.json()
 
-    def download_binary(self, url: str) -> bytes:
-        resp = self.session.get(url, timeout=120)
-        resp.raise_for_status()
-        return resp.content
+    # -----------------------
+    # CAMPAIGNS
+    # -----------------------
 
-    def list_enabled_campaigns(self, max_results: int = 100) -> List[Dict[str, Any]]:
-        response = self.session.post(
-            f"{self.base_url}{ENDPOINTS['campaigns_list']}",
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Amazon-Advertising-API-ClientId": self.client_id,
-                "Amazon-Advertising-API-Scope": self.profile_id,
-                "Content-Type": "application/vnd.spcampaign.v3+json",
-                "Accept": "application/vnd.spcampaign.v3+json",
-            },
-            json={"maxResults": max_results, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("campaigns", []) if isinstance(data, dict) else data
+    def list_campaigns(self):
+        return self.post("/sp/campaigns/list", {
+            "maxResults": 100,
+            "filters": {"stateFilter": {"include": ["ENABLED"]}}
+        }).get("campaigns", [])
 
-    def list_keywords_for_campaign(self, campaign_id: str, max_results: int = 1000) -> List[Dict[str, Any]]:
+    # -----------------------
+    # KEYWORDS
+    # -----------------------
+
+    def get_keywords(self, campaign_id):
+        return self.post("/sp/keywords/list", {
+            "maxResults": 50,
+            "filters": {
+                "campaignIdFilter": {"include": [str(campaign_id)]}
+            }
+        }).get("keywords", [])
+
+    # -----------------------
+    # BID RECOMMENDATIONS
+    # -----------------------
+
+    def get_bid_recommendation(self, campaign_id, ad_group_id, keyword):
         try:
-            response = self.session.post(
-                f"{self.base_url}{ENDPOINTS['keywords_list']}",
-                headers={
-                    "Authorization": f"Bearer {self.access_token}",
-                    "Amazon-Advertising-API-ClientId": self.client_id,
-                    "Amazon-Advertising-API-Scope": self.profile_id,
-                    "Content-Type": "application/vnd.spkeyword.v3+json",
-                    "Accept": "application/vnd.spkeyword.v3+json",
-                },
-                json={
-                    "maxResults": max_results,
-                    "filters": {
-                        "campaignIdFilter": {"include": [str(campaign_id)]},
-                        "stateFilter": {"include": ["ENABLED"]}
-                    }
-                },
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("keywords", []) if isinstance(data, dict) else data
-        except Exception as e:
-            logger.warning(f"Could not list keywords for campaign {campaign_id}: {e}")
-            return []
-
-    def get_keyword_bid_recommendations(
-        self,
-        campaign_id: str,
-        ad_group_id: str,
-        keyword_text: str,
-        match_type: str = "EXACT",
-    ) -> Dict[str, float]:
-        body = {
-            "recommendations": [
-                {
+            data = self.post("/sp/keywords/bidRecommendations", {
+                "recommendations": [{
                     "campaignId": str(campaign_id),
                     "adGroupId": str(ad_group_id),
-                    "keywordText": keyword_text,
-                    "matchType": match_type.upper(),
-                }
-            ]
-        }
+                    "keywordText": keyword,
+                    "matchType": "PHRASE"
+                }]
+            })
+            rec = data["recommendations"][0]
 
-        try:
-            data = self.post(
-                ENDPOINTS["keyword_bid_recommendations"],
-                body,
-                content_type_override="application/vnd.spkeyword.v3+json",
-            )
-        except Exception as e:
-            logger.warning(
-                f"Bid recommendations unavailable for {campaign_id}/{ad_group_id}/{keyword_text}: {e}"
-            )
+            return {
+                "low": rec.get("suggestedBidLow"),
+                "high": rec.get("suggestedBidHigh"),
+                "suggested": rec.get("suggestedBid")
+            }
+        except:
             return {}
 
-        items = []
-        if isinstance(data, dict):
-            for key in ("recommendations", "bidRecommendations", "keywordBidRecommendations"):
-                if isinstance(data.get(key), list):
-                    items = data[key]
-                    break
+# -----------------------
+# BID LOGIC
+# -----------------------
 
-        if not items:
-            return {}
+def choose_bid(rec, fallback):
+    mode = get_bid_mode()
 
-        first = items[0] if isinstance(items[0], dict) else {}
-        low = first.get("suggestedBidLow") or first.get("low") or first.get("rangeStart") or first.get("min")
-        high = first.get("suggestedBidHigh") or first.get("high") or first.get("rangeEnd") or first.get("max")
-        suggested = first.get("suggestedBid") or first.get("recommendedBid") or first.get("bid")
-
-        out: Dict[str, float] = {}
-        if low is not None:
-            out["low"] = float(low)
-        if high is not None:
-            out["high"] = float(high)
-        if suggested is not None:
-            out["suggested"] = float(suggested)
-        return out
-
-    def update_keyword_bids(self, keyword_updates: List[Dict[str, Any]]) -> Any:
-        if not keyword_updates:
-            return {"updated": 0}
-        return self.post(
-            ENDPOINTS["keywords_update"],
-            keyword_updates,
-            content_type_override="application/vnd.spkeyword.v3+json",
-        )
-
-
-def extract_first_id(payload: Any) -> int:
-    if isinstance(payload, dict):
-        for batch_key, item_key in BATCH_ITEM_KEYS.items():
-            if batch_key in payload:
-                inner = payload[batch_key]
-                if isinstance(inner, dict) and "success" in inner and inner["success"]:
-                    item = inner["success"][0].get(item_key, inner["success"][0])
-                    for k in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
-                        if k in item:
-                            return int(item[k])
-        for k in ("campaignId", "adGroupId", "keywordId", "adId", "id"):
-            if k in payload:
-                return int(payload[k])
-    raise RuntimeError("Could not extract ID from API response")
-
-
-def choose_recommended_bid(
-    recommendations: Dict[str, float],
-    fallback_bid: float,
-    mode: str,
-) -> Tuple[float, float, float]:
-    low = float(recommendations.get("low") or 0.0)
-    high = float(recommendations.get("high") or 0.0)
-    suggested = float(recommendations.get("suggested") or 0.0)
+    low = rec.get("low") or 0
+    high = rec.get("high") or 0
+    suggested = rec.get("suggested") or fallback
 
     if mode == "PEAK":
-        bid = high or suggested or fallback_bid
-    elif mode == "OFF_PEAK":
-        bid = low or suggested or fallback_bid
-    else:
-        if low and high:
-            bid = round(((low + high) / 2.0) * DEFAULT_NORMAL_BID_MULTIPLIER, 2)
-        else:
-            bid = suggested or fallback_bid
+        return high or suggested or fallback
 
-    return round(low, 2), round(high, 2), round(float(bid), 2)
+    if mode == "OFF_PEAK":
+        return low or suggested or fallback
 
+    return suggested or fallback
 
-def keyword_rows(keywords: List[str], campaign_id: int, ad_group_id: int, bid: float) -> List[Dict]:
-    rows = []
-    for kw in keywords:
-        rows.append({
-            "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
-            "keywordText": kw,
-            "matchType": "EXACT",
-            "state": "ENABLED",
-            "bid": round(bid * 1.15, 2),
-        })
-        rows.append({
-            "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
-            "keywordText": kw,
-            "matchType": "PHRASE",
-            "state": "ENABLED",
-            "bid": round(bid, 2),
-        })
-        rows.append({
-            "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
-            "keywordText": kw,
-            "matchType": "BROAD",
-            "state": "ENABLED",
-            "bid": round(bid * 0.85, 2),
-        })
-    return rows
-
-
-def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict]:
-    return [{
-        "campaignId": str(campaign_id),
-        "keywordText": term,
-        "matchType": "negativeExact",
-        "state": "ENABLED",
-    } for term in negatives]
-
-
-def parse_report_json_bytes(content: bytes) -> List[Dict]:
-    try:
-        decompressed = gzip.decompress(content)
-    except OSError:
-        decompressed = content
-    data = json.loads(decompressed.decode("utf-8"))
-    if isinstance(data, list):
-        return data
-    return data.get("rows", []) if isinstance(data, dict) else []
-
-
-def num(row: Dict, keys: List[str], default: float = 0.0) -> float:
-    for k in keys:
-        if k in row and row[k] not in (None, ""):
-            try:
-                return float(str(row[k]).replace("$", "").replace(",", "").strip())
-            except Exception:
-                continue
-    return default
-
-
-def text(row: Dict, keys: List[str], default: str = "") -> str:
-    for k in keys:
-        if k in row and row[k] not in (None, ""):
-            return str(row[k]).strip()
-    return default
-
-
-def classify_terms(rows: List[Dict]):
-    winners, negatives, hold = [], [], []
-    for row in rows:
-        term = text(row, ["Customer Search Term", "searchTerm", "Search Term"])
-        if not term:
-            continue
-        clicks = int(num(row, ["Clicks", "clicks"], 0))
-        cost = num(row, ["Spend", "Cost", "cost", "spend"], 0.0)
-        sales = num(row, ["7 Day Total Sales", "14 Day Total Sales", "sales7d", "sales"], 0.0)
-        orders = int(num(row, ["7 Day Total Orders (#)", "14 Day Total Orders (#)", "orders", "purchases7d"], 0))
-        acos = (cost / sales) if sales > 0 else None
-
-        result = {
-            "term": term,
-            "campaign_id": int(num(row, ["Campaign Id", "campaignId"], 0)),
-            "ad_group_id": int(num(row, ["Ad Group Id", "adGroupId"], 0)),
-            "clicks": clicks,
-            "orders": orders,
-            "cost": round(cost, 2),
-            "sales": round(sales, 2),
-            "acos": round(acos, 4) if acos is not None else None,
-        }
-
-        if orders >= 2 and clicks >= 8 and sales > 0 and (acos is None or acos <= 0.35):
-            winners.append({**result, "reason": "winner"})
-        elif clicks >= 20 and orders == 0:
-            negatives.append({**result, "reason": "negative"})
-        else:
-            hold.append({**result, "reason": "hold"})
-
-    return {"winners": winners, "negatives": negatives, "hold": hold}
-
-
-def verify_internal_token(authorization: Optional[str]):
-    token = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN")
-    if not token:
-        raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN not configured")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    supplied = authorization.replace("Bearer ", "").strip()
-    if not hmac.compare_digest(supplied, token):
-        raise HTTPException(status_code=403, detail="Invalid token")
-
-
-def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
-    client = AmazonAdsClient()
-    start_date = today_iso_date()
-    keywords = generate_keywords(product)
-    mode = current_bid_mode()
-
-    campaign_payload = [{
-        "name": f"{sanitize_campaign_name(product.get('title'))[:100]} | MANUAL | {start_date}",
-        "targetingType": "MANUAL",
-        "state": "ENABLED",
-        "budget": {"budget": round(product["suggested_budget"], 2), "budgetType": "DAILY"},
-        "startDate": start_date,
-    }]
-    campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
-    campaign_id = extract_first_id(campaign_resp)
-
-    ad_group_payload = [{
-        "name": "Main Ad Group",
-        "campaignId": str(campaign_id),
-        "state": "ENABLED",
-        "defaultBid": round(product["suggested_bid"], 2),
-    }]
-    ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
-    ad_group_id = extract_first_id(ad_group_resp)
-
-    product_ad_payload = [{
-        "campaignId": str(campaign_id),
-        "adGroupId": str(ad_group_id),
-        "asin": product["asin"],
-        "state": "ENABLED",
-    }]
-    client.post(ENDPOINTS["product_ads"], product_ad_payload)
-
-    bid_preview = []
-    if keywords:
-        kw_rows = []
-        for kw in keywords:
-            rec = client.get_keyword_bid_recommendations(
-                str(campaign_id),
-                str(ad_group_id),
-                kw,
-                "PHRASE",
-            )
-            low, high, applied = choose_recommended_bid(rec, product["suggested_bid"], mode)
-
-            kw_rows.extend([
-                {
-                    "campaignId": str(campaign_id),
-                    "adGroupId": str(ad_group_id),
-                    "keywordText": kw,
-                    "matchType": "EXACT",
-                    "state": "ENABLED",
-                    "bid": round(applied * 1.15, 2),
-                },
-                {
-                    "campaignId": str(campaign_id),
-                    "adGroupId": str(ad_group_id),
-                    "keywordText": kw,
-                    "matchType": "PHRASE",
-                    "state": "ENABLED",
-                    "bid": round(applied, 2),
-                },
-                {
-                    "campaignId": str(campaign_id),
-                    "adGroupId": str(ad_group_id),
-                    "keywordText": kw,
-                    "matchType": "BROAD",
-                    "state": "ENABLED",
-                    "bid": round(applied * 0.85, 2),
-                },
-            ])
-
-            bid_preview.append({
-                "keyword": kw,
-                "suggested_low": low,
-                "suggested_high": high,
-                "applied_bid": applied,
-                "bid_mode": mode,
-            })
-
-        client.post(ENDPOINTS["keywords"], kw_rows)
-
-    return {
-        "message": "Campaign created successfully",
-        "product_id": product["product_id"],
-        "sku": product["sku"],
-        "asin": product["asin"],
-        "campaign_id": campaign_id,
-        "ad_group_id": ad_group_id,
-        "keywords_count": len(keywords),
-        "bid_mode": mode,
-        "keyword_bid_preview": bid_preview[:10],
-    }
-
+# -----------------------
+# DASHBOARD ROUTE (FIXED)
+# -----------------------
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     try:
-        dashboard_path = BASE_DIR / "templates" / "dashboard.html"
-        return HTMLResponse(dashboard_path.read_text(encoding="utf-8"))
+        path = BASE_DIR / "templates" / "dashboard.html"
+        return HTMLResponse(path.read_text())
     except Exception as e:
-        logger.error(f"Dashboard loading failed: {type(e).__name__} - {e}")
         return HTMLResponse(f"""
-            <h2>Amazon PPC Optimizer Dashboard</h2>
-            <p>Service is running.</p>
-            <p style="color: red; margin: 20px 0;">
-                <strong>Dashboard Load Error:</strong> {type(e).__name__}<br>
-                {str(e)}
-            </p>
-            <p>Base directory: {BASE_DIR}</p>
-            <p>Dashboard path: {BASE_DIR / "templates" / "dashboard.html"}</p>
+        <h2>Dashboard Error</h2>
+        <p>{str(e)}</p>
+        <p>Path: {BASE_DIR}</p>
         """)
 
+# -----------------------
+# API: CAMPAIGN PERFORMANCE
+# -----------------------
+
+@app.get("/api/campaign-performance")
+def campaign_performance():
+    client = AmazonAdsClient()
+    campaigns = client.list_campaigns()
+
+    results = []
+
+    for c in campaigns:
+        cid = c.get("campaignId")
+
+        keywords = client.get_keywords(cid)
+
+        bid_low = None
+        bid_high = None
+        applied = None
+
+        if keywords:
+            kw = keywords[0]
+
+            rec = client.get_bid_recommendation(
+                cid,
+                kw.get("adGroupId"),
+                kw.get("keywordText")
+            )
+
+            applied = choose_bid(rec, kw.get("bid") or 0.75)
+            bid_low = rec.get("low")
+            bid_high = rec.get("high")
+
+        results.append({
+            **c,
+            "spend": 0,
+            "sales": 0,
+            "clicks": 0,
+            "orders": 0,
+            "acos": None,
+            "amazonSuggestedBidLow": bid_low,
+            "amazonSuggestedBidHigh": bid_high,
+            "currentAppliedBid": applied,
+            "currentBidMode": get_bid_mode()
+        })
+
+    return {
+        "campaigns": results,
+        "count": len(results),
+        "bid_mode": get_bid_mode(),
+        "peak_hours_label": "6pm–11pm"
+    }
+
+# -----------------------
+# HEALTH
+# -----------------------
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "time": datetime.datetime.utcnow().isoformat()}
-
-
-@app.get("/api/products")
-def api_products():
-    products = [normalized_product(r) for r in load_products()]
-    return {"count": len(products), "products": products}
-
-
-@app.get("/api/product/{key}")
-def api_product(key: str):
-    return find_product(key)
-
-
-@app.post("/api/create-campaign-from-product")
-def api_create_campaign(payload: Dict[str, Any]):
-    key = payload.get("product_id") or payload.get("sku")
-    if not key:
-        raise HTTPException(400, "product_id or sku is required")
-    product = find_product(key)
-    return create_live_campaign_for_product(product)
-
-
-@app.post("/api/bulk-create-campaigns")
-def api_bulk_create(payload: Dict[str, Any]):
-    dry_run = payload.get("dry_run", True)
-    limit = payload.get("limit", 10)
-    only_active = payload.get("only_active", True)
-
-    products = [normalized_product(r) for r in load_products()]
-    if only_active:
-        products = [p for p in products if p["active"]]
-    products = products[:limit]
-
-    results = []
-    for p in products:
-        if dry_run:
-            results.append({
-                "sku": p["sku"],
-                "title": p["title"],
-                "suggested_budget": p["suggested_budget"],
-                "suggested_bid": p["suggested_bid"],
-                "keywords_count": len(generate_keywords(p)),
-                "status": "dry_run"
-            })
-        else:
-            try:
-                results.append(create_live_campaign_for_product(p))
-            except Exception as e:
-                results.append({"sku": p["sku"], "error": str(e)})
-
-    return {"processed": len(products), "dry_run": dry_run, "results": results}
-
-
-@app.post("/api/run-daily-optimization")
-def api_run_optimizer(
-    payload: Dict[str, Any],
-    authorization: Optional[str] = Header(default=None)
-):
-    verify_internal_token(authorization)
-
-    apply_negatives = payload.get("apply_negatives_live", False)
-    apply_winners = payload.get("apply_winners_live", False)
-    winner_bid = float(payload.get("winner_bid", 0.90))
-    lookback_days = int(payload.get("lookback_days", 14))
-    mode = current_bid_mode()
-
-    client = AmazonAdsClient()
-    start_date = iso_date_days_ago(lookback_days)
-    end_date = today_iso_date()
-
-    report_resp = client.post(ENDPOINTS["reports"], {
-        "startDate": start_date,
-        "endDate": end_date,
-        "configuration": {
-            "adProduct": "SPONSORED_PRODUCTS",
-            "groupBy": ["searchTerm"],
-            "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
-            "reportTypeId": "spSearchTerm",
-            "timeUnit": "SUMMARY",
-            "format": "GZIP_JSON",
-        }
-    })
-
-    report_id = (report_resp or {}).get("reportId")
-    if not report_id:
-        raise HTTPException(status_code=500, detail="Failed to request report ID")
-
-    for _ in range(30):
-        status_resp = client.get(f"{ENDPOINTS['reports']}/{report_id}")
-        if status_resp.get("status") == "SUCCESS":
-            break
-        if status_resp.get("status") in ("FAILURE", "CANCELLED"):
-            raise HTTPException(status_code=500, detail="Report generation failed")
-        time.sleep(10)
-    else:
-        raise HTTPException(status_code=504, detail="Report generation timed out")
-
-    content = client.download_binary(status_resp.get("location") or status_resp.get("url"))
-    rows = parse_report_json_bytes(content)
-    classified = classify_terms(rows)
-
-    winners_applied = []
-    negatives_applied = []
-    bids_updated = []
-
-    if apply_negatives and classified["negatives"]:
-        by_campaign: Dict[int, List[str]] = {}
-        for item in classified["negatives"]:
-            cid = item.get("campaign_id")
-            if cid:
-                by_campaign.setdefault(cid, []).append(item["term"])
-        for cid, terms in by_campaign.items():
-            neg_rows = negative_keyword_rows(unique_in_order(terms), cid)
-            client.post(ENDPOINTS["negative_keywords"], neg_rows)
-            negatives_applied.append({"campaign_id": cid, "count": len(terms), "terms_sample": terms[:8]})
-
-    if apply_winners and classified["winners"]:
-        by_adgroup: Dict[int, Dict] = {}
-        for item in classified["winners"]:
-            agid = item.get("ad_group_id")
-            cid = item.get("campaign_id")
-            if agid and cid:
-                if agid not in by_adgroup:
-                    by_adgroup[agid] = {"campaign_id": cid, "terms": []}
-                by_adgroup[agid]["terms"].append(item["term"])
-
-        for agid, data in by_adgroup.items():
-            kw_rows = []
-            detail_rows = []
-
-            for term in unique_in_order(data["terms"]):
-                rec = client.get_keyword_bid_recommendations(
-                    str(data["campaign_id"]),
-                    str(agid),
-                    term,
-                    "EXACT",
-                )
-                low, high, applied = choose_recommended_bid(rec, winner_bid, mode)
-
-                kw_rows.extend([
-                    {
-                        "campaignId": str(data["campaign_id"]),
-                        "adGroupId": str(agid),
-                        "keywordText": term,
-                        "matchType": "EXACT",
-                        "state": "ENABLED",
-                        "bid": round(applied * 1.15, 2),
-                    },
-                    {
-                        "campaignId": str(data["campaign_id"]),
-                        "adGroupId": str(agid),
-                        "keywordText": term,
-                        "matchType": "PHRASE",
-                        "state": "ENABLED",
-                        "bid": round(applied, 2),
-                    },
-                    {
-                        "campaignId": str(data["campaign_id"]),
-                        "adGroupId": str(agid),
-                        "keywordText": term,
-                        "matchType": "BROAD",
-                        "state": "ENABLED",
-                        "bid": round(applied * 0.85, 2),
-                    },
-                ])
-
-                detail_rows.append({
-                    "term": term,
-                    "suggested_low": low,
-                    "suggested_high": high,
-                    "applied_bid": applied,
-                    "bid_mode": mode,
-                })
-
-            client.post(ENDPOINTS["keywords"], kw_rows)
-            winners_applied.append({
-                "ad_group_id": agid,
-                "campaign_id": data["campaign_id"],
-                "count": len(data["terms"]),
-                "terms_sample": data["terms"][:8],
-                "bid_mode": mode,
-                "bid_details": detail_rows[:10],
-            })
-
-    if payload.get("retune_existing_keyword_bids", False):
-        try:
-            enabled_campaigns = client.list_enabled_campaigns(max_results=100)
-            for c in enabled_campaigns[:50]:
-                campaign_id = str(c.get("campaignId") or "")
-                if not campaign_id:
-                    continue
-                campaign_keywords = client.list_keywords_for_campaign(campaign_id, max_results=200)
-                updates = []
-
-                for kw in campaign_keywords[:100]:
-                    keyword_id = kw.get("keywordId")
-                    ad_group_id = kw.get("adGroupId")
-                    keyword_text = kw.get("keywordText")
-                    match_type = kw.get("matchType", "PHRASE")
-                    current_bid = float(kw.get("bid") or winner_bid)
-
-                    if not keyword_id or not ad_group_id or not keyword_text:
-                        continue
-
-                    rec = client.get_keyword_bid_recommendations(
-                        campaign_id,
-                        str(ad_group_id),
-                        str(keyword_text),
-                        str(match_type),
-                    )
-                    low, high, applied = choose_recommended_bid(rec, current_bid, mode)
-
-                    updates.append({
-                        "keywordId": str(keyword_id),
-                        "campaignId": campaign_id,
-                        "adGroupId": str(ad_group_id),
-                        "bid": applied,
-                        "state": kw.get("state", "ENABLED"),
-                    })
-
-                    bids_updated.append({
-                        "campaign_id": campaign_id,
-                        "keyword_id": str(keyword_id),
-                        "keyword_text": str(keyword_text),
-                        "match_type": str(match_type),
-                        "suggested_low": low,
-                        "suggested_high": high,
-                        "applied_bid": applied,
-                        "bid_mode": mode,
-                    })
-
-                if updates:
-                    client.update_keyword_bids(updates)
-        except Exception as e:
-            logger.warning(f"Existing keyword bid retune skipped: {e}")
-
-    run_entry = {
-        "timestamp": datetime.datetime.utcnow().isoformat(),
-        "lookback_days": lookback_days,
-        "rows_analyzed": len(rows),
-        "winners_found": len(classified["winners"]),
-        "negatives_found": len(classified["negatives"]),
-        "winners_applied": len(winners_applied),
-        "negatives_applied": len(negatives_applied),
-        "bid_mode": mode,
-        "existing_keyword_bids_updated": len(bids_updated),
-        "winners_details": winners_applied,
-        "negatives_details": negatives_applied,
-        "apply_winners_live": apply_winners,
-        "apply_negatives_live": apply_negatives,
-    }
-    save_optimizer_history(run_entry)
-
-    return {
-        "success": True,
-        "report_id": report_id,
-        "date_range": {"start": start_date, "end": end_date},
-        "rows_analyzed": len(rows),
-        "winners": len(classified["winners"]),
-        "negatives": len(classified["negatives"]),
-        "winners_applied_count": len(winners_applied),
-        "negatives_applied_count": len(negatives_applied),
-        "existing_keyword_bids_updated": len(bids_updated),
-        "bid_mode": mode,
-        "winners_applied": winners_applied,
-        "negatives_applied": negatives_applied,
-        "bids_updated_sample": bids_updated[:20],
-    }
-
-
-@app.get("/api/optimizer-history")
-def api_optimizer_history():
-    history = load_optimizer_history()
-    return {"history": history, "count": len(history)}
-
-
-@app.get("/api/campaigns")
-def api_list_campaigns():
-    client = AmazonAdsClient()
-    try:
-        campaigns = client.list_enabled_campaigns(max_results=100)
-        return {"count": len(campaigns), "campaigns": campaigns}
-    except Exception as e:
-        logger.error("Failed to fetch campaigns", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/campaign-performance")
-def api_campaign_performance():
-    client = AmazonAdsClient()
-    start_date = iso_date_days_ago(14)
-    end_date = today_iso_date()
-    bid_mode = current_bid_mode()
-
-    campaigns = client.list_enabled_campaigns(max_results=100)
-
-    if not campaigns:
-        return {
-            "count": 0,
-            "campaigns": [],
-            "bid_mode": bid_mode,
-            "peak_hours_label": f"{PEAK_HOURS_START}:00-{PEAK_HOURS_END}:59 ET",
-            "note": "No enabled campaigns found."
-        }
-
-    try:
-        summary_body = {
-            "startDate": start_date,
-            "endDate": end_date,
-            "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "groupBy": ["campaign"],
-                "columns": ["campaignId", "campaignName", "impressions", "clicks", "cost", "sales7d", "purchases7d"],
-                "reportTypeId": "spCampaigns",
-                "timeUnit": "SUMMARY",
-                "format": "GZIP_JSON",
-            }
-        }
-
-        summary_resp = client.post(ENDPOINTS["reports"], summary_body)
-        summary_report_id = summary_resp.get("reportId")
-        if not summary_report_id:
-            raise RuntimeError("No summary reportId returned")
-
-        for _ in range(30):
-            status = client.get(f"{ENDPOINTS['reports']}/{summary_report_id}")
-            if status.get("status") == "SUCCESS":
-                break
-            if status.get("status") in ("FAILURE", "CANCELLED"):
-                raise RuntimeError("Summary report generation failed")
-            time.sleep(10)
-        else:
-            raise RuntimeError("Summary report timeout")
-
-        summary_content = client.download_binary(status.get("location") or status.get("url"))
-        summary_rows = parse_report_json_bytes(summary_content)
-
-        daily_body = {
-            "startDate": start_date,
-            "endDate": end_date,
-            "configuration": {
-                "adProduct": "SPONSORED_PRODUCTS",
-                "groupBy": ["campaign"],
-                "columns": ["campaignId", "campaignName", "date", "clicks", "cost", "sales7d"],
-                "reportTypeId": "spCampaigns",
-                "timeUnit": "DAILY",
-                "format": "GZIP_JSON",
-            }
-        }
-
-        daily_resp = client.post(ENDPOINTS["reports"], daily_body)
-        daily_report_id = daily_resp.get("reportId")
-        if not daily_report_id:
-            raise RuntimeError("No daily reportId returned")
-
-        for _ in range(30):
-            status2 = client.get(f"{ENDPOINTS['reports']}/{daily_report_id}")
-            if status2.get("status") == "SUCCESS":
-                break
-            if status2.get("status") in ("FAILURE", "CANCELLED"):
-                raise RuntimeError("Daily report generation failed")
-            time.sleep(10)
-        else:
-            raise RuntimeError("Daily report timeout")
-
-        daily_content = client.download_binary(status2.get("location") or status2.get("url"))
-        daily_rows = parse_report_json_bytes(daily_content)
-
-        summary_by_campaign = {}
-        for row in summary_rows:
-            cid = str(row.get("campaignId") or "")
-            if not cid:
-                continue
-            summary_by_campaign[cid] = {
-                "impressions": int(num(row, ["impressions"], 0)),
-                "clicks": int(num(row, ["clicks"], 0)),
-                "spend": round(num(row, ["cost", "spend"], 0), 2),
-                "sales": round(num(row, ["sales7d", "sales"], 0), 2),
-                "orders": int(num(row, ["purchases7d", "orders"], 0)),
-            }
-
-        daily_by_campaign = defaultdict(list)
-        for row in daily_rows:
-            cid = str(row.get("campaignId") or "")
-            if not cid:
-                continue
-            sales_val = num(row, ["sales7d", "sales"], 0)
-            cost_val = num(row, ["cost", "spend"], 0)
-            daily_by_campaign[cid].append({
-                "date": row.get("date"),
-                "spend": round(cost_val, 2),
-                "sales": round(sales_val, 2),
-                "acos": round(cost_val / sales_val, 4) if sales_val > 0 else None,
-            })
-
-        enriched = []
-        for c in campaigns:
-            cid = str(c.get("campaignId") or "")
-            summary = summary_by_campaign.get(cid, {})
-            daily_data = sorted(daily_by_campaign.get(cid, []), key=lambda x: x.get("date") or "")
-
-            sales_total = summary.get("sales", 0)
-            spend_total = summary.get("spend", 0)
-            fallback_bid = float(c.get("budget", {}).get("budget") or 0) / 25.0 if c.get("budget") else 0.85
-
-            suggested_low = 0.0
-            suggested_high = 0.0
-            current_applied_bid = round(fallback_bid, 2)
-
-            keywords = client.list_keywords_for_campaign(cid, max_results=25)
-            if keywords:
-                first_kw = keywords[0]
-                rec = client.get_keyword_bid_recommendations(
-                    cid,
-                    str(first_kw.get("adGroupId") or ""),
-                    str(first_kw.get("keywordText") or ""),
-                    str(first_kw.get("matchType") or "PHRASE"),
-                )
-                suggested_low, suggested_high, current_applied_bid = choose_recommended_bid(
-                    rec,
-                    float(first_kw.get("bid") or fallback_bid),
-                    bid_mode,
-                )
-
-            acos = (spend_total / sales_total) if sales_total > 0 else None
-
-            enriched.append({
-                **c,
-                "impressions": summary.get("impressions", 0),
-                "clicks": summary.get("clicks", 0),
-                "spend": round(spend_total, 2),
-                "sales": round(sales_total, 2),
-                "orders": summary.get("orders", 0),
-                "acos": round(acos, 4) if acos is not None else None,
-                "daily_trend": daily_data,
-                "amazonSuggestedBidLow": suggested_low,
-                "amazonSuggestedBidHigh": suggested_high,
-                "currentBidMode": bid_mode,
-                "currentAppliedBid": current_applied_bid,
-            })
-
-        return {
-            "count": len(enriched),
-            "campaigns": enriched,
-            "bid_mode": bid_mode,
-            "peak_hours_label": f"{PEAK_HOURS_START}:00-{PEAK_HOURS_END}:59 ET",
-            "note": "Summary totals use SUMMARY report; trends use DAILY report.",
-        }
-
-    except Exception as e:
-        logger.error(f"Daily performance report failed: {e}", exc_info=True)
-        return {
-            "count": len(campaigns),
-            "campaigns": campaigns,
-            "bid_mode": bid_mode,
-            "peak_hours_label": f"{PEAK_HOURS_START}:00-{PEAK_HOURS_END}:59 ET",
-            "note": "Trend or recommendation data unavailable",
-        }
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    return {"status": "ok"}
