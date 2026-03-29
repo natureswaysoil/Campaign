@@ -19,6 +19,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
+CACHE_FILE = Path("/tmp/dashboard_cache.json")
+OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
 
 TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 
@@ -27,8 +29,6 @@ BASE_URLS = {
     "eu": "https://advertising-api-eu.amazon.com",
     "fe": "https://advertising-api-fe.amazon.com",
 }
-
-OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
 
 PEAK_START = int(os.getenv("PEAK_HOURS_START", "18"))
 PEAK_END = int(os.getenv("PEAK_HOURS_END", "23"))
@@ -66,6 +66,10 @@ def today_iso_date() -> str:
 
 def iso_date_days_ago(days: int) -> str:
     return (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+
+
+def utc_now_iso() -> str:
+    return datetime.datetime.utcnow().isoformat() + "Z"
 
 
 def current_hour_local() -> int:
@@ -212,6 +216,33 @@ def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]
     return {"winners": winners, "negatives": negatives, "hold": hold}
 
 
+def read_cache() -> Dict[str, Any]:
+    if CACHE_FILE.exists():
+        try:
+            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "campaigns": [],
+        "count": 0,
+        "bid_mode": get_bid_mode(),
+        "peak_hours_label": f"{PEAK_START}:00–{PEAK_END}:59",
+        "note": "No dashboard cache yet.",
+        "refreshed_at": None,
+        "summary": {
+            "spend": 0,
+            "sales": 0,
+            "clicks": 0,
+            "orders": 0,
+            "acos": None,
+        },
+    }
+
+
+def write_cache(data: Dict[str, Any]) -> None:
+    CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 class AmazonAdsClient:
     def __init__(self):
         self.client_id = get_env("AMAZON_ADS_CLIENT_ID")
@@ -254,14 +285,7 @@ class AmazonAdsClient:
             "Accept": accept or content_type,
         }
 
-    def post(
-        self,
-        endpoint: str,
-        body: Any,
-        *,
-        content_type: str,
-        accept: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    def post(self, endpoint: str, body: Any, *, content_type: str, accept: Optional[str] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"
         response = self.session.post(
             url,
@@ -463,6 +487,117 @@ def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict[s
     } for term in negatives]
 
 
+def build_dashboard_cache(lookback_days: int = 14) -> Dict[str, Any]:
+    client = AmazonAdsClient()
+    campaigns = client.list_campaigns()
+    mode = get_bid_mode()
+    start_date = iso_date_days_ago(lookback_days)
+    end_date = today_iso_date()
+
+    report_id = client.request_report({
+        "startDate": start_date,
+        "endDate": end_date,
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["campaign"],
+            "columns": ["campaignId", "campaignName", "impressions", "clicks", "cost", "sales7d", "purchases7d"],
+            "reportTypeId": "spCampaigns",
+            "timeUnit": "SUMMARY",
+            "format": "GZIP_JSON",
+        }
+    })
+    report_url = client.wait_for_report(report_id)
+    rows = parse_report_json_bytes(client.download_binary(report_url))
+
+    summary_by_campaign: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        cid = str(row.get("campaignId") or "")
+        if not cid:
+            continue
+        summary_by_campaign[cid] = {
+            "impressions": int(num(row, ["impressions"], 0)),
+            "clicks": int(num(row, ["clicks"], 0)),
+            "spend": round(num(row, ["cost", "spend"], 0), 2),
+            "sales": round(num(row, ["sales7d", "sales"], 0), 2),
+            "orders": int(num(row, ["purchases7d", "orders"], 0)),
+        }
+
+    results: List[Dict[str, Any]] = []
+    total_spend = 0.0
+    total_sales = 0.0
+    total_clicks = 0
+    total_orders = 0
+
+    for c in campaigns:
+        cid = str(c.get("campaignId") or "")
+        summary = summary_by_campaign.get(cid, {})
+        spend = float(summary.get("spend", 0))
+        sales = float(summary.get("sales", 0))
+        clicks = int(summary.get("clicks", 0))
+        orders = int(summary.get("orders", 0))
+        acos = round(spend / sales, 4) if sales > 0 else None
+
+        total_spend += spend
+        total_sales += sales
+        total_clicks += clicks
+        total_orders += orders
+
+        bid_low = None
+        bid_high = None
+        applied = None
+
+        try:
+            keywords = client.list_keywords(cid)
+        except Exception:
+            keywords = []
+
+        if keywords:
+            kw = keywords[0]
+            rec = client.get_bid_recommendation(
+                cid,
+                str(kw.get("adGroupId") or ""),
+                str(kw.get("keywordText") or ""),
+                str(kw.get("matchType") or "PHRASE"),
+            )
+            low, high, applied_bid = choose_bid(rec, float(kw.get("bid") or DEFAULT_FALLBACK_BID))
+            bid_low = low
+            bid_high = high
+            applied = applied_bid
+
+        results.append({
+            **c,
+            "impressions": int(summary.get("impressions", 0)),
+            "clicks": clicks,
+            "spend": round(spend, 2),
+            "sales": round(sales, 2),
+            "orders": orders,
+            "acos": acos,
+            "amazonSuggestedBidLow": bid_low,
+            "amazonSuggestedBidHigh": bid_high,
+            "currentAppliedBid": applied,
+            "currentBidMode": mode,
+        })
+
+    cache = {
+        "campaigns": results,
+        "count": len(results),
+        "bid_mode": mode,
+        "peak_hours_label": f"{PEAK_START}:00–{PEAK_END}:59",
+        "note": "Cached dashboard data from Amazon reports.",
+        "refreshed_at": utc_now_iso(),
+        "report_id": report_id,
+        "summary": {
+            "spend": round(total_spend, 2),
+            "sales": round(total_sales, 2),
+            "clicks": total_clicks,
+            "orders": total_orders,
+            "acos": round(total_spend / total_sales, 4) if total_sales > 0 else None,
+        },
+    }
+    write_cache(cache)
+    return cache
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
     path = BASE_DIR / "templates" / "dashboard.html"
@@ -487,63 +622,25 @@ def optimizer_history() -> Dict[str, Any]:
     return {"history": history, "count": len(history)}
 
 
+@app.get("/api/dashboard-data")
+def dashboard_data() -> JSONResponse:
+    return JSONResponse(read_cache())
+
+
+@app.post("/api/refresh-dashboard-cache")
+def refresh_dashboard_cache(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization)
+    try:
+        cache = build_dashboard_cache(lookback_days=14)
+        return JSONResponse({"success": True, "cache": cache})
+    except Exception as e:
+        logger.exception("Dashboard cache refresh failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+
 @app.get("/api/campaign-performance")
 def campaign_performance() -> JSONResponse:
-    try:
-        client = AmazonAdsClient()
-        campaigns = client.list_campaigns()
-        mode = get_bid_mode()
-
-        results: List[Dict[str, Any]] = []
-
-        for c in campaigns:
-            cid = str(c.get("campaignId") or "")
-            bid_low = None
-            bid_high = None
-            applied = None
-
-            try:
-                keywords = client.list_keywords(cid)
-            except Exception:
-                keywords = []
-
-            if keywords:
-                kw = keywords[0]
-                rec = client.get_bid_recommendation(
-                    cid,
-                    str(kw.get("adGroupId") or ""),
-                    str(kw.get("keywordText") or ""),
-                    str(kw.get("matchType") or "PHRASE"),
-                )
-                low, high, applied_bid = choose_bid(rec, float(kw.get("bid") or DEFAULT_FALLBACK_BID))
-                bid_low = low
-                bid_high = high
-                applied = applied_bid
-
-            results.append({
-                **c,
-                "impressions": 0,
-                "clicks": 0,
-                "spend": 0,
-                "sales": 0,
-                "orders": 0,
-                "acos": None,
-                "amazonSuggestedBidLow": bid_low,
-                "amazonSuggestedBidHigh": bid_high,
-                "currentAppliedBid": applied,
-                "currentBidMode": mode,
-            })
-
-        return JSONResponse({
-            "campaigns": results,
-            "count": len(results),
-            "bid_mode": mode,
-            "peak_hours_label": f"{PEAK_START}:00–{PEAK_END}:59",
-            "note": "Light dashboard mode: campaign list + bid preview only.",
-        })
-    except Exception as e:
-        logger.exception("Campaign performance failed")
-        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+    return JSONResponse(read_cache())
 
 
 @app.post("/api/run-daily-optimization")
@@ -559,6 +656,7 @@ def run_daily_optimization(
         retune_existing = bool(payload.get("retune_existing_keyword_bids", False))
         lookback_days = int(payload.get("lookback_days", 14))
         fallback_winner_bid = float(payload.get("winner_bid", DEFAULT_WINNER_BID))
+        refresh_cache_after = bool(payload.get("refresh_cache_after", True))
 
         client = AmazonAdsClient()
         mode = get_bid_mode()
@@ -703,8 +801,15 @@ def run_daily_optimization(
                 if update_rows:
                     client.update_keywords(update_rows)
 
+        cache_result = None
+        if refresh_cache_after:
+            try:
+                cache_result = build_dashboard_cache(lookback_days=14)
+            except Exception as e:
+                logger.warning("Cache refresh after optimization failed: %s", e)
+
         run_entry = {
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": utc_now_iso(),
             "lookback_days": lookback_days,
             "rows_analyzed": len(rows),
             "winners_found": len(classified["winners"]),
@@ -730,6 +835,8 @@ def run_daily_optimization(
             "winners_applied": winners_applied,
             "negatives_applied": negatives_applied,
             "bids_updated_sample": bids_updated[:20],
+            "cache_refreshed": cache_result is not None,
+            "cache_refreshed_at": cache_result.get("refreshed_at") if cache_result else None,
         })
     except Exception as e:
         logger.exception("Daily optimization failed")
