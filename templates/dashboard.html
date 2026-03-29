@@ -19,15 +19,18 @@
                 <p class="text-gray-600">Nature's Way Soil • ENABLED Campaigns Only</p>
             </div>
 
-            <div class="flex gap-3">
-                <button
-                    onclick="loadDashboard()"
+            <div class="flex flex-wrap gap-3">
+                <button onclick="loadDashboardData()"
                     class="bg-white border border-gray-300 hover:bg-gray-100 text-gray-800 px-6 py-3 rounded-2xl font-semibold shadow-sm">
-                    Refresh
+                    Refresh View
                 </button>
 
-                <button
-                    onclick="runOptimizer()"
+                <button onclick="refreshCacheNow()"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
+                    Refresh Metrics Cache
+                </button>
+
+                <button onclick="runOptimizer()"
                     class="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded-2xl font-semibold shadow-lg flex items-center gap-2">
                     ▶️ Run Daily Optimizer Now
                 </button>
@@ -40,10 +43,11 @@
             <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
                 <div>
                     <h2 class="text-xl font-semibold text-gray-900">Daily Optimizer Status</h2>
-                    <p class="text-gray-600 mt-1">Dashboard shows ENABLED campaigns only.</p>
+                    <p class="text-gray-600 mt-1">Dashboard shows cached Amazon metrics plus live control actions.</p>
                 </div>
                 <div class="text-sm text-gray-500">
-                    Last updated: <span id="time">—</span>
+                    Page loaded: <span id="time">—</span><br>
+                    Cache refreshed: <span id="cacheTime">—</span>
                 </div>
             </div>
 
@@ -90,9 +94,7 @@
         }
 
         function badgeClassForAcos(acos) {
-            if (acos === undefined || acos === null || isNaN(Number(acos))) {
-                return 'text-gray-600';
-            }
+            if (acos === undefined || acos === null || isNaN(Number(acos))) return 'text-gray-600';
             if (Number(acos) < 0.30) return 'text-green-600';
             if (Number(acos) < 0.50) return 'text-amber-600';
             return 'text-red-600';
@@ -116,53 +118,43 @@
             return escapeHtml(c.campaignName || c.name || 'Unnamed Campaign');
         }
 
-        function renderSummary(campaigns) {
-            let spend = 0;
-            let sales = 0;
-            let clicks = 0;
-            let orders = 0;
-
-            campaigns.forEach(function (c) {
-                spend += Number(c.spend || 0);
-                sales += Number(c.sales || 0);
-                clicks += Number(c.clicks || 0);
-                orders += Number(c.orders || 0);
-            });
-
-            const acos = sales > 0 ? (spend / sales) : null;
+        function renderSummary(data) {
+            const s = data.summary || {};
+            const acos = s.acos;
 
             document.getElementById('summary').innerHTML =
                 '<div>' +
                     '<div class="text-gray-500 text-sm">Total Spend</div>' +
-                    '<div class="text-3xl font-bold">' + toMoney(spend) + '</div>' +
+                    '<div class="text-3xl font-bold">' + toMoney(s.spend || 0) + '</div>' +
                 '</div>' +
                 '<div>' +
                     '<div class="text-gray-500 text-sm">Total Sales</div>' +
-                    '<div class="text-3xl font-bold">' + toMoney(sales) + '</div>' +
+                    '<div class="text-3xl font-bold">' + toMoney(s.sales || 0) + '</div>' +
                 '</div>' +
                 '<div>' +
                     '<div class="text-gray-500 text-sm">Portfolio ACoS</div>' +
-                    '<div class="text-3xl font-bold ' + badgeClassForAcos(acos) + '">' + (acos === null ? '—' : toPercent(acos)) + '</div>' +
+                    '<div class="text-3xl font-bold ' + badgeClassForAcos(acos) + '">' + (acos === null || acos === undefined ? '—' : toPercent(acos)) + '</div>' +
                 '</div>' +
                 '<div>' +
                     '<div class="text-gray-500 text-sm">Total Clicks / Orders</div>' +
-                    '<div class="text-3xl font-bold">' + clicks + ' / ' + orders + '</div>' +
+                    '<div class="text-3xl font-bold">' + Number(s.clicks || 0) + ' / ' + Number(s.orders || 0) + '</div>' +
                 '</div>';
         }
 
         function renderOptimizerStatus(data) {
             const statusEl = document.getElementById('optimizerStatus');
-
-            const bidMode = data.bid_mode || data.bidMode || 'UNKNOWN';
-            const peakHours = data.peak_hours_label || data.peakHoursLabel || 'Backend-controlled';
+            const bidMode = data.bid_mode || 'UNKNOWN';
+            const peakHours = data.peak_hours_label || 'Backend-controlled';
             const note = data.note || '';
+            const refreshed = data.refreshed_at || '—';
+            document.getElementById('cacheTime').textContent = refreshed;
 
             statusEl.innerHTML =
                 '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
                     '<div class="rounded-2xl border border-gray-200 p-4">' +
                         '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Optimizer</div>' +
-                        '<div class="font-semibold text-gray-900">Enabled Campaign Monitor</div>' +
-                        '<div class="text-sm text-gray-600 mt-1">Promotes winners and blocks poor performers from backend rules.</div>' +
+                        '<div class="font-semibold text-gray-900">Cached Dashboard Mode</div>' +
+                        '<div class="text-sm text-gray-600 mt-1">Metrics are read from cache. Live actions still run instantly.</div>' +
                     '</div>' +
                     '<div class="rounded-2xl border border-gray-200 p-4">' +
                         '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Bid Mode</div>' +
@@ -201,10 +193,10 @@
                 const acosVal = acos === undefined || acos === null ? '—' : toPercent(acos);
                 const acosClass = badgeClassForAcos(acos);
 
-                const suggestedLow = c.amazonSuggestedBidLow ?? c.suggestedBidLow ?? c.bid_low ?? null;
-                const suggestedHigh = c.amazonSuggestedBidHigh ?? c.suggestedBidHigh ?? c.bid_high ?? null;
-                const currentBidMode = c.currentBidMode ?? c.bidMode ?? null;
-                const currentAppliedBid = c.currentAppliedBid ?? c.appliedBid ?? null;
+                const suggestedLow = c.amazonSuggestedBidLow ?? null;
+                const suggestedHigh = c.amazonSuggestedBidHigh ?? null;
+                const currentBidMode = c.currentBidMode ?? null;
+                const currentAppliedBid = c.currentAppliedBid ?? null;
 
                 html +=
                     '<div class="card border border-gray-200 rounded-3xl p-6 bg-white shadow-sm">' +
@@ -217,50 +209,23 @@
                         '</div>' +
 
                         '<div class="mt-6 grid grid-cols-3 gap-4 text-sm">' +
-                            '<div>' +
-                                '<div class="text-gray-500">Budget</div>' +
-                                '<div class="font-medium">' + budget + '</div>' +
-                            '</div>' +
-                            '<div>' +
-                                '<div class="text-gray-500">Spend</div>' +
-                                '<div class="font-medium">' + spend + '</div>' +
-                            '</div>' +
-                            '<div>' +
-                                '<div class="text-gray-500">Sales</div>' +
-                                '<div class="font-medium">' + sales + '</div>' +
-                            '</div>' +
+                            '<div><div class="text-gray-500">Budget</div><div class="font-medium">' + budget + '</div></div>' +
+                            '<div><div class="text-gray-500">Spend</div><div class="font-medium">' + spend + '</div></div>' +
+                            '<div><div class="text-gray-500">Sales</div><div class="font-medium">' + sales + '</div></div>' +
                         '</div>' +
 
                         '<div class="mt-6 grid grid-cols-3 gap-4 text-sm">' +
-                            '<div>' +
-                                '<div class="text-gray-500">Clicks</div>' +
-                                '<div class="font-medium">' + clicks + '</div>' +
-                            '</div>' +
-                            '<div>' +
-                                '<div class="text-gray-500">Orders</div>' +
-                                '<div class="font-medium">' + orders + '</div>' +
-                            '</div>' +
-                            '<div>' +
-                                '<div class="text-gray-500">ACoS</div>' +
-                                '<div class="font-semibold ' + acosClass + '">' + acosVal + '</div>' +
-                            '</div>' +
+                            '<div><div class="text-gray-500">Clicks</div><div class="font-medium">' + clicks + '</div></div>' +
+                            '<div><div class="text-gray-500">Orders</div><div class="font-medium">' + orders + '</div></div>' +
+                            '<div><div class="text-gray-500">ACoS</div><div class="font-semibold ' + acosClass + '">' + acosVal + '</div></div>' +
                         '</div>' +
 
                         '<div class="mt-6 border-t border-gray-100 pt-4">' +
                             '<div class="text-sm font-semibold text-gray-800 mb-3">Amazon Suggested Bid Window</div>' +
                             '<div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">' +
-                                '<div>' +
-                                    '<div class="text-gray-500">Suggested Low</div>' +
-                                    '<div class="font-medium">' + (suggestedLow === null ? '—' : toMoney(suggestedLow)) + '</div>' +
-                                '</div>' +
-                                '<div>' +
-                                    '<div class="text-gray-500">Suggested High</div>' +
-                                    '<div class="font-medium">' + (suggestedHigh === null ? '—' : toMoney(suggestedHigh)) + '</div>' +
-                                '</div>' +
-                                '<div>' +
-                                    '<div class="text-gray-500">Applied Bid</div>' +
-                                    '<div class="font-medium">' + (currentAppliedBid === null ? '—' : toMoney(currentAppliedBid)) + '</div>' +
-                                '</div>' +
+                                '<div><div class="text-gray-500">Suggested Low</div><div class="font-medium">' + (suggestedLow === null ? '—' : toMoney(suggestedLow)) + '</div></div>' +
+                                '<div><div class="text-gray-500">Suggested High</div><div class="font-medium">' + (suggestedHigh === null ? '—' : toMoney(suggestedHigh)) + '</div></div>' +
+                                '<div><div class="text-gray-500">Applied Bid</div><div class="font-medium">' + (currentAppliedBid === null ? '—' : toMoney(currentAppliedBid)) + '</div></div>' +
                             '</div>' +
                         '</div>' +
                     '</div>';
@@ -269,20 +234,13 @@
             listEl.innerHTML = html;
         }
 
-        async function loadDashboard() {
+        async function loadDashboardData() {
             try {
-                const res = await fetch('/api/campaign-performance');
-                const text = await res.text();
+                const res = await fetch('/api/dashboard-data');
+                const data = await res.json();
 
-                let data = {};
-                try {
-                    data = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('Invalid JSON from /api/campaign-performance: ' + text);
-                }
-
-                if (!res.ok) {
-                    throw new Error(data.detail || text || 'Failed to load dashboard data');
+                if (!res.ok || data.error) {
+                    throw new Error(data.message || 'Failed to load dashboard data');
                 }
 
                 const campaigns = (data.campaigns || []).filter(function (c) {
@@ -292,14 +250,14 @@
                 document.getElementById('count').textContent = campaigns.length;
                 document.getElementById('time').textContent = new Date().toLocaleString();
 
-                renderSummary(campaigns);
+                renderSummary(data);
                 renderOptimizerStatus(data);
                 renderCampaigns(campaigns);
 
             } catch (err) {
                 console.error(err);
                 document.getElementById('summary').innerHTML =
-                    '<div class="col-span-full text-red-500 text-center p-8">Failed to load summary from backend.</div>';
+                    '<div class="col-span-full text-red-500 text-center p-8">Failed to load dashboard data.</div>';
                 document.getElementById('optimizerStatus').innerHTML =
                     '<div class="text-red-500">Failed to load optimizer status.</div>';
                 document.getElementById('list').innerHTML =
@@ -321,19 +279,21 @@
                     body: JSON.stringify({
                         apply_negatives_live: true,
                         apply_winners_live: true,
-                        lookback_days: 14
+                        retune_existing_keyword_bids: false,
+                        lookback_days: 14,
+                        winner_bid: 0.90,
+                        refresh_cache_after: true
                     })
                 });
 
-                const text = await res.text();
-
-                if (!res.ok) {
-                    alert('❌ Optimizer error:\n\n' + text);
+                const data = await res.json();
+                if (!res.ok || data.error) {
+                    alert('❌ Optimizer error:\n\n' + (data.message || JSON.stringify(data)));
                     return;
                 }
 
                 alert('✅ Optimizer completed successfully!');
-                await loadDashboard();
+                await loadDashboardData();
 
             } catch (e) {
                 console.error(e);
@@ -341,8 +301,35 @@
             }
         }
 
-        window.onload = loadDashboard;
-        setInterval(loadDashboard, 600000);
+        async function refreshCacheNow() {
+            const token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
+            if (!token) return;
+
+            try {
+                const res = await fetch('/api/refresh-dashboard-cache', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + token
+                    }
+                });
+
+                const data = await res.json();
+                if (!res.ok || data.error) {
+                    alert('❌ Cache refresh error:\n\n' + (data.message || JSON.stringify(data)));
+                    return;
+                }
+
+                alert('✅ Metrics cache refreshed!');
+                await loadDashboardData();
+
+            } catch (e) {
+                console.error(e);
+                alert('❌ Failed to refresh metrics cache.');
+            }
+        }
+
+        window.onload = loadDashboardData;
+        setInterval(loadDashboardData, 600000);
     </script>
 </body>
 </html>
