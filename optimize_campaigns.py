@@ -47,6 +47,7 @@ MEDIA_TYPES = {
     "campaigns_v3": "application/vnd.spcampaign.v3+json",
     "keywords_v3": "application/vnd.spkeyword.v3+json",
     "neg_keywords_v3": "application/vnd.spcampaignnegativekeyword.v3+json",
+    "bid_rec_v3": "application/vnd.spkeywordbidrecommendation.v3+json",
     "json": "application/json",
 }
 
@@ -399,8 +400,8 @@ class AmazonAdsClient:
                         "matchType": str(match_type).upper(),
                     }]
                 },
-                content_type=MEDIA_TYPES["json"],
-                accept=MEDIA_TYPES["json"],
+                content_type=MEDIA_TYPES["bid_rec_v3"],
+                accept=MEDIA_TYPES["bid_rec_v3"],
             )
             recs = data.get("recommendations", [])
             if not recs:
