@@ -24,5 +24,5 @@ CMD ["gunicorn", "optimize_campaigns:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", \
      "--bind", "0.0.0.0:8080", \
-     "--timeout", "120", \
+     "--timeout", "3600", \
      "--log-level", "info"]

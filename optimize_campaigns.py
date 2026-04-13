@@ -450,7 +450,7 @@ class AmazonAdsClient:
                     return match.group(1)
             raise
 
-    def wait_for_report(self, report_id: str, timeout_loops: int = 60, sleep_seconds: int = 10) -> str:
+    def wait_for_report(self, report_id: str, timeout_loops: int = 180, sleep_seconds: int = 10) -> str:
         for _ in range(timeout_loops):
             status = self.get_json(
                 f"/reporting/reports/{report_id}",
