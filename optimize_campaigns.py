@@ -111,13 +111,23 @@ def save_optimizer_history(entry: Dict[str, Any]) -> None:
         logger.warning("Failed to save optimizer history: %s", e)
 
 
-def verify_internal_token(authorization: Optional[str]) -> None:
+def verify_internal_token(
+    authorization: Optional[str] = None,
+    x_daily_optimizer_token: Optional[str] = None,
+) -> None:
     token = os.getenv("DAILY_OPTIMIZER_TOKEN")
     if not token:
         raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN not configured")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    supplied = authorization.replace("Bearer ", "", 1).strip()
+
+    # Accept either X-Daily-Optimizer-Token header or Authorization: Bearer
+    supplied = None
+    if x_daily_optimizer_token:
+        supplied = x_daily_optimizer_token.strip()
+    elif authorization and authorization.startswith("Bearer "):
+        supplied = authorization.replace("Bearer ", "", 1).strip()
+
+    if not supplied:
+        raise HTTPException(status_code=401, detail="Missing token")
     if not hmac.compare_digest(supplied, token):
         raise HTTPException(status_code=403, detail="Invalid token")
 
