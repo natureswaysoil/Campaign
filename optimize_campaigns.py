@@ -733,10 +733,16 @@ def retune_existing_bids_step(client: AmazonAdsClient) -> List[Dict[str, Any]]:
             keyword_id = kw.get("keywordId")
             ad_group_id = kw.get("adGroupId")
             keyword_text = kw.get("keywordText")
-            match_type = kw.get("matchType", "PHRASE")
+            match_type = kw.get("matchType")
             current_bid = float(kw.get("bid") or DEFAULT_FALLBACK_BID)
 
-            if not keyword_id or not ad_group_id or not keyword_text:
+            # Skip any keyword missing required fields
+            if not keyword_id or not ad_group_id or not keyword_text or not match_type:
+                continue
+
+            # Normalize match type to valid Amazon values
+            match_type = match_type.upper()
+            if match_type not in ("EXACT", "PHRASE", "BROAD"):
                 continue
 
             rec = client.get_bid_recommendation(
