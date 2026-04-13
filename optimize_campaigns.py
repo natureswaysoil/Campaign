@@ -937,6 +937,11 @@ def retune_existing_bids(
             "timestamp": utc_now_iso(),
             "action": "retune_existing_bids",
             "existing_keyword_bids_updated": len(bids_updated),
+            "bid_mode": get_bid_mode(),
+            "sample": [
+                f"{b['keyword_text']} {b['match_type']} -> {b['applied_bid']}"
+                for b in bids_updated[:3]
+            ],
         }
         save_optimizer_history(entry)
 
