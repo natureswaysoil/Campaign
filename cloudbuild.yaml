@@ -10,12 +10,15 @@ steps:
     args:
       - run
       - deploy
-      - amazon-ads-autopilot
+      - campaign-optimizer
       - --image=us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:latest
       - --region=us-central1
       - --platform=managed
-      - --allow-unauthenticated
-      - --set-env-vars=GCP_PROJECT_ID=$PROJECT_ID
+      - --no-allow-unauthenticated
+      - --timeout=1800
+      - --memory=1Gi
+      - --set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,PRIORITY_FILTER=1
+      - --set-secrets=AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest,DAILY_OPTIMIZER_TOKEN=DAILY_OPTIMIZER_TOKEN:latest
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/amazon-ads-autopilot/app:latest'

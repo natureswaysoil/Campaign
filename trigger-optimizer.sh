@@ -12,13 +12,17 @@ SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
   --format 'value(status.url)' \
   --project=${PROJECT_ID})
 
-# Get auth token
-TOKEN=$(gcloud auth print-identity-token)
+OIDC_TOKEN=$(gcloud auth print-identity-token)
+DAILY_OPTIMIZER_TOKEN=$(gcloud secrets versions access latest \
+  --secret=DAILY_OPTIMIZER_TOKEN \
+  --project=${PROJECT_ID})
 
-# Trigger the /optimize endpoint
-curl -X POST "${SERVICE_URL}/optimize" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json"
+# Trigger the daily optimization endpoint
+curl -X POST "${SERVICE_URL}/api/run-daily-optimization" \
+  -H "Authorization: Bearer ${OIDC_TOKEN}" \
+  -H "X-Daily-Optimizer-Token: ${DAILY_OPTIMIZER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"apply_campaign_pauses_live":true,"apply_negatives_live":true,"apply_winners_live":true,"pause_no_sales_campaigns":true,"min_clicks_for_no_sales_pause":10,"lookback_days":14,"pause_acos_threshold":0.40,"prime_high_bid_multiplier":1.25,"off_prime_bid_multiplier":0.35}'
 
 echo ""
 echo "✓ Triggered! Check logs in ~5 minutes:"

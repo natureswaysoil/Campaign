@@ -16,9 +16,34 @@ This creates a Cloud Scheduler job that runs daily at 9 AM EST
 
 ## 🧪 Testing
 
+### Authenticated Smoke Test
+```bash
+./smoke-test-cloud-run.sh
+```
+
+This verifies the private Cloud Run service with the same auth model used in production:
+- `GET /` returns the authenticated landing page
+- `GET /health` returns the health payload
+- `GET /api/ops-status` returns ops metrics
+- `POST /api/run-daily-optimization` can be exercised separately via `./trigger-optimizer.sh`
+
 ### Manual Trigger
 ```bash
 ./trigger-optimizer.sh
+```
+
+### Manual Authenticated Checks
+```bash
+SERVICE_URL=$(gcloud run services describe campaign-optimizer \
+  --region us-central1 \
+  --format='value(status.url)' \
+  --project=amazon-ppc-bid-optimizer)
+
+TOKEN=$(gcloud auth print-identity-token)
+
+curl -H "Authorization: Bearer ${TOKEN}" "${SERVICE_URL}/"
+curl -H "Authorization: Bearer ${TOKEN}" "${SERVICE_URL}/health"
+curl -H "Authorization: Bearer ${TOKEN}" "${SERVICE_URL}/api/ops-status"
 ```
 
 ### View Logs
@@ -49,6 +74,8 @@ Edit environment variables in `deploy-cloud-run.sh`:
 ## 🔒 Security
 
 - Service is **not publicly accessible** (requires authentication)
+- Browser hits to the service URL without a Google identity token will return `403` at the Cloud Run layer
+- The root route `/` exists in the app, but you only reach it after Cloud Run authentication succeeds
 - Uses GCP Secret Manager for Amazon Ads credentials
 - Runs with minimal IAM permissions
 

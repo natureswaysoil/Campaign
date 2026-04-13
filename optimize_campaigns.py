@@ -30,10 +30,10 @@ BASE_URLS = {
     "fe": "https://advertising-api-fe.amazon.com",
 }
 
-PEAK_START = int(os.getenv("PEAK_HOURS_START", "18"))
-PEAK_END = int(os.getenv("PEAK_HOURS_END", "23"))
+PEAK_START = int(os.getenv("PEAK_HOURS_START", "19"))
+PEAK_END = int(os.getenv("PEAK_HOURS_END", "22"))
 OFF_START = int(os.getenv("OFF_PEAK_START", "0"))
-OFF_END = int(os.getenv("OFF_PEAK_END", "6"))
+OFF_END = int(os.getenv("OFF_PEAK_END", "8"))
 
 WINNER_MIN_CLICKS = int(os.getenv("WINNER_MIN_CLICKS", "8"))
 WINNER_MIN_ORDERS = int(os.getenv("WINNER_MIN_ORDERS", "2"))
@@ -72,12 +72,19 @@ def utc_now_iso() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
-def current_hour_local() -> int:
-    return datetime.datetime.now().hour
+def current_hour_eastern() -> int:
+    """Return current hour in US/Eastern time (handles EST/EDT automatically)."""
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz
+        tz = pytz.timezone("America/New_York")
+    return datetime.datetime.now(tz).hour
 
 
 def get_bid_mode() -> str:
-    h = current_hour_local()
+    h = current_hour_eastern()
     if PEAK_START <= h <= PEAK_END:
         return "PEAK"
     if OFF_START <= h <= OFF_END:

@@ -5,21 +5,22 @@ set -e
 PROJECT_ID="amazon-ppc-bid-optimizer"
 REGION="us-central1"
 SERVICE_NAME="campaign-optimizer"
+IMAGE_URI="us-central1-docker.pkg.dev/${PROJECT_ID}/amazon-ads-autopilot/app:latest"
 
 echo "Deploying Campaign Optimizer to Cloud Run..."
 
 # Build and deploy
-gcloud builds submit --tag gcr.io/${PROJECT_ID}/${SERVICE_NAME} \
+gcloud builds submit --tag "${IMAGE_URI}" \
   --project=${PROJECT_ID}
 
 gcloud run deploy ${SERVICE_NAME} \
-  --image gcr.io/${PROJECT_ID}/${SERVICE_NAME} \
+  --image "${IMAGE_URI}" \
   --platform managed \
   --region ${REGION} \
   --no-allow-unauthenticated \
   --set-env-vars GCP_PROJECT_ID=${PROJECT_ID},PRIORITY_FILTER=1 \
-  --set-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest \
-  --timeout 900 \
+  --set-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest,DAILY_OPTIMIZER_TOKEN=DAILY_OPTIMIZER_TOKEN:latest \
+  --timeout 1800 \
   --memory 1Gi \
   --project=${PROJECT_ID}
 

@@ -9,6 +9,10 @@ SCHEDULER_JOB_NAME="daily-campaign-optimizer"
 
 echo "Setting up Cloud Scheduler..."
 
+DAILY_OPTIMIZER_TOKEN=$(gcloud secrets versions access latest \
+  --secret=DAILY_OPTIMIZER_TOKEN \
+  --project=${PROJECT_ID})
+
 # Get the service URL
 SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
   --region ${REGION} \
@@ -53,8 +57,10 @@ gcloud scheduler jobs create http ${SCHEDULER_JOB_NAME} \
   --location=${REGION} \
   --schedule="0 9 * * *" \
   --time-zone="America/New_York" \
-  --uri="${SERVICE_URL}" \
+  --uri="${SERVICE_URL}/api/run-daily-optimization" \
   --http-method=POST \
+  --headers="Content-Type=application/json,X-Daily-Optimizer-Token=${DAILY_OPTIMIZER_TOKEN}" \
+  --message-body='{"apply_campaign_pauses_live":true,"apply_negatives_live":true,"apply_winners_live":true,"pause_no_sales_campaigns":true,"min_clicks_for_no_sales_pause":10,"lookback_days":14,"pause_acos_threshold":0.40,"prime_high_bid_multiplier":1.25,"off_prime_bid_multiplier":0.35}' \
   --oidc-service-account-email=${SA_EMAIL} \
   --project=${PROJECT_ID}
 
