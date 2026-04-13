@@ -757,6 +757,8 @@ def retune_existing_bids_step(client: AmazonAdsClient) -> List[Dict[str, Any]]:
                 "keywordId": str(keyword_id),
                 "campaignId": str(cid),
                 "adGroupId": str(ad_group_id),
+                "keywordText": str(keyword_text),
+                "matchType": match_type,
                 "bid": applied,
                 "state": kw.get("state", "ENABLED"),
             })
