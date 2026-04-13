@@ -450,12 +450,21 @@ class AmazonAdsClient:
                     return match.group(1)
             raise
 
-    def wait_for_report(self, report_id: str, timeout_loops: int = 180, sleep_seconds: int = 10) -> str:
-        for _ in range(timeout_loops):
-            status = self.get_json(
-                f"/reporting/reports/{report_id}",
-                accept=MEDIA_TYPES["json"],
-            )
+    def wait_for_report(self, report_id: str, timeout_loops: int = 180, sleep_seconds: int = 15) -> str:
+        for attempt in range(timeout_loops):
+            try:
+                status = self.get_json(
+                    f"/reporting/reports/{report_id}",
+                    accept=MEDIA_TYPES["json"],
+                )
+            except RuntimeError as e:
+                if "429" in str(e) or "Throttled" in str(e):
+                    backoff = min(60, sleep_seconds * 2)
+                    logger.warning("Report status throttled, backing off %ds (attempt %d)", backoff, attempt)
+                    time.sleep(backoff)
+                    continue
+                raise
+
             state = status.get("status")
             if state == "SUCCESS":
                 location = status.get("location") or status.get("url")
