@@ -291,7 +291,7 @@ class AmazonAdsClient:
         token = payload.get("access_token")
         if not token:
             raise RuntimeError(f"Failed to obtain access token: {payload}")
-        return token
+        return token.strip()
 
     def headers(self, content_type: str, accept: Optional[str] = None) -> Dict[str, str]:
         return {
