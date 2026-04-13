@@ -860,8 +860,9 @@ def apply_negatives(
 def apply_winners(
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
 ) -> JSONResponse:
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, x_daily_optimizer_token)
     try:
         lookback_days = int(payload.get("lookback_days", 14))
         fallback_winner_bid = float(payload.get("winner_bid", DEFAULT_WINNER_BID))
@@ -902,8 +903,11 @@ def apply_winners(
 
 
 @app.post("/api/retune-existing-bids")
-def retune_existing_bids(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    verify_internal_token(authorization)
+def retune_existing_bids(
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
     try:
         client = AmazonAdsClient()
         bids_updated = retune_existing_bids_step(client)
@@ -930,8 +934,9 @@ def retune_existing_bids(authorization: Optional[str] = Header(default=None)) ->
 def run_daily_optimization(
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
 ) -> JSONResponse:
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, x_daily_optimizer_token)
 
     try:
         apply_negatives_live = bool(payload.get("apply_negatives_live", True))
