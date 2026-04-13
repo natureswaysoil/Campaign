@@ -399,8 +399,8 @@ class AmazonAdsClient:
                         "matchType": str(match_type).upper(),
                     }]
                 },
-                content_type=MEDIA_TYPES["keywords_v3"],
-                accept=MEDIA_TYPES["keywords_v3"],
+                content_type=MEDIA_TYPES["json"],
+                accept=MEDIA_TYPES["json"],
             )
             recs = data.get("recommendations", [])
             if not recs:
