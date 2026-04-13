@@ -173,23 +173,35 @@ def unique_in_order(items: List[str]) -> List[str]:
     return out
 
 
+# Peak/off-peak multipliers — used when Amazon suggested bids unavailable
+PEAK_MULTIPLIER     = float(os.getenv("PEAK_BID_MULTIPLIER",     "1.30"))  # +30% during prime
+OFF_PEAK_MULTIPLIER = float(os.getenv("OFF_PEAK_BID_MULTIPLIER", "0.70"))  # -30% overnight
+
 def choose_bid(rec: Dict[str, float], fallback: float) -> Tuple[float, float, float]:
     mode = get_bid_mode()
-    low = float(rec.get("low") or 0.0)
-    high = float(rec.get("high") or 0.0)
+    low      = float(rec.get("low")       or 0.0)
+    high     = float(rec.get("high")      or 0.0)
     suggested = float(rec.get("suggested") or 0.0)
 
-    if mode == "PEAK":
-        applied = high or suggested or fallback
-    elif mode == "OFF_PEAK":
-        applied = low or suggested or fallback
-    else:
-        if low and high:
-            applied = round((low + high) / 2.0, 2)
+    # Use Amazon suggested bids if available
+    if low > 0 and high > 0:
+        if mode == "PEAK":
+            applied = high
+        elif mode == "OFF_PEAK":
+            applied = low
         else:
-            applied = suggested or fallback
+            applied = round((low + high) / 2.0, 2)
+        return round(low, 2), round(high, 2), round(applied, 2)
 
-    return round(low, 2), round(high, 2), round(float(applied), 2)
+    # Fallback: apply multiplier to current bid based on time of day
+    if mode == "PEAK":
+        applied = round(fallback * PEAK_MULTIPLIER, 2)
+    elif mode == "OFF_PEAK":
+        applied = round(fallback * OFF_PEAK_MULTIPLIER, 2)
+    else:
+        applied = round(fallback, 2)
+
+    return round(low, 2), round(high, 2), applied
 
 
 def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
