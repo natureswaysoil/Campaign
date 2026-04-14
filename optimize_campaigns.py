@@ -1001,7 +1001,14 @@ def optimizer_history() -> Dict[str, Any]:
 
 @app.get("/api/dashboard-data")
 def dashboard_data() -> JSONResponse:
-    return JSONResponse(read_cache())
+    cache = read_cache()
+    if not cache.get("campaigns"):
+        try:
+            logger.info("Cache empty — auto-rebuilding dashboard cache")
+            cache = build_dashboard_cache(lookback_days=14)
+        except Exception as e:
+            logger.warning("Auto cache rebuild failed: %s", e)
+    return JSONResponse(cache)
 
 
 @app.post("/api/refresh-dashboard-cache")
