@@ -993,8 +993,20 @@ def apply_optimization(
 
         client = AmazonAdsClient()
 
-        # Check status — fail fast if not ready
-        status = client.get_json(f"/reporting/reports/{report_id}", accept=MEDIA_TYPES["json"])
+        # Check status with throttle retry
+        status = None
+        for attempt in range(5):
+            try:
+                status = client.get_json(f"/reporting/reports/{report_id}", accept=MEDIA_TYPES["json"])
+                break
+            except RuntimeError as e:
+                if "429" in str(e) or "Throttled" in str(e):
+                    time.sleep(30 * (attempt + 1))
+                    continue
+                raise
+        if status is None:
+            return JSONResponse({"error": True, "message": "Report status check throttled, try again in a few minutes"}, status_code=429)
+
         state = status.get("status")
         if state != "SUCCESS":
             return JSONResponse({
