@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from google.cloud import storage as gcs_storage
 
 app = FastAPI(title="Amazon PPC Optimizer")
 
@@ -634,6 +635,47 @@ def build_dashboard_cache(lookback_days: int = 14) -> Dict[str, Any]:
     return cache
 
 
+GCS_BUCKET = os.getenv("GCS_BUCKET", "amazon-ppc-bid-optimizer-state")
+GCS_REPORT_KEY = "pending_report.json"
+
+def save_pending_report(report_id: str, start_date: str, end_date: str, params: dict) -> None:
+    try:
+        client = gcs_storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(GCS_REPORT_KEY)
+        blob.upload_from_string(json.dumps({
+            "report_id": report_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "params": params,
+            "requested_at": utc_now_iso(),
+        }))
+        logger.info("Saved pending report %s to GCS", report_id)
+    except Exception as e:
+        logger.warning("Failed to save pending report to GCS: %s", e)
+
+def load_pending_report() -> Optional[dict]:
+    try:
+        client = gcs_storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(GCS_REPORT_KEY)
+        if not blob.exists():
+            return None
+        return json.loads(blob.download_as_text())
+    except Exception as e:
+        logger.warning("Failed to load pending report from GCS: %s", e)
+        return None
+
+def clear_pending_report() -> None:
+    try:
+        client = gcs_storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(GCS_REPORT_KEY)
+        if blob.exists():
+            blob.delete()
+    except Exception as e:
+        logger.warning("Failed to clear pending report from GCS: %s", e)
+
 def fetch_search_term_classification(lookback_days: int) -> Tuple[AmazonAdsClient, Dict[str, Any], str, str, List[Dict[str, Any]]]:
     client = AmazonAdsClient()
     start_date = iso_date_days_ago(lookback_days)
@@ -932,6 +974,84 @@ def apply_winners(
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
 
 
+@app.post("/api/apply-optimization")
+def apply_optimization(
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Phase 2: download completed report and apply winners/negatives."""
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        pending = load_pending_report()
+        if not pending:
+            return JSONResponse({"error": True, "message": "No pending report found in GCS"}, status_code=404)
+
+        report_id = pending["report_id"]
+        params = pending.get("params", {})
+        start_date = pending["start_date"]
+        end_date = pending["end_date"]
+
+        client = AmazonAdsClient()
+
+        # Check status — fail fast if not ready
+        status = client.get_json(f"/reporting/reports/{report_id}", accept=MEDIA_TYPES["json"])
+        state = status.get("status")
+        if state != "SUCCESS":
+            return JSONResponse({
+                "error": True,
+                "message": f"Report not ready yet (status={state}). Try again later.",
+                "report_id": report_id,
+            }, status_code=202)
+
+        location = status.get("location") or status.get("url")
+        if not location:
+            return JSONResponse({"error": True, "message": "Report SUCCESS but no download URL"}, status_code=500)
+
+        rows = parse_report_json_bytes(client.download_binary(location))
+        classified = classify_terms(rows)
+
+        negatives_applied = []
+        winners_applied = []
+
+        if params.get("apply_negatives_live", True):
+            negatives_applied = apply_negatives_step(client, classified)
+
+        if params.get("apply_winners_live", True):
+            winners_applied = apply_winners_step(client, classified, float(params.get("winner_bid", DEFAULT_WINNER_BID)))
+
+        clear_pending_report()
+
+        entry = {
+            "timestamp": utc_now_iso(),
+            "action": "apply_optimization",
+            "report_id": report_id,
+            "date_range": {"start": start_date, "end": end_date},
+            "rows_analyzed": len(rows),
+            "winners_found": len(classified["winners"]),
+            "negatives_found": len(classified["negatives"]),
+            "winners_applied_count": len(winners_applied),
+            "negatives_applied_count": len(negatives_applied),
+            "bid_mode": get_bid_mode(),
+        }
+        save_optimizer_history(entry)
+
+        return JSONResponse({
+            "success": True,
+            "action": "apply_optimization",
+            "report_id": report_id,
+            "rows_analyzed": len(rows),
+            "winners_found": len(classified["winners"]),
+            "negatives_found": len(classified["negatives"]),
+            "winners_applied_count": len(winners_applied),
+            "negatives_applied_count": len(negatives_applied),
+            "winners_applied": winners_applied,
+            "negatives_applied": negatives_applied,
+        })
+    except Exception as e:
+        logger.exception("Apply optimization failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+
 @app.post("/api/retune-existing-bids")
 def retune_existing_bids(
     authorization: Optional[str] = Header(default=None),
@@ -979,58 +1099,45 @@ def run_daily_optimization(
         retune_existing = bool(payload.get("retune_existing_keyword_bids", False))
         lookback_days = int(payload.get("lookback_days", 14))
         fallback_winner_bid = float(payload.get("winner_bid", DEFAULT_WINNER_BID))
-        refresh_cache_after = bool(payload.get("refresh_cache_after", True))
 
-        client, classified, report_id, start_date, end_date = fetch_search_term_classification(lookback_days)
+        client = AmazonAdsClient()
+        start_date = iso_date_days_ago(lookback_days)
+        end_date = today_iso_date()
 
-        negatives_applied = []
-        winners_applied = []
-        bids_updated = []
+        report_id = client.request_report({
+            "startDate": start_date,
+            "endDate": end_date,
+            "configuration": {
+                "adProduct": "SPONSORED_PRODUCTS",
+                "groupBy": ["searchTerm"],
+                "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
+                "reportTypeId": "spSearchTerm",
+                "timeUnit": "SUMMARY",
+                "format": "GZIP_JSON",
+            }
+        })
 
-        if apply_negatives_live:
-            negatives_applied = apply_negatives_step(client, classified)
-
-        if apply_winners_live:
-            winners_applied = apply_winners_step(client, classified, fallback_winner_bid)
-
-        if retune_existing:
-            bids_updated = retune_existing_bids_step(client)
-
-        cache_result = None
-        if refresh_cache_after:
-            try:
-                cache_result = build_dashboard_cache(lookback_days=14)
-            except Exception as e:
-                logger.warning("Cache refresh after optimization failed: %s", e)
+        save_pending_report(report_id, start_date, end_date, {
+            "apply_negatives_live": apply_negatives_live,
+            "apply_winners_live": apply_winners_live,
+            "retune_existing_keyword_bids": retune_existing,
+            "winner_bid": fallback_winner_bid,
+        })
 
         entry = {
             "timestamp": utc_now_iso(),
-            "action": "run_daily_optimization",
+            "action": "report_requested",
+            "report_id": report_id,
             "lookback_days": lookback_days,
-            "winners_found": len(classified["winners"]),
-            "negatives_found": len(classified["negatives"]),
-            "winners_applied_count": len(winners_applied),
-            "negatives_applied_count": len(negatives_applied),
-            "existing_keyword_bids_updated": len(bids_updated),
-            "bid_mode": get_bid_mode(),
         }
         save_optimizer_history(entry)
 
         return JSONResponse({
             "success": True,
-            "action": "run_daily_optimization",
+            "action": "report_requested",
             "report_id": report_id,
+            "message": "Report requested. Run /api/apply-optimization in 30-60 minutes to apply results.",
             "date_range": {"start": start_date, "end": end_date},
-            "winners_found": len(classified["winners"]),
-            "negatives_found": len(classified["negatives"]),
-            "winners_applied_count": len(winners_applied),
-            "negatives_applied_count": len(negatives_applied),
-            "existing_keyword_bids_updated": len(bids_updated),
-            "bid_mode": get_bid_mode(),
-            "winners_applied": winners_applied,
-            "negatives_applied": negatives_applied,
-            "bids_updated_sample": bids_updated[:20],
-            "cache_refreshed": cache_result is not None,
         })
     except Exception as e:
         logger.exception("Daily optimization failed")

@@ -19,3 +19,4 @@ python-multipart>=0.0.12
 # Optional: Better performance in production
 uvloop>=0.21.0; platform_system != "Windows"
 httptools>=0.6.0
+google-cloud-storage>=2.16.0
