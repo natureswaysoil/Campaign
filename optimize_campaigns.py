@@ -467,7 +467,7 @@ class AmazonAdsClient:
                 raise
 
             state = status.get("status")
-            if state == "SUCCESS":
+            if state in ("SUCCESS", "COMPLETED"):
                 location = status.get("location") or status.get("url")
                 if not location:
                     raise RuntimeError(f"Report SUCCESS but no download URL: {status}")
@@ -1008,7 +1008,7 @@ def apply_optimization(
             return JSONResponse({"error": True, "message": "Report status check throttled, try again in a few minutes"}, status_code=429)
 
         state = status.get("status")
-        if state != "SUCCESS":
+        if state not in ("SUCCESS", "COMPLETED"):
             return JSONResponse({
                 "error": True,
                 "message": f"Report not ready yet (status={state}). Try again later.",
