@@ -282,7 +282,11 @@
         }
 
         function getToken() {
-            const token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
+            let token = localStorage.getItem('optimizer_token');
+            if (!token) {
+                token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
+                if (token) localStorage.setItem('optimizer_token', token);
+            }
             return token || null;
         }
 
