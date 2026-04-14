@@ -252,7 +252,10 @@
 
         async function loadDashboardData() {
             try {
-                const res = await fetch('/api/dashboard-data');
+                const token = getToken();
+                const res = await fetch('/api/dashboard-data', {
+                    headers: { 'X-Daily-Optimizer-Token': token || '' }
+                });
                 const data = await res.json();
 
                 if (!res.ok || data.error) {
