@@ -1005,8 +1005,11 @@ def dashboard_data() -> JSONResponse:
 
 
 @app.post("/api/refresh-dashboard-cache")
-def refresh_dashboard_cache(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    verify_internal_token(authorization)
+def refresh_dashboard_cache(
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
     try:
         cache = build_dashboard_cache(lookback_days=14)
         return JSONResponse({"success": True, "cache": cache})
@@ -1019,8 +1022,9 @@ def refresh_dashboard_cache(authorization: Optional[str] = Header(default=None))
 def apply_negatives(
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
 ) -> JSONResponse:
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, x_daily_optimizer_token)
     try:
         lookback_days = int(payload.get("lookback_days", 14))
         refresh_cache_after = bool(payload.get("refresh_cache_after", True))
