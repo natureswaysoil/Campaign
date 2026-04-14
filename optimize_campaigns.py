@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import csv
+import io
 import requests
 from google.cloud import storage as gcs_storage
 
@@ -842,6 +844,135 @@ def retune_existing_bids_step(client: AmazonAdsClient) -> List[Dict[str, Any]]:
             client.update_keywords(update_rows)
 
     return bids_updated
+
+
+# ========================= PRODUCTS =========================
+PRODUCTS_CSV_URL = os.getenv(
+    "PRODUCTS_CSV_URL",
+    "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv",
+)
+
+_products_cache: Optional[list] = None
+_products_cache_ts: float = 0.0
+
+def load_products() -> list:
+    global _products_cache, _products_cache_ts
+    import time
+    if _products_cache and (time.time() - _products_cache_ts) < 900:
+        return _products_cache
+    r = requests.get(PRODUCTS_CSV_URL, timeout=30)
+    r.raise_for_status()
+    reader = csv.DictReader(io.StringIO(r.text))
+    rows = [{k.strip(): (v or "").strip() for k, v in row.items()} for row in reader]
+    _products_cache = rows
+    _products_cache_ts = time.time()
+    return rows
+
+def normalized_product(p: dict) -> dict:
+    price = p.get("Selling_Price", "")
+    try:
+        pf = float(str(price).replace("$","").replace(",","").strip())
+    except:
+        pf = 25.0
+    if pf < 15: budget, bid = 12.0, 0.55
+    elif pf < 25: budget, bid = 18.0, 0.75
+    elif pf < 40: budget, bid = 25.0, 0.95
+    else: budget, bid = 35.0, 1.10
+    active = str(p.get("Active","TRUE")).strip().lower() in {"true","yes","1","y","active"}
+    return {
+        "product_id": p.get("Product_ID",""),
+        "sku": p.get("SKU",""),
+        "asin": p.get("ASIN",""),
+        "title": p.get("Title",""),
+        "price": price,
+        "active": active,
+        "category": p.get("Category",""),
+        "suggested_budget": budget,
+        "suggested_bid": bid,
+    }
+
+@app.get("/api/products")
+def api_products() -> JSONResponse:
+    try:
+        products = [normalized_product(r) for r in load_products()]
+        return JSONResponse({"count": len(products), "products": products})
+    except Exception as e:
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+@app.post("/api/create-campaign-from-product")
+def api_create_campaign(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        key = (payload.get("product_id") or payload.get("sku") or "").lower().strip()
+        if not key:
+            return JSONResponse({"error": True, "message": "product_id or sku required"}, status_code=400)
+        product = next((normalized_product(r) for r in load_products()
+                        if r.get("Product_ID","").lower()==key or r.get("SKU","").lower()==key), None)
+        if not product:
+            return JSONResponse({"error": True, "message": "Product not found"}, status_code=404)
+
+        client = AmazonAdsClient()
+        import datetime, re, unicodedata, html as html_mod
+
+        def sanitize(name):
+            name = html_mod.unescape(name or "")
+            name = unicodedata.normalize("NFKD", name).encode("ascii","ignore").decode("ascii")
+            return re.sub(r"\s+", " ", name).strip()
+
+        start_date = datetime.date.today().isoformat()
+        camp_resp = client.post("/sp/campaigns", {
+            "campaigns": [{
+                "name": f"{sanitize(product['title'])[:80]} | MANUAL | {start_date}",
+                "targetingType": "MANUAL",
+                "state": "ENABLED",
+                "budget": {"budget": product["suggested_budget"], "budgetType": "DAILY"},
+                "startDate": start_date,
+            }]
+        }, content_type="application/vnd.spcampaign.v3+json",
+           accept="application/vnd.spcampaign.v3+json")
+
+        camp_id = camp_resp.get("campaigns",{}).get("success",[{}])[0].get("campaign",{}).get("campaignId")
+        if not camp_id:
+            return JSONResponse({"error": True, "message": f"Campaign creation failed: {camp_resp}"}, status_code=500)
+
+        ag_resp = client.post("/sp/adGroups", {
+            "adGroups": [{
+                "name": "Main Ad Group",
+                "campaignId": str(camp_id),
+                "state": "ENABLED",
+                "defaultBid": product["suggested_bid"],
+            }]
+        }, content_type="application/vnd.spadgroup.v3+json",
+           accept="application/vnd.spadgroup.v3+json")
+
+        ag_id = ag_resp.get("adGroups",{}).get("success",[{}])[0].get("adGroup",{}).get("adGroupId")
+
+        client.post("/sp/productAds", {
+            "productAds": [{
+                "campaignId": str(camp_id),
+                "adGroupId": str(ag_id),
+                "asin": product["asin"],
+                "state": "ENABLED",
+            }]
+        }, content_type="application/vnd.spproductad.v3+json",
+           accept="application/vnd.spproductad.v3+json")
+
+        return JSONResponse({
+            "success": True,
+            "campaign_id": camp_id,
+            "ad_group_id": ag_id,
+            "product": product["title"],
+            "asin": product["asin"],
+            "daily_budget": product["suggested_budget"],
+            "starting_bid": product["suggested_bid"],
+        })
+    except Exception as e:
+        logger.exception("Campaign creation failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
 
 
 @app.get("/", response_class=HTMLResponse)
