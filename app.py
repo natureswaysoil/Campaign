@@ -80,9 +80,9 @@ BATCH_ITEM_KEYS = {
 }
 
 STOPWORDS = {
+    # True noise words only — do NOT add product descriptors
     "the", "and", "for", "with", "from", "your", "you", "our", "this", "that",
-    "soil", "organic", "liquid", "natural", "plants", "plant", "garden", "lawn",
-    "safe", "kids", "pets", "beneficial", "nature", "way"
+    "also", "very", "just", "any", "all", "each", "both", "into", "more",
 }
 
 OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
