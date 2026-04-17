@@ -969,7 +969,22 @@ def api_create_campaign(
         }, content_type="application/vnd.spcampaign.v3+json",
            accept="application/vnd.spcampaign.v3+json")
 
-        camp_id = camp_resp.get("campaigns",{}).get("success",[{}])[0].get("campaign",{}).get("campaignId")
+        # Safely extract campaign ID — handle empty success list or alternate response shapes
+        def extract_id(resp, batch_key, item_key, id_key):
+            """Pull an ID out of v3 batch response regardless of nesting shape."""
+            # Shape 1: {batch_key: {success: [{item_key: {id_key: X}}]}}
+            inner = resp.get(batch_key, {})
+            if isinstance(inner, dict):
+                success = inner.get("success", [])
+                if success:
+                    return (success[0].get(item_key) or success[0]).get(id_key)
+            # Shape 2: {batch_key: [{id_key: X}]}
+            if isinstance(inner, list) and inner:
+                return inner[0].get(id_key)
+            # Shape 3: flat {id_key: X}
+            return resp.get(id_key)
+
+        camp_id = extract_id(camp_resp, "campaigns", "campaign", "campaignId")
         if not camp_id:
             return JSONResponse({"error": True, "message": f"Campaign creation failed: {camp_resp}"}, status_code=500)
 
@@ -983,7 +998,7 @@ def api_create_campaign(
         }, content_type="application/vnd.spadgroup.v3+json",
            accept="application/vnd.spadgroup.v3+json")
 
-        ag_id = ag_resp.get("adGroups",{}).get("success",[{}])[0].get("adGroup",{}).get("adGroupId")
+        ag_id = extract_id(ag_resp, "adGroups", "adGroup", "adGroupId")
 
         client.post("/sp/productAds", {
             "productAds": [{
@@ -1013,7 +1028,14 @@ def api_create_campaign(
 def dashboard() -> HTMLResponse:
     path = BASE_DIR / "templates" / "dashboard.html"
     try:
-        return HTMLResponse(path.read_text(encoding="utf-8"))
+        html = path.read_text(encoding="utf-8")
+        # Inject token so browser never prompts — replaced at serve time
+        token = os.getenv("DAILY_OPTIMIZER_TOKEN", "")
+        html = html.replace(
+            "/* __SERVER_TOKEN__ */",
+            "var SERVER_TOKEN = " + json.dumps(token) + ";",
+        )
+        return HTMLResponse(html)
     except Exception as e:
         logger.exception("Dashboard load failed")
         return HTMLResponse(
