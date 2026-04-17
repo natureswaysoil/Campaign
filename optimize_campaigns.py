@@ -330,6 +330,18 @@ class AmazonAdsClient:
             raise RuntimeError(response.text)
         return response.json() if response.text.strip() else {}
 
+    def put(self, endpoint: str, body: Any, *, content_type: str, accept: Optional[str] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}{endpoint}"
+        response = self.session.put(
+            url,
+            headers=self.headers(content_type=content_type, accept=accept),
+            json=body,
+            timeout=60,
+        )
+        if not response.ok:
+            raise RuntimeError(response.text)
+        return response.json() if response.text.strip() else {}
+
     def get_json(self, endpoint: str, *, accept: str) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"
         response = self.session.get(
@@ -382,7 +394,7 @@ class AmazonAdsClient:
         )
 
     def update_keywords(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        return self.post(
+        return self.put(
             "/sp/keywords",
             {"keywords": rows},
             content_type=MEDIA_TYPES["keywords_v3"],
@@ -423,10 +435,32 @@ class AmazonAdsClient:
                 return {}
 
             rec = recs[0]
+            # The v3 API nests bid data under a "bid" object with keys
+            # "suggested", "rangeStart", "rangeEnd". Fall back to flat field
+            # names used by older API versions.
+            bid_obj = rec.get("bid") if isinstance(rec.get("bid"), dict) else {}
+            suggested = (
+                bid_obj.get("suggested")
+                or rec.get("suggestedBid")
+                or rec.get("recommendedBid")
+                or 0
+            )
+            low = (
+                bid_obj.get("rangeStart")
+                or rec.get("suggestedBidLow")
+                or rec.get("rangeStart")
+                or suggested
+            )
+            high = (
+                bid_obj.get("rangeEnd")
+                or rec.get("suggestedBidHigh")
+                or rec.get("rangeEnd")
+                or suggested
+            )
             return {
-                "low": rec.get("suggestedBidLow"),
-                "high": rec.get("suggestedBidHigh"),
-                "suggested": rec.get("suggestedBid"),
+                "low": float(low or 0),
+                "high": float(high or 0),
+                "suggested": float(suggested or 0),
             }
         except Exception as e:
             logger.warning("Bid recommendation unavailable for %s: %s", keyword, e)
@@ -950,6 +984,8 @@ def api_create_campaign(
            accept="application/vnd.spadgroup.v3+json")
 
         ag_id = ag_resp.get("adGroups",{}).get("success",[{}])[0].get("adGroup",{}).get("adGroupId")
+        if not ag_id:
+            return JSONResponse({"error": True, "message": f"Ad group creation failed: {ag_resp}"}, status_code=500)
 
         client.post("/sp/productAds", {
             "productAds": [{
