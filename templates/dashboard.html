@@ -1,376 +1,595 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Amazon Ads Campaign Manager</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        body { font-family: system-ui, sans-serif; }
-        .card { transition: all 0.25s ease; }
-        .card:hover { transform: translateY(-4px); }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nature's Way Soil — Ad Campaign Manager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0d0f0a; --surface: #141710; --surface2: #1b1f16; --border: #2a2f23;
+      --accent: #7ec850; --accent2: #c8e86c; --warn: #e8a23c; --danger: #e85c4a;
+      --blue: #5ca0e8; --text: #e8ead4; --muted: #8a9077;
+      --card-radius: 16px; --tr: 220ms cubic-bezier(0.4,0,0.2,1);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Mono', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    /* HEADER */
+    header { padding: 22px 36px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; background: var(--surface); }
+    .logo { font-family: 'Syne', sans-serif; font-size: 20px; font-weight: 800; color: var(--accent); }
+    .logo span { color: var(--muted); font-weight: 600; font-size: 14px; margin-left: 6px; }
+    .hdr-right { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+    /* BUTTONS */
+    .btn { font-family: 'DM Mono', monospace; font-size: 11px; font-weight: 500; padding: 8px 15px; border-radius: 7px; border: 1px solid transparent; cursor: pointer; transition: var(--tr); letter-spacing: 0.03em; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .btn-ghost { background: transparent; border-color: var(--border); color: var(--muted); }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-primary { background: var(--accent); color: #0d0f0a; font-weight: 700; border-color: var(--accent); }
+    .btn-primary:hover { background: var(--accent2); border-color: var(--accent2); }
+    .btn-warn { background: transparent; border-color: var(--warn); color: var(--warn); }
+    .btn-warn:hover { background: rgba(232,162,60,0.1); }
+    .btn-danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+    .btn-accent { background: transparent; border-color: var(--accent); color: var(--accent); }
+    .btn-accent:hover { background: rgba(126,200,80,0.1); }
+    .btn-blue { background: transparent; border-color: var(--blue); color: var(--blue); }
+    .btn-blue:hover { background: rgba(92,160,232,0.1); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+    .btn-sm { padding: 5px 11px; font-size: 10px; }
+    .btn-lg { padding: 10px 22px; font-size: 12px; }
+
+    /* TABS */
+    .tabs { padding: 0 36px; border-bottom: 1px solid var(--border); background: var(--surface); display: flex; }
+    .tab { font-family: 'DM Mono', monospace; font-size: 11px; font-weight: 500; padding: 13px 20px; cursor: pointer; border: none; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; transition: var(--tr); letter-spacing: 0.06em; text-transform: uppercase; }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* LAYOUT */
+    main { padding: 28px 36px; }
+
+    /* BID MODE BANNER */
+    .bid-banner { border-radius: var(--card-radius); padding: 14px 20px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border: 1px solid; }
+    .bid-banner.PEAK { background: rgba(126,200,80,0.07); border-color: rgba(126,200,80,0.3); }
+    .bid-banner.OFF_PEAK { background: rgba(92,160,232,0.07); border-color: rgba(92,160,232,0.3); }
+    .bid-banner.NORMAL { background: rgba(138,144,119,0.07); border-color: rgba(138,144,119,0.25); }
+    .bid-banner.UNKNOWN { background: rgba(138,144,119,0.07); border-color: var(--border); }
+    .banner-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .bid-mode-tag { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; letter-spacing: 0.05em; }
+    .bid-mode-tag.PEAK { color: var(--accent); }
+    .bid-mode-tag.OFF_PEAK { color: var(--blue); }
+    .bid-mode-tag.NORMAL { color: var(--warn); }
+    .bid-mode-tag.UNKNOWN { color: var(--muted); }
+    .banner-meta { font-size: 11px; color: var(--muted); }
+    .banner-rule { font-size: 11px; padding: 3px 10px; border-radius: 100px; font-weight: 500; }
+    .PEAK .banner-rule { background: rgba(126,200,80,0.15); color: var(--accent); }
+    .OFF_PEAK .banner-rule { background: rgba(92,160,232,0.15); color: var(--blue); }
+    .NORMAL .banner-rule { background: rgba(232,162,60,0.12); color: var(--warn); }
+    .UNKNOWN .banner-rule { background: rgba(138,144,119,0.12); color: var(--muted); }
+
+    /* SUMMARY CARDS */
+    .summary-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 22px; }
+    @media(max-width:900px){ .summary-grid { grid-template-columns: repeat(2,1fr); } }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 18px 20px; }
+    .stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 6px; }
+    .stat-value { font-family: 'Syne', sans-serif; font-size: 26px; font-weight: 700; }
+    .stat-value.green { color: var(--accent); }
+    .stat-value.warn  { color: var(--warn); }
+    .stat-value.red   { color: var(--danger); }
+    .stat-value.blue  { color: var(--blue); }
+
+    /* SECTION */
+    .sec-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 10px; flex-wrap: wrap; }
+    .sec-title { font-family: 'Syne', sans-serif; font-size: 16px; font-weight: 700; }
+    .sec-note { font-size: 11px; color: var(--muted); }
+
+    /* CAMPAIGN GRID */
+    .camp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(370px,1fr)); gap: 14px; }
+
+    /* CAMPAIGN CARD */
+    .camp-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 20px; transition: var(--tr); }
+    .camp-card:hover { border-color: rgba(126,200,80,0.3); }
+    .camp-hdr { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+    .camp-name { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; line-height: 1.35; }
+    .camp-id { font-size: 10px; color: var(--muted); margin-top: 3px; }
+    .metrics-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-top: 12px; }
+    .m-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 3px; }
+    .m-val { font-size: 14px; font-weight: 500; }
+    .m-val.green { color: var(--accent); }
+    .m-val.warn  { color: var(--warn); }
+    .m-val.red   { color: var(--danger); }
+    .hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+    /* BID WINDOW SECTION inside card */
+    .bid-window { background: var(--surface2); border-radius: 10px; padding: 12px 14px; margin-top: 12px; }
+    .bid-window-title { font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+    .bid-slots { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+    .bid-slot { text-align: center; }
+    .bid-slot-label { font-size: 9px; color: var(--muted); margin-bottom: 3px; }
+    .bid-slot-val { font-size: 13px; font-weight: 600; }
+    .bid-slot-val.low  { color: var(--blue); }
+    .bid-slot-val.high { color: var(--accent); }
+    .bid-slot-val.applied { color: var(--warn); }
+    .bid-slot-val.applied.PEAK { color: var(--accent); }
+    .bid-slot-val.applied.OFF_PEAK { color: var(--blue); }
+    .mode-badge { font-size: 9px; padding: 2px 8px; border-radius: 100px; font-weight: 600; letter-spacing: 0.04em; }
+    .mode-badge.PEAK    { background: rgba(126,200,80,0.15); color: var(--accent); }
+    .mode-badge.OFF_PEAK{ background: rgba(92,160,232,0.15); color: var(--blue); }
+    .mode-badge.NORMAL  { background: rgba(232,162,60,0.12); color: var(--warn); }
+    .mode-badge.UNKNOWN { background: rgba(138,144,119,0.12); color: var(--muted); }
+
+    /* PRODUCTS */
+    .prod-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); overflow: hidden; }
+    .prod-bar { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .srch { font-family: 'DM Mono', monospace; font-size: 12px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 8px 13px; border-radius: 7px; outline: none; width: 260px; transition: var(--tr); }
+    .srch:focus { border-color: var(--accent); }
+    .srch::placeholder { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--surface2); }
+    th { font-size: 9px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    td { padding: 12px 14px; font-size: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tbody tr { transition: var(--tr); }
+    tbody tr:hover { background: rgba(126,200,80,0.04); }
+    .asin { font-size: 10px; background: var(--surface2); color: var(--accent); border: 1px solid rgba(126,200,80,0.2); padding: 2px 7px; border-radius: 4px; }
+    .dot-on  { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .dot-off { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--danger); }
+
+    /* MODAL */
+    .overlay { display: none; position: fixed; inset: 0; background: rgba(13,15,10,0.88); z-index: 1000; align-items: center; justify-content: center; padding: 20px; }
+    .overlay.open { display: flex; }
+    .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 28px; width: 100%; max-width: 520px; animation: mIn 180ms ease; }
+    @keyframes mIn { from { transform: translateY(16px) scale(0.97); opacity: 0; } to { transform: none; opacity: 1; } }
+    .modal-title { font-family: 'Syne', sans-serif; font-size: 17px; font-weight: 700; color: var(--accent); margin-bottom: 4px; }
+    .modal-sub { font-size: 11px; color: var(--muted); margin-bottom: 22px; }
+    .f-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 5px; }
+    .f-val { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 13px; font-size: 12px; }
+    .f-inp { font-family: 'DM Mono', monospace; font-size: 13px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 9px 13px; border-radius: 7px; width: 100%; outline: none; transition: var(--tr); }
+    .f-inp:focus { border-color: var(--accent); }
+    .f-row { margin-bottom: 14px; }
+    .f-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+    .modal-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 22px; }
+    .bid-preview { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; text-align: center; margin-bottom: 14px; }
+    .bp-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+    .bp-val { font-size: 13px; font-weight: 600; }
+
+    /* TOAST */
+    .toast { position: fixed; bottom: 26px; right: 26px; z-index: 2000; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 10px; padding: 13px 18px; font-size: 12px; max-width: 320px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); transform: translateX(130%); transition: transform 300ms cubic-bezier(0.4,0,0.2,1); line-height: 1.4; }
+    .toast.show { transform: translateX(0); }
+    .toast.err { border-left-color: var(--danger); }
+
+    /* MISC */
+    .pill { font-size: 10px; padding: 3px 10px; border-radius: 100px; font-weight: 500; }
+    .pill-green { background: rgba(126,200,80,0.15); color: var(--accent); }
+    .pill-blue  { background: rgba(92,160,232,0.15); color: var(--blue); }
+    .pill-gray  { background: rgba(138,144,119,0.12); color: var(--muted); }
+    .loader { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(126,200,80,0.25); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.65s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .empty { text-align: center; padding: 52px 20px; color: var(--muted); font-size: 12px; }
+    .empty .ico { font-size: 30px; margin-bottom: 10px; }
+  </style>
 </head>
-<body class="bg-gray-50">
-    <div class="max-w-7xl mx-auto px-6 py-8">
-        <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-8">
-            <div>
-                <h1 class="text-4xl font-bold text-gray-900">Amazon Ads Campaign Manager</h1>
-                <p class="text-gray-600">Nature's Way Soil • ENABLED Campaigns Only</p>
-            </div>
+<body>
 
-            <div class="flex flex-wrap gap-3">
-                <button onclick="loadDashboardData()"
-                    class="bg-white border border-gray-300 hover:bg-gray-100 text-gray-800 px-6 py-3 rounded-2xl font-semibold shadow-sm">
-                    Refresh View
-                </button>
+<header>
+  <div>
+    <div class="logo">Nature's Way Soil <span>/ Amazon Ad Manager</span></div>
+  </div>
+  <div class="hdr-right">
+    <button class="btn btn-ghost btn-sm" onclick="loadAll()">⟳ Refresh</button>
+    <button class="btn btn-ghost btn-sm" onclick="refreshCache()">Refresh Cache</button>
+    <button class="btn btn-warn btn-sm" onclick="applyNegatives()">Apply Negatives</button>
+    <button class="btn btn-accent btn-sm" onclick="applyWinners()">Add Winners</button>
+    <button class="btn btn-blue btn-sm" onclick="retuneBids()">↻ Retune Bids</button>
+    <button class="btn btn-primary btn-lg" onclick="fullOptimize()">▶ Full Optimization</button>
+  </div>
+</header>
 
-                <button onclick="refreshCacheNow()"
-                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
-                    Refresh Metrics Cache
-                </button>
+<div class="tabs">
+  <button class="tab active" id="tab-c" onclick="switchTab('c')">Campaigns</button>
+  <button class="tab" id="tab-p" onclick="switchTab('p')">Products &amp; Launch</button>
+</div>
 
-                <button onclick="applyNegativesNow()"
-                    class="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
-                    Apply Negatives
-                </button>
-
-                <button onclick="applyWinnersNow()"
-                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
-                    Add Winners
-                </button>
-
-                <button onclick="retuneBidsNow()"
-                    class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-2xl font-semibold shadow-sm">
-                    Retune Existing Bids
-                </button>
-
-                <button onclick="runFullOptimizationNow()"
-                    class="bg-slate-800 hover:bg-slate-900 text-white px-8 py-3 rounded-2xl font-semibold shadow-lg flex items-center gap-2">
-                    ▶️ Run Full Optimization
-                </button>
-            </div>
-        </div>
-
-        <div id="summary" class="bg-white rounded-3xl shadow p-8 mb-10 grid grid-cols-2 md:grid-cols-4 gap-6 text-center"></div>
-
-        <div id="statusBox" class="bg-white rounded-3xl shadow p-6 mb-8">
-            <div class="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
-                <div>
-                    <h2 class="text-xl font-semibold text-gray-900">Optimizer Status</h2>
-                    <p class="text-gray-600 mt-1">Run jobs one step at a time or use the full optimization button.</p>
-                </div>
-                <div class="text-sm text-gray-500">
-                    Page loaded: <span id="time">—</span><br>
-                    Cache refreshed: <span id="cacheTime">—</span>
-                </div>
-            </div>
-
-            <div id="optimizerStatus" class="mt-4 text-sm text-gray-700">
-                Loading status...
-            </div>
-        </div>
-
-        <div class="bg-white rounded-3xl shadow p-8">
-            <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-3 mb-6">
-                <h2 class="text-2xl font-semibold">
-                    Active Campaigns (<span id="count">0</span>)
-                </h2>
-                <div class="text-sm text-gray-500">
-                    Showing only state = ENABLED
-                </div>
-            </div>
-
-            <div id="list" class="grid grid-cols-1 lg:grid-cols-2 gap-6"></div>
-        </div>
+<main>
+  <!-- BID MODE BANNER -->
+  <div class="bid-banner UNKNOWN" id="bidBanner">
+    <div class="banner-left">
+      <div class="bid-mode-tag UNKNOWN" id="bannerMode">Loading...</div>
+      <div class="banner-meta" id="bannerMeta">Fetching current bid mode...</div>
     </div>
+    <div id="bannerRule" class="banner-rule">—</div>
+  </div>
 
-    <script>
-        function escapeHtml(str) {
-            return String(str || '').replace(/[&<>"']/g, function (m) {
-                return {
-                    '&': '&amp;',
-                    '<': '&lt;',
-                    '>': '&gt;',
-                    '"': '&quot;',
-                    "'": '&#39;'
-                }[m];
-            });
-        }
+  <!-- SUMMARY -->
+  <div class="summary-grid">
+    <div class="stat-card"><div class="stat-label">Total Spend (14d)</div><div class="stat-value" id="sSpend">—</div></div>
+    <div class="stat-card"><div class="stat-label">Total Sales (14d)</div><div class="stat-value green" id="sSales">—</div></div>
+    <div class="stat-card"><div class="stat-label">Portfolio ACoS</div><div class="stat-value" id="sAcos">—</div></div>
+    <div class="stat-card"><div class="stat-label">Clicks / Orders</div><div class="stat-value blue" id="sClicks">—</div></div>
+  </div>
 
-        function toMoney(value) {
-            const n = Number(value || 0);
-            return '$' + n.toFixed(2);
-        }
+  <!-- CAMPAIGNS PANEL -->
+  <div id="pC">
+    <div class="sec-hdr">
+      <div class="sec-title">Active Campaigns <span id="campCount" style="font-size:12px;color:var(--muted);font-family:'DM Mono',monospace;font-weight:400"></span></div>
+      <div class="sec-note">ENABLED only · 14-day window · bids from Amazon suggested range</div>
+    </div>
+    <div class="camp-grid" id="campGrid">
+      <div class="empty"><div class="ico">⏳</div>Loading campaigns...</div>
+    </div>
+  </div>
 
-        function toPercent(value, digits = 1) {
-            if (value === undefined || value === null || isNaN(Number(value))) return '—';
-            return (Number(value) * 100).toFixed(digits) + '%';
-        }
+  <!-- PRODUCTS PANEL -->
+  <div id="pP" style="display:none">
+    <div class="sec-hdr">
+      <div class="sec-title">Products <span id="prodCount" style="font-size:12px;color:var(--muted);font-family:'DM Mono',monospace;font-weight:400"></span></div>
+      <div class="sec-note">Click Launch to create a live Amazon SP campaign for that product</div>
+    </div>
+    <div class="prod-wrap">
+      <div class="prod-bar">
+        <input class="srch" id="srch" type="text" placeholder="Filter by title, SKU, ASIN…" oninput="filterProd()" />
+        <span style="font-size:10px;color:var(--muted)" id="prodFilter"></span>
+      </div>
+      <table>
+        <thead><tr>
+          <th></th><th>Title</th><th>SKU</th><th>ASIN</th>
+          <th>Price</th><th>Budget</th><th>Bid</th><th>Action</th>
+        </tr></thead>
+        <tbody id="prodBody">
+          <tr><td colspan="8" style="text-align:center;padding:40px;color:var(--muted)">Loading products...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
 
-        function badgeClassForAcos(acos) {
-            if (acos === undefined || acos === null || isNaN(Number(acos))) return 'text-gray-600';
-            if (Number(acos) < 0.30) return 'text-green-600';
-            if (Number(acos) < 0.50) return 'text-amber-600';
-            return 'text-red-600';
-        }
+<!-- LAUNCH MODAL -->
+<div class="overlay" id="launchOverlay">
+  <div class="modal">
+    <div class="modal-title">🚀 Launch Campaign</div>
+    <div class="modal-sub" id="lSub">Review and confirm before going live.</div>
+    <div class="f-row"><div class="f-label">Product</div><div class="f-val" id="lTitle">—</div></div>
+    <div class="f-2col">
+      <div class="f-row"><div class="f-label">ASIN</div><div class="f-val" id="lAsin">—</div></div>
+      <div class="f-row"><div class="f-label">SKU</div><div class="f-val" id="lSku">—</div></div>
+    </div>
+    <div class="f-2col">
+      <div><div class="f-label">Daily Budget ($)</div><input class="f-inp" id="lBudget" type="number" step="0.01" min="1" /></div>
+      <div><div class="f-label">Starting Bid ($)</div><input class="f-inp" id="lBid" type="number" step="0.01" min="0.02" /></div>
+    </div>
+    <div class="f-label" style="margin-bottom:8px">Amazon Suggested Bid Range (live)</div>
+    <div class="bid-preview" id="lBidPreview">
+      <div><div class="bp-label">Off-Peak (Low)</div><div class="bp-val" id="lpLow" style="color:var(--blue)">—</div></div>
+      <div><div class="bp-label">Suggested Mid</div><div class="bp-val" id="lpMid" style="color:var(--warn)">—</div></div>
+      <div><div class="bp-label">Peak (High)</div><div class="bp-val" id="lpHigh" style="color:var(--accent)">—</div></div>
+    </div>
+    <div class="f-row">
+      <div class="f-label">Keywords (auto-generated)</div>
+      <div class="f-val" id="lKw" style="font-size:10px;line-height:1.7;max-height:80px;overflow-y:auto;color:var(--muted)">—</div>
+    </div>
+    <input type="hidden" id="lPid" />
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="launchBtn" onclick="doLaunch()">🚀 Launch Live Campaign</button>
+    </div>
+  </div>
+</div>
 
-        function bidModeBadge(mode) {
-            const clean = String(mode || '').toUpperCase();
-            if (clean === 'PEAK') {
-                return '<span class="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 px-3 py-1 text-xs font-semibold">PEAK</span>';
-            }
-            if (clean === 'OFF_PEAK' || clean === 'OFF-PEAK') {
-                return '<span class="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-semibold">OFF-PEAK</span>';
-            }
-            if (clean === 'NORMAL') {
-                return '<span class="inline-flex items-center rounded-full bg-blue-100 text-blue-700 px-3 py-1 text-xs font-semibold">NORMAL</span>';
-            }
-            return '<span class="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-3 py-1 text-xs font-semibold">UNKNOWN</span>';
-        }
+<div class="toast" id="toast"></div>
 
-        function safeCampaignName(c) {
-            return escapeHtml(c.campaignName || c.name || 'Unnamed Campaign');
-        }
+<script>
+  var allProducts = [];
+  var bidMode = 'UNKNOWN';
+  var toastTmr;
 
-        function renderSummary(data) {
-            const s = data.summary || {};
-            const acos = s.acos;
+  // ── UTILS ──
+  function $$(id) { return document.getElementById(id); }
+  function money(v) { return '$' + Number(v || 0).toFixed(2); }
+  function pct(v, d) {
+    d = d === undefined ? 1 : d;
+    if (v == null || isNaN(+v)) return '—';
+    return (+v * 100).toFixed(d) + '%';
+  }
+  function acCls(v) {
+    if (v == null) return '';
+    return +v < 0.30 ? 'green' : +v < 0.50 ? 'warn' : 'red';
+  }
+  function esc(s) {
+    return String(s || '').replace(/[&<>"']/g, function(m) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
+    });
+  }
+  function toast(msg, isErr) {
+    var el = $$('toast');
+    el.textContent = msg;
+    el.className = 'toast show' + (isErr ? ' err' : '');
+    clearTimeout(toastTmr);
+    toastTmr = setTimeout(function() { el.className = 'toast'; }, 4000);
+  }
+  function getToken() {
+    var t = localStorage.getItem('nws_token');
+    if (!t) { t = prompt('Enter DAILY_OPTIMIZER_TOKEN:'); if (t) localStorage.setItem('nws_token', t); }
+    return t || '';
+  }
 
-            document.getElementById('summary').innerHTML =
-                '<div>' +
-                    '<div class="text-gray-500 text-sm">Total Spend</div>' +
-                    '<div class="text-3xl font-bold">' + toMoney(s.spend || 0) + '</div>' +
-                '</div>' +
-                '<div>' +
-                    '<div class="text-gray-500 text-sm">Total Sales</div>' +
-                    '<div class="text-3xl font-bold">' + toMoney(s.sales || 0) + '</div>' +
-                '</div>' +
-                '<div>' +
-                    '<div class="text-gray-500 text-sm">Portfolio ACoS</div>' +
-                    '<div class="text-3xl font-bold ' + badgeClassForAcos(acos) + '">' + (acos === null || acos === undefined ? '—' : toPercent(acos)) + '</div>' +
-                '</div>' +
-                '<div>' +
-                    '<div class="text-gray-500 text-sm">Total Clicks / Orders</div>' +
-                    '<div class="text-3xl font-bold">' + Number(s.clicks || 0) + ' / ' + Number(s.orders || 0) + '</div>' +
-                '</div>';
-        }
+  // ── TABS ──
+  function switchTab(tab) {
+    $$('tab-c').className = 'tab' + (tab==='c' ? ' active' : '');
+    $$('tab-p').className = 'tab' + (tab==='p' ? ' active' : '');
+    $$('pC').style.display = tab==='c' ? '' : 'none';
+    $$('pP').style.display = tab==='p' ? '' : 'none';
+  }
 
-        function renderOptimizerStatus(data) {
-            const statusEl = document.getElementById('optimizerStatus');
-            const bidMode = data.bid_mode || 'UNKNOWN';
-            const peakHours = data.peak_hours_label || 'Backend-controlled';
-            const note = data.note || '';
-            const refreshed = data.refreshed_at || '—';
+  // ── BID BANNER ──
+  function renderBanner(data) {
+    var mode = (data.bid_mode || 'UNKNOWN').toUpperCase();
+    bidMode = mode;
+    var peak = data.peak_hours_label || '10:00–20:59';
+    var banner = $$('bidBanner');
+    banner.className = 'bid-banner ' + mode;
+    $$('bannerMode').className = 'bid-mode-tag ' + mode;
 
-            document.getElementById('cacheTime').textContent = refreshed;
+    var modeLabel = mode === 'PEAK' ? '🟢 PEAK HOURS — High-end Amazon bids active'
+                  : mode === 'OFF_PEAK' ? '🔵 OFF-PEAK — Low-end Amazon bids active'
+                  : '🟡 NORMAL HOURS — Mid-range Amazon bids active';
+    $$('bannerMode').textContent = modeLabel;
 
-            statusEl.innerHTML =
-                '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
-                    '<div class="rounded-2xl border border-gray-200 p-4">' +
-                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Mode</div>' +
-                        '<div class="font-semibold text-gray-900">One-Step Dashboard Control</div>' +
-                        '<div class="text-sm text-gray-600 mt-1">Run negatives, winners, bids, or full optimization individually.</div>' +
-                    '</div>' +
-                    '<div class="rounded-2xl border border-gray-200 p-4">' +
-                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Bid Mode</div>' +
-                        '<div>' + bidModeBadge(bidMode) + '</div>' +
-                        '<div class="text-sm text-gray-600 mt-2">Peak-hour logic: ' + escapeHtml(peakHours) + '</div>' +
-                    '</div>' +
-                    '<div class="rounded-2xl border border-gray-200 p-4">' +
-                        '<div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Backend Note</div>' +
-                        '<div class="text-sm text-gray-700">' + escapeHtml(note || 'No backend note provided.') + '</div>' +
-                    '</div>' +
-                '</div>';
-        }
+    var rule = mode === 'PEAK' ? 'Using: suggestedBidHigh'
+             : mode === 'OFF_PEAK' ? 'Using: suggestedBidLow'
+             : 'Using: (low+high)/2';
+    $$('bannerRule').textContent = rule;
+    $$('bannerRule').className = 'banner-rule';
 
-        function renderCampaigns(campaigns) {
-            const listEl = document.getElementById('list');
+    var refreshed = data.refreshed_at ? new Date(data.refreshed_at).toLocaleString() : '—';
+    $$('bannerMeta').textContent = 'Peak window: ' + peak + ' EST  ·  Cache: ' + refreshed + '  ·  ' + (data.note || '');
+  }
 
-            if (!campaigns.length) {
-                listEl.innerHTML = '<p class="text-gray-400 p-12 text-center">No active (ENABLED) campaigns found.</p>';
-                return;
-            }
+  // ── SUMMARY ──
+  function renderSummary(s) {
+    $$('sSpend').textContent = money(s.spend || 0);
+    $$('sSales').textContent = money(s.sales || 0);
+    var acEl = $$('sAcos');
+    acEl.textContent = pct(s.acos);
+    acEl.className = 'stat-value ' + acCls(s.acos);
+    $$('sClicks').textContent = (s.clicks || 0) + ' / ' + (s.orders || 0);
+  }
 
-            let html = '';
+  // ── CAMPAIGNS ──
+  function renderCampaigns(campaigns) {
+    var el = $$('campGrid');
+    $$('campCount').textContent = '(' + campaigns.length + ')';
+    if (!campaigns.length) {
+      el.innerHTML = '<div class="empty"><div class="ico">📭</div>No ENABLED campaigns found.</div>';
+      return;
+    }
+    el.innerHTML = campaigns.map(function(c) {
+      var name = esc(c.campaignName || c.name || 'Unnamed');
+      var cid  = esc(c.campaignId || '—');
+      var budget = (c.budget && c.budget.budget != null) ? money(c.budget.budget) : '—';
+      var acos   = c.acos;
+      var mode   = (c.currentBidMode || bidMode || 'UNKNOWN').toUpperCase();
 
-            campaigns.forEach(function (c) {
-                const name = safeCampaignName(c);
-                const campaignId = escapeHtml(c.campaignId || '—');
-                const budget = (c.budget && c.budget.budget !== undefined && c.budget.budget !== null)
-                    ? '$' + Number(c.budget.budget).toFixed(2)
-                    : '—';
+      // Bid window
+      var low  = c.amazonSuggestedBidLow;
+      var high = c.amazonSuggestedBidHigh;
+      var applied = c.currentAppliedBid;
+      var hasBid = low != null && high != null;
 
-                const spend = toMoney(c.spend || 0);
-                const sales = toMoney(c.sales || 0);
-                const clicks = Number(c.clicks || 0);
-                const orders = Number(c.orders || 0);
-                const acos = c.acos;
-                const acosVal = acos === undefined || acos === null ? '—' : toPercent(acos);
-                const acosClass = badgeClassForAcos(acos);
+      var appliedClass = 'applied ' + mode;
+      var bidWindowHtml = hasBid
+        ? '<div class="bid-window">' +
+            '<div class="bid-window-title">' +
+              '<span>Amazon Suggested Bid Window</span>' +
+              '<span class="mode-badge ' + mode + '">' + mode + '</span>' +
+            '</div>' +
+            '<div class="bid-slots">' +
+              '<div class="bid-slot">' +
+                '<div class="bid-slot-label">OFF-PEAK (low)</div>' +
+                '<div class="bid-slot-val low">' + money(low) + '</div>' +
+              '</div>' +
+              '<div class="bid-slot">' +
+                '<div class="bid-slot-label">APPLIED BID</div>' +
+                '<div class="bid-slot-val ' + appliedClass + '">' + (applied != null ? money(applied) : '—') + '</div>' +
+              '</div>' +
+              '<div class="bid-slot">' +
+                '<div class="bid-slot-label">PEAK (high)</div>' +
+                '<div class="bid-slot-val high">' + money(high) + '</div>' +
+              '</div>' +
+            '</div>' +
+          '</div>'
+        : '<div class="bid-window"><div style="font-size:10px;color:var(--muted);text-align:center;padding:4px 0">Bid data in cache — click Refresh Cache to update</div></div>';
 
-                const suggestedLow = c.amazonSuggestedBidLow ?? null;
-                const suggestedHigh = c.amazonSuggestedBidHigh ?? null;
-                const currentBidMode = c.currentBidMode ?? null;
-                const currentAppliedBid = c.currentAppliedBid ?? null;
+      return '<div class="camp-card">' +
+        '<div class="camp-hdr">' +
+          '<div>' +
+            '<div class="camp-name">' + name + '</div>' +
+            '<div class="camp-id">ID: ' + cid + '</div>' +
+          '</div>' +
+          '<span class="pill pill-green">ENABLED</span>' +
+        '</div>' +
+        '<div class="metrics-row">' +
+          '<div><div class="m-label">Budget/Day</div><div class="m-val">'   + budget + '</div></div>' +
+          '<div><div class="m-label">Spend</div><div class="m-val">'        + money(c.spend  || 0) + '</div></div>' +
+          '<div><div class="m-label">Sales</div><div class="m-val green">'  + money(c.sales  || 0) + '</div></div>' +
+        '</div>' +
+        '<div class="metrics-row">' +
+          '<div><div class="m-label">Impressions</div><div class="m-val">'  + (c.impressions || 0) + '</div></div>' +
+          '<div><div class="m-label">Clicks</div><div class="m-val">'       + (c.clicks || 0) + '</div></div>' +
+          '<div><div class="m-label">ACoS</div><div class="m-val ' + acCls(acos) + '">' + pct(acos) + '</div></div>' +
+        '</div>' +
+        bidWindowHtml +
+      '</div>';
+    }).join('');
+  }
 
-                html +=
-                    '<div class="card border border-gray-200 rounded-3xl p-6 bg-white shadow-sm">' +
-                        '<div class="flex items-start justify-between gap-3">' +
-                            '<div>' +
-                                '<div class="font-semibold text-lg leading-tight">' + name + '</div>' +
-                                '<div class="text-xs text-gray-500 mt-1">ID: ' + campaignId + '</div>' +
-                            '</div>' +
-                            '<div>' + bidModeBadge(currentBidMode || 'UNKNOWN') + '</div>' +
-                        '</div>' +
+  // ── PRODUCTS ──
+  function renderProducts(prods) {
+    $$('prodCount').textContent = '(' + allProducts.length + ')';
+    $$('prodFilter').textContent = prods.length + ' / ' + allProducts.length;
+    var tbody = $$('prodBody');
+    if (!prods.length) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--muted)">No matches</td></tr>';
+      return;
+    }
+    tbody.innerHTML = prods.map(function(p) {
+      var dot = p.active ? '<span class="dot-on"></span>' : '<span class="dot-off"></span>';
+      var asin = p.asin ? '<span class="asin">' + esc(p.asin) + '</span>' : '—';
+      var priceStr = String(p.price || '').replace(/[^0-9.]/g,'');
+      var price = priceStr ? money(+priceStr) : '—';
+      var pid = esc(p.product_id || p.sku);
+      return '<tr>' +
+        '<td>' + dot + '</td>' +
+        '<td style="max-width:250px;word-break:break-word;line-height:1.4">' + esc(p.title || '—') + '</td>' +
+        '<td style="white-space:nowrap">' + esc(p.sku || '—') + '</td>' +
+        '<td>' + asin + '</td>' +
+        '<td>' + price + '</td>' +
+        '<td>' + money(p.suggested_budget || 25) + '</td>' +
+        '<td>' + money(p.suggested_bid || 0.85) + '</td>' +
+        '<td><button class="btn btn-primary btn-sm" onclick="openLaunch(\'' + pid + '\')">Launch</button></td>' +
+      '</tr>';
+    }).join('');
+  }
 
-                        '<div class="mt-6 grid grid-cols-3 gap-4 text-sm">' +
-                            '<div><div class="text-gray-500">Budget</div><div class="font-medium">' + budget + '</div></div>' +
-                            '<div><div class="text-gray-500">Spend</div><div class="font-medium">' + spend + '</div></div>' +
-                            '<div><div class="text-gray-500">Sales</div><div class="font-medium">' + sales + '</div></div>' +
-                        '</div>' +
+  function filterProd() {
+    var q = ($$('srch').value || '').toLowerCase();
+    var filtered = q ? allProducts.filter(function(p) {
+      return (p.title||'').toLowerCase().indexOf(q)>=0 ||
+             (p.sku||'').toLowerCase().indexOf(q)>=0 ||
+             (p.asin||'').toLowerCase().indexOf(q)>=0;
+    }) : allProducts;
+    renderProducts(filtered);
+  }
 
-                        '<div class="mt-6 grid grid-cols-3 gap-4 text-sm">' +
-                            '<div><div class="text-gray-500">Clicks</div><div class="font-medium">' + clicks + '</div></div>' +
-                            '<div><div class="text-gray-500">Orders</div><div class="font-medium">' + orders + '</div></div>' +
-                            '<div><div class="text-gray-500">ACoS</div><div class="font-semibold ' + acosClass + '">' + acosVal + '</div></div>' +
-                        '</div>' +
+  // ── LAUNCH MODAL ──
+  function openLaunch(pid) {
+    var p = allProducts.find(function(x){ return (x.product_id||x.sku) === pid; });
+    if (!p) return;
+    $$('lTitle').textContent = p.title || '—';
+    $$('lAsin').textContent  = p.asin || '—';
+    $$('lSku').textContent   = p.sku  || '—';
+    $$('lBudget').value = (+( p.suggested_budget || 25)).toFixed(2);
+    $$('lBid').value    = (+(p.suggested_bid    || 0.85)).toFixed(2);
+    $$('lPid').value    = pid;
+    $$('lSub').textContent = 'Launching SP campaign for ASIN: ' + (p.asin || p.sku);
+    $$('lKw').textContent  = (p.keywords || '') + (p.research_keywords ? ', ' + p.research_keywords : '') || 'Auto-generated from title + category';
 
-                        '<div class="mt-6 border-t border-gray-100 pt-4">' +
-                            '<div class="text-sm font-semibold text-gray-800 mb-3">Amazon Suggested Bid Window</div>' +
-                            '<div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">' +
-                                '<div><div class="text-gray-500">Suggested Low</div><div class="font-medium">' + (suggestedLow === null ? '—' : toMoney(suggestedLow)) + '</div></div>' +
-                                '<div><div class="text-gray-500">Suggested High</div><div class="font-medium">' + (suggestedHigh === null ? '—' : toMoney(suggestedHigh)) + '</div></div>' +
-                                '<div><div class="text-gray-500">Applied Bid</div><div class="font-medium">' + (currentAppliedBid === null ? '—' : toMoney(currentAppliedBid)) + '</div></div>' +
-                            '</div>' +
-                        '</div>' +
-                    '</div>';
-            });
+    // Reset bid preview while fetching
+    $$('lpLow').textContent = '…'; $$('lpMid').textContent = '…'; $$('lpHigh').textContent = '…';
+    $$('launchOverlay').classList.add('open');
 
-            listEl.innerHTML = html;
-        }
+    // Fetch live bid recommendation if ASIN available
+    if (p.asin) fetchLiveBidRec(p.asin, +p.suggested_bid || 0.85);
+  }
 
-        async function loadDashboardData() {
-            try {
-                const token = getToken();
-                const res = await fetch('/api/dashboard-data', {
-                    headers: { 'X-Daily-Optimizer-Token': token || '' }
-                });
-                const data = await res.json();
+  function fetchLiveBidRec(asin, fallback) {
+    // Show fallback immediately, update when API responds
+    $$('lpLow').textContent  = money(fallback * 0.70);
+    $$('lpMid').textContent  = money(fallback);
+    $$('lpHigh').textContent = money(fallback * 1.30);
 
-                if (!res.ok || data.error) {
-                    throw new Error(data.message || 'Failed to load dashboard data');
-                }
+    fetch('/api/bid-recommendation?asin=' + encodeURIComponent(asin))
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.low)  $$('lpLow').textContent  = money(d.low);
+        if (d.high) $$('lpHigh').textContent = money(d.high);
+        if (d.suggested) $$('lpMid').textContent = money(d.suggested);
+        // Auto-set bid based on current mode
+        var mode = (d.bid_mode || bidMode || 'NORMAL').toUpperCase();
+        var autoBid = mode === 'PEAK' ? d.high : mode === 'OFF_PEAK' ? d.low : d.suggested;
+        if (autoBid) $$('lBid').value = (+autoBid).toFixed(2);
+      })
+      .catch(function(){ /* keep fallbacks */ });
+  }
 
-                const campaigns = (data.campaigns || []).filter(function (c) {
-                    return String(c.state || '').toUpperCase() === 'ENABLED';
-                });
+  function closeModal() { $$('launchOverlay').classList.remove('open'); }
 
-                document.getElementById('count').textContent = campaigns.length;
-                document.getElementById('time').textContent = new Date().toLocaleString();
+  function doLaunch() {
+    var pid = $$('lPid').value;
+    if (!pid) return;
+    var btn = $$('launchBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loader"></span> Launching...';
+    var token = getToken();
+    fetch('/api/create-campaign-from-product', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
+        'X-Daily-Optimizer-Token': token,
+      },
+      body: JSON.stringify({ product_id: pid })
+    }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+    .then(function(r){
+      if (!r.ok || r.d.error) throw new Error(r.d.message || 'Launch failed');
+      closeModal();
+      toast('✅ Campaign live! ID: ' + (r.d.campaign_id||'—') + ' · Budget: ' + money(r.d.daily_budget||0) + '/day');
+      setTimeout(loadDashboard, 2500);
+    }).catch(function(e){ toast('❌ ' + e.message, true); })
+    .finally(function(){ btn.disabled=false; btn.innerHTML='🚀 Launch Live Campaign'; });
+  }
 
-                renderSummary(data);
-                renderOptimizerStatus(data);
-                renderCampaigns(campaigns);
+  // ── ACTION BUTTONS ──
+  function postAction(url, body, msg) {
+    var token = getToken(); if (!token) return;
+    fetch(url, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+token,'X-Daily-Optimizer-Token':token},
+      body: JSON.stringify(body||{})
+    }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+    .then(function(r){
+      if (!r.ok || r.d.error) throw new Error(r.d.message || 'Error');
+      toast(msg || '✅ Done');
+      setTimeout(loadDashboard, 1500);
+    }).catch(function(e){ toast('❌ ' + e.message, true); });
+  }
 
-            } catch (err) {
-                console.error(err);
-                document.getElementById('summary').innerHTML =
-                    '<div class="col-span-full text-red-500 text-center p-8">Failed to load dashboard data.</div>';
-                document.getElementById('optimizerStatus').innerHTML =
-                    '<div class="text-red-500">Failed to load optimizer status.</div>';
-                document.getElementById('list').innerHTML =
-                    '<p class="text-red-500 p-12 text-center">Failed to load data from backend.</p>';
-            }
-        }
+  function refreshCache()   { postAction('/api/refresh-dashboard-cache', {}, '✅ Cache refreshed with latest Amazon data!'); }
+  function applyNegatives() { postAction('/api/apply-negatives', {lookback_days:14, refresh_cache_after:true}, '✅ Negatives applied!'); }
+  function applyWinners()   { postAction('/api/apply-winners',  {lookback_days:14, winner_bid:0.90, refresh_cache_after:true}, '✅ Winners added with peak/off-peak bids!'); }
+  function retuneBids()     { postAction('/api/retune-existing-bids', {}, '✅ Bids retuned! High for peak, low for off-peak.'); }
+  function fullOptimize()   {
+    postAction('/api/run-daily-optimization', {
+      apply_negatives_live:true, apply_winners_live:true,
+      lookback_days:14, winner_bid:0.90
+    }, '✅ Full optimization triggered! Apply-optimization runs next.');
+  }
 
-        function getToken() {
-            let token = localStorage.getItem('optimizer_token');
-            if (!token) {
-                token = prompt('Enter your DAILY_OPTIMIZER_TOKEN:');
-                if (token) localStorage.setItem('optimizer_token', token);
-            }
-            return token || null;
-        }
+  // ── LOAD ──
+  function loadDashboard() {
+    fetch('/api/dashboard-data')
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+      .then(function(r){
+        if (!r.ok || r.d.error) throw new Error(r.d.message || 'Load failed');
+        var camps = (r.d.campaigns || []).filter(function(c){
+          return String(c.state||'').toUpperCase() === 'ENABLED';
+        });
+        renderBanner(r.d);
+        renderSummary(r.d.summary || {});
+        renderCampaigns(camps);
+      }).catch(function(e){
+        $$('campGrid').innerHTML = '<div class="empty"><div class="ico">⚠️</div>' + esc(e.message) + '</div>';
+        toast('Dashboard load failed: ' + e.message, true);
+      });
+  }
 
-        async function postAction(url, body, successMessage) {
-            const token = getToken();
-            if (!token) return;
+  function loadProducts() {
+    fetch('/api/products')
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+      .then(function(r){
+        if (!r.ok || r.d.error) throw new Error(r.d.message || 'Load failed');
+        allProducts = r.d.products || [];
+        renderProducts(allProducts);
+      }).catch(function(e){
+        $$('prodBody').innerHTML = '<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--danger)">⚠️ ' + esc(e.message) + '</td></tr>';
+      });
+  }
 
-            try {
-                const res = await fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + token
-                    },
-                    body: JSON.stringify(body || {})
-                });
+  function loadAll() { loadDashboard(); loadProducts(); }
 
-                const data = await res.json();
-                if (!res.ok || data.error) {
-                    alert('❌ Error:\n\n' + (data.message || JSON.stringify(data)));
-                    return;
-                }
-
-                alert(successMessage);
-                await loadDashboardData();
-
-            } catch (e) {
-                console.error(e);
-                alert('❌ Request failed.');
-            }
-        }
-
-        async function refreshCacheNow() {
-            await postAction(
-                '/api/refresh-dashboard-cache',
-                {},
-                '✅ Metrics cache refreshed!'
-            );
-        }
-
-        async function applyNegativesNow() {
-            await postAction(
-                '/api/apply-negatives',
-                { lookback_days: 14, refresh_cache_after: true },
-                '✅ Negatives applied!'
-            );
-        }
-
-        async function applyWinnersNow() {
-            await postAction(
-                '/api/apply-winners',
-                { lookback_days: 14, winner_bid: 0.90, refresh_cache_after: true },
-                '✅ Winners added!'
-            );
-        }
-
-        async function retuneBidsNow() {
-            await postAction(
-                '/api/retune-existing-bids',
-                {},
-                '✅ Existing bids retuned!'
-            );
-        }
-
-        async function runFullOptimizationNow() {
-            await postAction(
-                '/api/run-daily-optimization',
-                {
-                    apply_negatives_live: true,
-                    apply_winners_live: true,
-                    retune_existing_keyword_bids: false,
-                    lookback_days: 14,
-                    winner_bid: 0.90,
-                    refresh_cache_after: true
-                },
-                '✅ Full optimization completed!'
-            );
-        }
-
-        window.onload = loadDashboardData;
-        setInterval(loadDashboardData, 600000);
-    </script>
+  $$('launchOverlay').addEventListener('click', function(e){ if(e.target===this) closeModal(); });
+  window.onload = loadAll;
+  setInterval(loadDashboard, 300000);
+</script>
 </body>
 </html>
