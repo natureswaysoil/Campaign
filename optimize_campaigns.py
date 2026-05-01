@@ -1403,3 +1403,18 @@ def run_daily_optimization(
     except Exception as e:
         logger.exception("Daily optimization failed")
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+from optimized_launch_endpoint import register_optimized_launch_routes
+
+register_optimized_launch_routes(
+    app,
+    AmazonAdsClient=AmazonAdsClient,
+    MEDIA_TYPES=MEDIA_TYPES,
+    DEFAULT_FALLBACK_BID=DEFAULT_FALLBACK_BID,
+    verify_internal_token=verify_internal_token,
+    get_bid_mode=get_bid_mode,
+    today_iso_date=today_iso_date,
+    utc_now_iso=utc_now_iso,
+    save_optimizer_history=save_optimizer_history,
+    logger=logger,
+)
