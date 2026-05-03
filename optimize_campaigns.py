@@ -932,6 +932,47 @@ def api_products() -> JSONResponse:
     except Exception as e:
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
 
+@app.get("/api/campaigns-debug")
+def api_campaigns_debug() -> JSONResponse:
+    try:
+        client = AmazonAdsClient()
+
+        def get_by_state(state: str):
+            data = client.post(
+                "/sp/campaigns/list",
+                {
+                    "maxResults": 100,
+                    "filters": {
+                        "stateFilter": {
+                            "include": [state]
+                        }
+                    }
+                },
+                content_type=MEDIA_TYPES["campaigns_v3"],
+                accept=MEDIA_TYPES["campaigns_v3"],
+            )
+            return data.get("campaigns", [])
+
+        enabled = get_by_state("ENABLED")
+        paused = get_by_state("PAUSED")
+        archived = get_by_state("ARCHIVED")
+
+        return JSONResponse({
+            "enabled_count": len(enabled),
+            "paused_count": len(paused),
+            "archived_count": len(archived),
+            "enabled_sample": enabled[:5],
+            "paused_sample": paused[:5],
+            "archived_sample": archived[:5],
+            "message": (
+                "If enabled_count is 0 but paused_count is high, the dashboard is connected "
+                "but this Amazon Ads profile currently has no enabled campaigns."
+            )
+        })
+
+    except Exception as e:
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
 @app.get("/api/campaign-plan")
 def api_campaign_plan():
     return build_all_campaign_plans()   
