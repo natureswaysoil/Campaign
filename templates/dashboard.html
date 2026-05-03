@@ -282,6 +282,61 @@
   var allProducts = [];
   var bidMode = 'UNKNOWN';
   var toastTmr;
+  async function fetchJson(url, options) {
+  const res = await fetch(url, options || {});
+  const text = await res.text();
+
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
+    throw new Error(url + ' returned non-JSON: ' + text.slice(0, 250));
+  }
+
+  if (!res.ok || data.error) {
+    throw new Error(data.message || data.detail || (url + ' failed'));
+  }
+
+  return data;
+}
+
+async function loadCampaignPlan() {
+  try {
+    const data = await fetchJson('/api/campaign-plan');
+    const box = document.getElementById('campaignDiagBox');
+    box.innerHTML =
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:left;max-width:760px;margin:0 auto">' +
+        '<div style="font-family:Syne,sans-serif;color:var(--accent);margin-bottom:8px">Campaign Plan Ready</div>' +
+        '<div style="font-size:12px;color:var(--muted);line-height:1.6">' +
+          'Products in plan: <b style="color:var(--text)">' + data.product_count + '</b><br>' +
+          'This confirms your Google Sheet feed and campaign planning engine are working.' +
+        '</div>' +
+      '</div>';
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function loadCampaignDiagnostics() {
+  try {
+    const data = await fetchJson('/api/campaigns-debug');
+    const box = document.getElementById('campaignDiagBox');
+    box.innerHTML =
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:left;max-width:760px;margin:0 auto">' +
+        '<div style="font-family:Syne,sans-serif;color:var(--accent);margin-bottom:10px">Amazon Campaign Status</div>' +
+        '<div class="metrics-row">' +
+          '<div><div class="m-label">Enabled</div><div class="m-val green">' + data.enabled_count + '</div></div>' +
+          '<div><div class="m-label">Paused</div><div class="m-val warn">' + data.paused_count + '</div></div>' +
+          '<div><div class="m-label">Archived</div><div class="m-val">' + data.archived_count + '</div></div>' +
+        '</div>' +
+        '<div style="font-size:11px;color:var(--muted);margin-top:14px;line-height:1.6">' +
+          esc(data.message || 'Diagnostic check complete.') +
+        '</div>' +
+      '</div>';
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
   // ── UTILS ──
   function $$(id) { return document.getElementById(id); }
