@@ -627,19 +627,39 @@ async function loadCampaignDiagnostics() {
 
   // ── LOAD ──
   function loadDashboard() {
-    fetch('/api/dashboard-data')
-      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
-      .then(function(r){
-        if (!r.ok || r.d.error) throw new Error(r.d.message || 'Load failed');
-        var camps = (r.d.campaigns || []).filter(function(c){
-          return String(c.state||'').toUpperCase() === 'ENABLED';
+    fetchJson('/api/dashboard-data')
+      .then(function(data) {
+        renderBanner(data);
+        renderSummary(data.summary || {});
+
+        var allCamps = data.campaigns || [];
+        var enabled = allCamps.filter(function(c) {
+          return String(c.state || '').toUpperCase() === 'ENABLED';
         });
-        renderBanner(r.d);
-        renderSummary(r.d.summary || {});
-        renderCampaigns(camps);
-      }).catch(function(e){
-        $$('campGrid').innerHTML = '<div class="empty"><div class="ico">⚠️</div>' + esc(e.message) + '</div>';
-        toast('Dashboard load failed: ' + e.message, true);
+        var paused = allCamps.filter(function(c) {
+          return String(c.state || '').toUpperCase() === 'PAUSED';
+        });
+
+        renderCampaigns(enabled);
+        $$('campCount').textContent = '(' + enabled.length + ' enabled / ' + paused.length + ' paused)';
+      })
+      .catch(function(err) {
+        $$('campGrid').innerHTML =
+          '<div class="empty">' +
+            '<div class="ico">⚠️</div>' +
+            '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">Dashboard data failed to load</div>' +
+            '<div style="max-width:760px;margin:0 auto 18px;line-height:1.6">' + esc(err.message) + '</div>' +
+            '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
+              '<button class="btn btn-accent" onclick="switchTab(\\'p\\')">View Products</button>' +
+              '<button class="btn btn-blue" onclick="loadCampaignPlan()">View Campaign Plan</button>' +
+              '<button class="btn btn-ghost" onclick="loadCampaignDiagnostics()">Check Amazon Status</button>' +
+            '</div>' +
+            '<div id="campaignDiagBox" style="margin-top:18px"></div>' +
+          '</div>';
+
+        renderBanner({ bid_mode: 'UNKNOWN', note: 'Dashboard API error' });
+        renderSummary({ spend: 0, sales: 0, clicks: 0, orders: 0, acos: null });
+        toast(err.message, true);
       });
   }
 
