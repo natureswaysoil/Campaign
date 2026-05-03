@@ -1,0 +1,50 @@
+{
+  "product": "Living Compost with Biochar",
+  "core_exact": [
+    "biochar soil amendment",
+    "biochar fertilizer",
+    "biochar compost",
+    "compost with biochar",
+    "worm castings biochar"
+  ],
+  "problem_phrase": [
+    "clay soil amendment",
+    "improve soil health",
+    "organic garden soil improver",
+    "raised bed soil amendment",
+    "poor soil fix",
+    "increase water retention soil"
+  ],
+  "long_tail_exact": [
+    "biochar with worm castings",
+    "organic compost for vegetables",
+    "biochar compost mix organic",
+    "soil amendment for vegetable garden"
+  ],
+  "competitor_phrase": [
+    "black kow compost",
+    "black kow alternative",
+    "r&m organics compost",
+    "espoma soil conditioner",
+    "dr earth compost"
+  ],
+  "negative_phrase": [
+    "bulk",
+    "wholesale",
+    "free",
+    "near me",
+    "diy",
+    "how to make",
+    "job",
+    "recipe",
+    "charcoal grill",
+    "aquarium"
+  ],
+  "negative_exact": [
+    "activated charcoal",
+    "charcoal briquettes",
+    "biochar kiln",
+    "make biochar",
+    "biochar machine"
+  ]
+}
