@@ -931,7 +931,6 @@ def api_products() -> JSONResponse:
         })
     except Exception as e:
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
-
 @app.get("/api/campaigns-debug")
 def api_campaigns_debug() -> JSONResponse:
     try:
@@ -965,10 +964,14 @@ def api_campaigns_debug() -> JSONResponse:
             "paused_sample": paused[:5],
             "archived_sample": archived[:5],
             "message": (
-                "If enabled_count is 0 but paused_count is high, the dashboard is connected "
-                "but this Amazon Ads profile currently has no enabled campaigns."
+                "Enabled campaigns are what appear on the main dashboard. "
+                "Paused campaigns are counted here for diagnosis but not shown in the main view."
             )
         })
+
+    except Exception as e:
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
 
     except Exception as e:
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
