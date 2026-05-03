@@ -1,0 +1,108 @@
+{
+  "version": "2026-05-03",
+  "currency": "USD",
+  "campaign_name_pattern": "SP_{campaign_type}_{product_slug}",
+  "campaign_types": {
+    "AUTO_Discovery": {
+      "purpose": "Mine Amazon search terms and product targets for new winners.",
+      "match_type": "auto",
+      "default_bid": 0.45,
+      "min_bid": 0.25,
+      "max_bid": 0.75,
+      "daily_budget": 5.0
+    },
+    "EXACT_Core": {
+      "purpose": "Main buyer-intent keywords with highest conversion potential.",
+      "match_type": "exact",
+      "default_bid": 0.95,
+      "min_bid": 0.55,
+      "max_bid": 1.35,
+      "daily_budget": 10.0
+    },
+    "EXACT_Long_Tail": {
+      "purpose": "Low-CPC specific searches that should convert efficiently.",
+      "match_type": "exact",
+      "default_bid": 0.8,
+      "min_bid": 0.45,
+      "max_bid": 1.1,
+      "daily_budget": 7.0
+    },
+    "PHRASE_Research": {
+      "purpose": "Find new buyer searches around product, ingredient, and problem phrases.",
+      "match_type": "phrase",
+      "default_bid": 0.65,
+      "min_bid": 0.35,
+      "max_bid": 0.95,
+      "daily_budget": 7.0
+    },
+    "BROAD_Discovery": {
+      "purpose": "Low-bid discovery only. Harvest winners into exact campaigns.",
+      "match_type": "broad",
+      "default_bid": 0.45,
+      "min_bid": 0.25,
+      "max_bid": 0.7,
+      "daily_budget": 5.0
+    },
+    "COMPETITOR": {
+      "purpose": "Target competitor brand and alternative searches separately so spend is controlled.",
+      "match_type": "phrase",
+      "default_bid": 0.55,
+      "min_bid": 0.3,
+      "max_bid": 0.85,
+      "daily_budget": 5.0
+    },
+    "PRODUCT_Targeting": {
+      "purpose": "Target competitor ASINs and related product pages.",
+      "match_type": "product",
+      "default_bid": 0.55,
+      "min_bid": 0.3,
+      "max_bid": 0.9,
+      "daily_budget": 5.0
+    }
+  },
+  "optimization_rules": {
+    "target_acos_fallback": 0.35,
+    "raise_bid_when_orders_at_least": 2,
+    "raise_bid_when_acos_below_target_by": 0.2,
+    "raise_bid_percent": 0.15,
+    "lower_bid_when_acos_above_target_by": 0.15,
+    "lower_bid_percent": 0.2,
+    "pause_after_clicks_no_sales": 20,
+    "negative_exact_after_clicks_no_sales": 15,
+    "negative_phrase_after_spend_without_sales_multiplier": 1.25,
+    "harvest_search_term_after_orders": 1,
+    "harvest_search_term_max_acos": 0.45,
+    "harvest_from_campaign_types": [
+      "AUTO_Discovery",
+      "PHRASE_Research",
+      "BROAD_Discovery"
+    ],
+    "harvest_to_campaign_type": "EXACT_Core"
+  },
+  "required_sheet_columns": [
+    "ASIN",
+    "SKU",
+    "Product_Name",
+    "Category",
+    "Title",
+    "Price",
+    "Target_ACOS",
+    "Gross_Margin",
+    "Default_Bid",
+    "Max_Bid",
+    "Min_Bid",
+    "Daily_Budget",
+    "Campaign_Type",
+    "Keyword_Intent",
+    "Keywords",
+    "Research_Keywords",
+    "Problem_Keywords",
+    "Ingredient_Keywords",
+    "Competitor_Keywords",
+    "Long_Tail_Keywords",
+    "Negative_Phrase",
+    "Negative_Exact",
+    "Landing_URL",
+    "Status"
+  ]
+}
