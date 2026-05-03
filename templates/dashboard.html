@@ -360,8 +360,23 @@
     var el = $$('campGrid');
     $$('campCount').textContent = '(' + campaigns.length + ')';
     if (!campaigns.length) {
-      el.innerHTML = '<div class="empty"><div class="ico">📭</div>No ENABLED campaigns found.</div>';
-      return;
+  el.innerHTML =
+    '<div class="empty">' +
+      '<div class="ico">📭</div>' +
+      '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">No enabled campaigns found</div>' +
+      '<div style="max-width:720px;margin:0 auto 18px;line-height:1.6">' +
+        'The dashboard is connected, but this Amazon Ads profile is not returning enabled campaigns. ' +
+        'This usually means campaigns are paused, the wrong profile ID is selected, or new campaigns have not been launched yet.' +
+      '</div>' +
+      '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
+        '<button class="btn btn-accent" onclick="switchTab(\\'p\\')">View Products & Launch</button>' +
+        '<button class="btn btn-blue" onclick="loadCampaignPlan()">View Campaign Plan</button>' +
+        '<button class="btn btn-ghost" onclick="loadCampaignDiagnostics()">Check Amazon Status</button>' +
+      '</div>' +
+      '<div id="campaignDiagBox" style="margin-top:18px"></div>' +
+    '</div>';
+  return;
+}
     }
     el.innerHTML = campaigns.map(function(c) {
       var name = esc(c.campaignName || c.name || 'Unnamed');
