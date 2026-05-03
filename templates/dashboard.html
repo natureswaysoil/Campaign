@@ -650,12 +650,22 @@ async function loadCampaignDiagnostics() {
             '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">Dashboard data failed to load</div>' +
             '<div style="max-width:760px;margin:0 auto 18px;line-height:1.6">' + esc(err.message) + '</div>' +
             '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
-              '<button class="btn btn-accent" onclick="switchTab(\\'p\\')">View Products</button>' +
-              '<button class="btn btn-blue" onclick="loadCampaignPlan()">View Campaign Plan</button>' +
-              '<button class="btn btn-ghost" onclick="loadCampaignDiagnostics()">Check Amazon Status</button>' +
+              '<button class="btn btn-accent" id="diagProductsBtn">View Products</button>' +
+              '<button class="btn btn-blue" id="diagPlanBtn">View Campaign Plan</button>' +
+              '<button class="btn btn-ghost" id="diagStatusBtn">Check Amazon Status</button>' +
             '</div>' +
             '<div id="campaignDiagBox" style="margin-top:18px"></div>' +
           '</div>';
+
+        var pBtn = $$('diagProductsBtn');
+        var planBtn = $$('diagPlanBtn');
+        var statusBtn = $$('diagStatusBtn');
+        if (pBtn) pBtn.onclick = function() { switchTab('p'); };
+        if (planBtn) planBtn.onclick = loadCampaignPlan;
+        if (statusBtn) statusBtn.onclick = loadCampaignDiagnostics;
+
+        var pBtn = $$('diagProductsBtn');
+        if (pBtn) pBtn.onclick = function() { switchTab('p'); };
 
         renderBanner({ bid_mode: 'UNKNOWN', note: 'Dashboard API error' });
         renderSummary({ spend: 0, sales: 0, clicks: 0, orders: 0, acos: null });
