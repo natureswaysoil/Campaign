@@ -20,6 +20,8 @@ from collections import defaultdict
 import requests
 from google.cloud import secretmanager
 
+from scaling_engine import build_scaling_plan
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -732,6 +734,46 @@ def api_list_campaigns():
         logger.error("Failed to fetch campaigns", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/scaling-plan")
+def scaling_plan():
+    client = AmazonAdsClient()
+
+    try:
+        response = client.session.post(
+            f"{client.base_url}/sp/campaigns/list",
+            headers={
+                "Authorization": f"Bearer {client.access_token}",
+                "Amazon-Advertising-API-ClientId": client.client_id,
+                "Amazon-Advertising-API-Scope": client.profile_id,
+                "Content-Type": "application/vnd.spcampaign.v3+json",
+                "Accept": "application/vnd.spcampaign.v3+json",
+            },
+            json={
+                "maxResults": 100,
+                "filters": {
+                    "stateFilter": {
+                        "include": ["ENABLED"]
+                    }
+                }
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        campaigns = data.get("campaigns", []) if isinstance(data, dict) else data
+
+        keywords = []
+
+        return build_scaling_plan(
+            campaigns,
+            keywords,
+            target_acos=0.35,
+            dry_run=True
+        )
+
+    except Exception as e:
+        logger.error("Failed to build scaling plan", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ========================= REAL DAILY PERFORMANCE =========================
 @app.get("/api/campaign-performance")
