@@ -11,10 +11,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
 import csv
 import io
 import requests
 from google.cloud import storage as gcs_storage
+from campaign_engine import build_all_campaign_plans, clean_product_rows
 
 app = FastAPI(title="Amazon PPC Optimizer")
 
@@ -919,11 +921,20 @@ def normalized_product(p: dict) -> dict:
 @app.get("/api/products")
 def api_products() -> JSONResponse:
     try:
-        rows = clean_product_rows(load_products())
+        raw_rows = load_products()
+        rows = clean_product_rows(raw_rows)
         products = [normalized_product(r) for r in rows]
-        return JSONResponse({"count": len(products), "products": products})
+        return JSONResponse({
+            "raw_count": len(raw_rows),
+            "count": len(products),
+            "products": products
+        })
     except Exception as e:
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+@app.get("/api/campaign-plan")
+def api_campaign_plan():
+    return build_all_campaign_plans()   
 
 @app.post("/api/create-campaign-from-product")
 def api_create_campaign(
