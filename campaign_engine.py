@@ -73,11 +73,36 @@ def load_rules(path: Path = RULES_PATH) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def is_real_product_row(row: Dict[str, Any]) -> bool:
+    """Ignore blank rows and accidental repeated header rows from the Google Sheet."""
+    product_id = first(row, "Product_ID", "Product ID", default="")
+    sku = first(row, "SKU", default="")
+    asin = first(row, "ASIN", default="")
+    title = first(row, "Title", "Product_Name", "Product Name", default="")
+
+    lower_values = {product_id.lower(), sku.lower(), asin.lower(), title.lower()}
+    if {"product_id", "sku", "asin", "title"} & lower_values:
+        return False
+
+    # At minimum, a usable campaign row needs a product identifier/title and either ASIN or SKU.
+    if not any([product_id, sku, asin, title]):
+        return False
+    if not any([sku, asin]):
+        return False
+
+    return True
+
+
+def clean_product_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [row for row in rows if is_real_product_row(row)]
+
+
 def load_products_from_sheet(url: str = PRODUCTS_CSV_URL) -> List[Dict[str, str]]:
     response = requests.get(url, timeout=30)
     response.raise_for_status()
     reader = csv.DictReader(io.StringIO(response.text))
-    return [{str(k).strip(): (v or "").strip() for k, v in row.items()} for row in reader]
+    rows = [{str(k).strip(): (v or "").strip() for k, v in row.items()} for row in reader]
+    return clean_product_rows(rows)
 
 
 def product_name(row: Dict[str, Any]) -> str:
@@ -181,7 +206,7 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
 
 def build_all_campaign_plans(rows: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     rules = load_rules()
-    rows = rows if rows is not None else load_products_from_sheet()
+    rows = clean_product_rows(rows) if rows is not None else load_products_from_sheet()
     plans = [build_campaign_plan(row, rules) for row in rows]
     return {
         "product_count": len(plans),
