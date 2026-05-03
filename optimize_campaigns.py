@@ -919,7 +919,8 @@ def normalized_product(p: dict) -> dict:
 @app.get("/api/products")
 def api_products() -> JSONResponse:
     try:
-        products = [normalized_product(r) for r in load_products()]
+        rows = clean_product_rows(load_products())
+        products = [normalized_product(r) for r in rows]
         return JSONResponse({"count": len(products), "products": products})
     except Exception as e:
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
