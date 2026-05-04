@@ -424,7 +424,7 @@ async function loadCampaignDiagnostics() {
         'This usually means campaigns are paused, the wrong profile ID is selected, or new campaigns have not been launched yet.' +
       '</div>' +
       '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
-        '<button class="btn btn-accent" onclick="switchTab(\\'p\\')">View Products & Launch</button>' +
+        '<button class="btn btn-accent" id="diagProductsBtn">View Products & Launch</button>' +
         '<button class="btn btn-blue" onclick="loadCampaignPlan()">View Campaign Plan</button>' +
         '<button class="btn btn-ghost" onclick="loadCampaignDiagnostics()">Check Amazon Status</button>' +
       '</div>' +
@@ -650,7 +650,7 @@ async function loadCampaignDiagnostics() {
             '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">Dashboard data failed to load</div>' +
             '<div style="max-width:760px;margin:0 auto 18px;line-height:1.6">' + esc(err.message) + '</div>' +
             '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
-              '<button class="btn btn-accent" id="diagProductsBtn">View Products</button>' +
+             '<button class="btn btn-accent" id="diagProductsBtn">View Products</button>' + 
               '<button class="btn btn-blue" id="diagPlanBtn">View Campaign Plan</button>' +
               '<button class="btn btn-ghost" id="diagStatusBtn">Check Amazon Status</button>' +
             '</div>' +
@@ -664,6 +664,8 @@ async function loadCampaignDiagnostics() {
         if (planBtn) planBtn.onclick = loadCampaignPlan;
         if (statusBtn) statusBtn.onclick = loadCampaignDiagnostics;
 
+        var pBtn = $$('diagProductsBtn');
+        if (pBtn) pBtn.onclick = function() { switchTab('p'); };
         var pBtn = $$('diagProductsBtn');
         if (pBtn) pBtn.onclick = function() { switchTab('p'); };
 
