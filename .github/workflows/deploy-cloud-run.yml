@@ -111,7 +111,7 @@ jobs:
             --image us-central1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }} \
             --region us-central1 \
             --platform managed \
-            --no-allow-unauthenticated \
+            --allow-unauthenticated \
             --timeout 1800 \
             --memory 1Gi \
             --set-env-vars GCP_PROJECT_ID=${{ env.GCP_PROJECT_ID }},PRIORITY_FILTER=1,PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
