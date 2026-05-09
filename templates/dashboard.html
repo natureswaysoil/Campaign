@@ -118,6 +118,10 @@
     .mode-badge.OFF_PEAK{ background: rgba(92,160,232,0.15); color: var(--blue); }
     .mode-badge.NORMAL  { background: rgba(232,162,60,0.12); color: var(--warn); }
     .mode-badge.UNKNOWN { background: rgba(138,144,119,0.12); color: var(--muted); }
+    .badge-row { display: inline-flex; align-items: center; gap: 6px; }
+    .source-badge { font-size: 9px; padding: 2px 8px; border-radius: 100px; font-weight: 700; letter-spacing: 0.05em; }
+    .source-badge.LIVE { background: rgba(126,200,80,0.20); color: var(--accent2); }
+    .source-badge.ESTIMATED { background: rgba(232,162,60,0.20); color: var(--warn); }
 
     /* PRODUCTS */
     .prod-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); overflow: hidden; }
@@ -182,6 +186,8 @@
     <button class="btn btn-warn btn-sm" onclick="applyNegatives()">Apply Negatives</button>
     <button class="btn btn-accent btn-sm" onclick="applyWinners()">Add Winners</button>
     <button class="btn btn-blue btn-sm" onclick="retuneBids()">↻ Retune Bids</button>
+    <button class="btn btn-blue btn-sm" onclick="applyEstimatedBids()">≈ Apply Estimated Bids</button>
+    <button class="btn btn-warn btn-sm" onclick="applyPendingOptimization()">⏱ Apply Pending Report</button>
     <button class="btn btn-primary btn-lg" onclick="fullOptimize()">▶ Full Optimization</button>
   </div>
 </header>
@@ -279,6 +285,9 @@
 <div class="toast" id="toast"></div>
 
 <script>
+  var SERVER_TOKEN = '';
+  /* __SERVER_TOKEN__ */
+
   var allProducts = [];
   var bidMode = 'UNKNOWN';
   var toastTmr;
@@ -350,6 +359,32 @@ async function loadCampaignDiagnostics() {
     if (v == null) return '';
     return +v < 0.30 ? 'green' : +v < 0.50 ? 'warn' : 'red';
   }
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+  function estimateBidWindow(c, applied) {
+    var base = (applied != null && isFinite(+applied)) ? +applied : 0.75;
+    var budget = +(c && c.budget && c.budget.budget != null ? c.budget.budget : 25);
+    var clicks = +(c && c.clicks != null ? c.clicks : 0);
+    var acos = (c && c.acos != null && isFinite(+c.acos)) ? +c.acos : null;
+
+    var budgetFactor = clamp(Math.sqrt(Math.max(budget, 5) / 25), 0.80, 1.40);
+    var volumeFactor = clamp(0.90 + (Math.min(clicks, 200) / 1000), 0.90, 1.10);
+
+    var perfFactor = 1.0;
+    if (acos == null) perfFactor = 0.95;
+    else if (acos <= 0.25) perfFactor = 1.18;
+    else if (acos <= 0.35) perfFactor = 1.08;
+    else if (acos <= 0.50) perfFactor = 1.00;
+    else if (acos <= 0.70) perfFactor = 0.90;
+    else perfFactor = 0.80;
+
+    var center = clamp(base * budgetFactor * volumeFactor * perfFactor, 0.25, 2.50);
+    return {
+      low: +(center * 0.72).toFixed(2),
+      high: +(center * 1.28).toFixed(2),
+    };
+  }
   function esc(s) {
     return String(s || '').replace(/[&<>"']/g, function(m) {
       return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
@@ -362,10 +397,40 @@ async function loadCampaignDiagnostics() {
     clearTimeout(toastTmr);
     toastTmr = setTimeout(function() { el.className = 'toast'; }, 4000);
   }
+
+  function parseApiResponse(r) {
+    var ct = (r.headers.get('content-type') || '').toLowerCase();
+    if (ct.indexOf('application/json') >= 0) {
+      return r.json().then(function(d){ return {ok:r.ok, status:r.status, d:d}; });
+    }
+    return r.text().then(function(t){
+      var msg = 'Request failed (' + r.status + ')';
+      if (r.status === 401 || r.status === 403) {
+        msg = 'Access denied by Cloud Run IAM. Ask to allow unauthenticated invoke or sign in to the service URL.';
+      }
+      return {
+        ok: r.ok,
+        status: r.status,
+        d: {
+          error: true,
+          message: msg,
+          raw: String(t || '').slice(0, 300),
+        }
+      };
+    });
+  }
   function getToken() {
-    var t = localStorage.getItem('nws_token');
-    if (!t) { t = prompt('Enter DAILY_OPTIMIZER_TOKEN:'); if (t) localStorage.setItem('nws_token', t); }
-    return t || '';
+    var t = (localStorage.getItem('nws_token') || '').trim();
+    if (t) return t;
+
+    var injected = String(SERVER_TOKEN || '').trim();
+    if (injected) {
+      localStorage.setItem('nws_token', injected);
+      return injected;
+    }
+
+    toast('❌ DAILY_OPTIMIZER_TOKEN is not configured on the server.', true);
+    return '';
   }
 
   // ── TABS ──
@@ -411,27 +476,43 @@ async function loadCampaignDiagnostics() {
   }
 
   // ── CAMPAIGNS ──
-  function renderCampaigns(campaigns) {
+  function renderCampaigns(campaigns, opts) {
+    opts = opts || {};
     var el = $$('campGrid');
     $$('campCount').textContent = '(' + campaigns.length + ')';
     if (!campaigns.length) {
-  el.innerHTML =
-    '<div class="empty">' +
-      '<div class="ico">📭</div>' +
-      '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">No enabled campaigns found</div>' +
-      '<div style="max-width:720px;margin:0 auto 18px;line-height:1.6">' +
-        'The dashboard is connected, but this Amazon Ads profile is not returning enabled campaigns. ' +
-        'This usually means campaigns are paused, the wrong profile ID is selected, or new campaigns have not been launched yet.' +
-      '</div>' +
-      '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
-        '<button class="btn btn-accent" id="diagProductsBtn">View Products & Launch</button>' +
-        '<button class="btn btn-blue" onclick="loadCampaignPlan()">View Campaign Plan</button>' +
-        '<button class="btn btn-ghost" onclick="loadCampaignDiagnostics()">Check Amazon Status</button>' +
-      '</div>' +
-      '<div id="campaignDiagBox" style="margin-top:18px"></div>' +
-    '</div>';
-  return;
-}
+      if (opts.rebuilding) {
+        el.innerHTML =
+          '<div class="empty">' +
+            '<div class="ico">⏳</div>' +
+            '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">Building dashboard cache</div>' +
+            '<div style="max-width:720px;margin:0 auto 8px;line-height:1.6">' +
+              'Pulling fresh campaign data from Amazon — this can take several minutes on cold start.' +
+            '</div>' +
+            '<div style="font-size:10px;color:var(--muted)">The page will auto-refresh while the rebuild is running.</div>' +
+          '</div>';
+        return;
+      }
+
+      el.innerHTML =
+        '<div class="empty">' +
+          '<div class="ico">📭</div>' +
+          '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">No enabled campaigns found</div>' +
+          '<div style="max-width:720px;margin:0 auto 18px;line-height:1.6">' +
+            'The dashboard is connected, but this Amazon Ads profile is not returning enabled campaigns. ' +
+            'This usually means campaigns are paused, the wrong profile ID is selected, or new campaigns have not been launched yet.' +
+          '</div>' +
+          '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
+            '<button class="btn btn-accent" id="diagProductsBtn">View Products & Launch</button>' +
+            '<button class="btn btn-blue" onclick="loadCampaignPlan()">View Campaign Plan</button>' +
+            '<button class="btn btn-ghost" onclick="loadCampaignDiagnostics()">Check Amazon Status</button>' +
+          '</div>' +
+          '<div id="campaignDiagBox" style="margin-top:18px"></div>' +
+        '</div>';
+
+      var pBtn = $$('diagProductsBtn');
+      if (pBtn) pBtn.onclick = function() { switchTab('p'); };
+      return;
     }
     el.innerHTML = campaigns.map(function(c) {
       var name = esc(c.campaignName || c.name || 'Unnamed');
@@ -445,13 +526,27 @@ async function loadCampaignDiagnostics() {
       var high = c.amazonSuggestedBidHigh;
       var applied = c.currentAppliedBid;
       var hasBid = low != null && high != null;
+      var estimated = false;
+      var sourceLabel = 'LIVE';
+
+      if (!hasBid) {
+        var est = estimateBidWindow(c, applied);
+        low = est.low;
+        high = est.high;
+        hasBid = true;
+        estimated = true;
+        sourceLabel = 'ESTIMATED';
+      }
 
       var appliedClass = 'applied ' + mode;
       var bidWindowHtml = hasBid
         ? '<div class="bid-window">' +
             '<div class="bid-window-title">' +
-              '<span>Amazon Suggested Bid Window</span>' +
-              '<span class="mode-badge ' + mode + '">' + mode + '</span>' +
+              '<span>' + (estimated ? 'Estimated Bid Window (preview)' : 'Amazon Suggested Bid Window') + '</span>' +
+              '<span class="badge-row">' +
+                '<span class="source-badge ' + sourceLabel + '">' + sourceLabel + '</span>' +
+                '<span class="mode-badge ' + mode + '">' + mode + '</span>' +
+              '</span>' +
             '</div>' +
             '<div class="bid-slots">' +
               '<div class="bid-slot">' +
@@ -468,7 +563,7 @@ async function loadCampaignDiagnostics() {
               '</div>' +
             '</div>' +
           '</div>'
-        : '<div class="bid-window"><div style="font-size:10px;color:var(--muted);text-align:center;padding:4px 0">Bid data in cache — click Refresh Cache to update</div></div>';
+        : '<div class="bid-window"><div style="font-size:10px;color:var(--muted);text-align:center;padding:4px 0">Bid window unavailable</div></div>';
 
       return '<div class="camp-card">' +
         '<div class="camp-hdr">' +
@@ -548,26 +643,31 @@ async function loadCampaignDiagnostics() {
     $$('lpLow').textContent = '…'; $$('lpMid').textContent = '…'; $$('lpHigh').textContent = '…';
     $$('launchOverlay').classList.add('open');
 
-    // Fetch live bid recommendation if ASIN available
-    if (p.asin) fetchLiveBidRec(p.asin, +p.suggested_bid || 0.85);
+    // Fetch live bid recommendation with product context.
+    if (p.asin || p.title) fetchLiveBidRec(p.asin, p.title, +p.suggested_bid || 0.85);
   }
 
-  function fetchLiveBidRec(asin, fallback) {
+  function fetchLiveBidRec(asin, keyword, fallback) {
     // Show fallback immediately, update when API responds
     $$('lpLow').textContent  = money(fallback * 0.70);
     $$('lpMid').textContent  = money(fallback);
     $$('lpHigh').textContent = money(fallback * 1.30);
 
-    fetch('/api/bid-recommendation?asin=' + encodeURIComponent(asin))
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        if (d.low)  $$('lpLow').textContent  = money(d.low);
-        if (d.high) $$('lpHigh').textContent = money(d.high);
-        if (d.suggested) $$('lpMid').textContent = money(d.suggested);
+    var qs = '/api/bid-recommendation?asin=' + encodeURIComponent(asin || '') +
+             '&keyword=' + encodeURIComponent(keyword || '') +
+             '&fallback_bid=' + encodeURIComponent(fallback || 0.85);
+    fetch(qs)
+      .then(parseApiResponse)
+      .then(function(r){
+        if (!r.ok || !r.d || r.d.error) return;
+        var d = r.d;
+        if (d.low != null)  $$('lpLow').textContent  = money(d.low);
+        if (d.high != null) $$('lpHigh').textContent = money(d.high);
+        if (d.suggested != null) $$('lpMid').textContent = money(d.suggested);
         // Auto-set bid based on current mode
         var mode = (d.bid_mode || bidMode || 'NORMAL').toUpperCase();
         var autoBid = mode === 'PEAK' ? d.high : mode === 'OFF_PEAK' ? d.low : d.suggested;
-        if (autoBid) $$('lBid').value = (+autoBid).toFixed(2);
+        if (autoBid != null) $$('lBid').value = (+autoBid).toFixed(2);
       })
       .catch(function(){ /* keep fallbacks */ });
   }
@@ -577,10 +677,26 @@ async function loadCampaignDiagnostics() {
   function doLaunch() {
     var pid = $$('lPid').value;
     if (!pid) return;
+    var budget = +$$('lBudget').value;
+    var bid = +$$('lBid').value;
+    if (!isFinite(budget) || budget < 1) {
+      toast('❌ Daily budget must be at least $1.00', true);
+      return;
+    }
+    if (!isFinite(bid) || bid < 0.02) {
+      toast('❌ Starting bid must be at least $0.02', true);
+      return;
+    }
+
     var btn = $$('launchBtn');
     btn.disabled = true;
     btn.innerHTML = '<span class="loader"></span> Launching...';
     var token = getToken();
+    if (!token) {
+      btn.disabled = false;
+      btn.innerHTML = '🚀 Launch Live Campaign';
+      return;
+    }
     fetch('/api/create-campaign-from-product', {
       method: 'POST',
       headers: {
@@ -588,8 +704,12 @@ async function loadCampaignDiagnostics() {
         'Authorization': 'Bearer ' + token,
         'X-Daily-Optimizer-Token': token,
       },
-      body: JSON.stringify({ product_id: pid })
-    }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+      body: JSON.stringify({
+        product_id: pid,
+        daily_budget: Number(budget.toFixed(2)),
+        starting_bid: Number(bid.toFixed(2))
+      })
+    }).then(parseApiResponse)
     .then(function(r){
       if (!r.ok || r.d.error) throw new Error(r.d.message || 'Launch failed');
       closeModal();
@@ -606,7 +726,7 @@ async function loadCampaignDiagnostics() {
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+token,'X-Daily-Optimizer-Token':token},
       body: JSON.stringify(body||{})
-    }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+    }).then(parseApiResponse)
     .then(function(r){
       if (!r.ok || r.d.error) throw new Error(r.d.message || 'Error');
       toast(msg || '✅ Done');
@@ -618,11 +738,35 @@ async function loadCampaignDiagnostics() {
   function applyNegatives() { postAction('/api/apply-negatives', {lookback_days:14, refresh_cache_after:true}, '✅ Negatives applied!'); }
   function applyWinners()   { postAction('/api/apply-winners',  {lookback_days:14, winner_bid:0.90, refresh_cache_after:true}, '✅ Winners added with peak/off-peak bids!'); }
   function retuneBids()     { postAction('/api/retune-existing-bids', {}, '✅ Bids retuned! High for peak, low for off-peak.'); }
+  function applyEstimatedBids() {
+    if (!confirm('Apply estimated bids to existing enabled keywords now?')) return;
+    postAction(
+      '/api/apply-estimated-bids',
+      { apply_live: true, max_campaigns: 50, max_keywords_per_campaign: 100 },
+      '✅ Estimated bids applied to existing keywords.'
+    );
+  }
   function fullOptimize()   {
     postAction('/api/run-daily-optimization', {
       apply_negatives_live:true, apply_winners_live:true,
       lookback_days:14, winner_bid:0.90
-    }, '✅ Full optimization triggered! Apply-optimization runs next.');
+    }, '✅ Report requested. Use “Apply Pending Report” in 30–60 min to apply results.');
+  }
+  function applyPendingOptimization() {
+    var token = getToken(); if (!token) return;
+    fetch('/api/apply-optimization', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+token,'X-Daily-Optimizer-Token':token},
+    }).then(parseApiResponse)
+    .then(function(r){
+      if (r.status === 202) { toast('⏱ ' + (r.d.message || 'Report not ready yet'), true); return; }
+      if (r.status === 404) { toast('ℹ️ No pending report found. Run Full Optimization first.', true); return; }
+      if (!r.ok || r.d.error) throw new Error(r.d.message || 'Apply failed');
+      toast('✅ Pending report applied: '
+        + (r.d.winners_applied_count||0) + ' winners, '
+        + (r.d.negatives_applied_count||0) + ' negatives.');
+      setTimeout(loadDashboard, 1500);
+    }).catch(function(e){ toast('❌ ' + e.message, true); });
   }
 
   // ── LOAD ──
@@ -640,8 +784,13 @@ async function loadCampaignDiagnostics() {
           return String(c.state || '').toUpperCase() === 'PAUSED';
         });
 
-        renderCampaigns(enabled);
+        renderCampaigns(enabled, { rebuilding: !!data.cache_rebuild_in_progress });
         $$('campCount').textContent = '(' + enabled.length + ' enabled / ' + paused.length + ' paused)';
+
+        // Auto-poll while a cold-start cache rebuild is in flight.
+        if (data.cache_rebuild_in_progress) {
+          setTimeout(loadDashboard, 30000);
+        }
       })
       .catch(function(err) {
         $$('campGrid').innerHTML =
@@ -650,7 +799,7 @@ async function loadCampaignDiagnostics() {
             '<div style="font-family:Syne,sans-serif;font-size:18px;color:var(--text);margin-bottom:8px">Dashboard data failed to load</div>' +
             '<div style="max-width:760px;margin:0 auto 18px;line-height:1.6">' + esc(err.message) + '</div>' +
             '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
-             '<button class="btn btn-accent" id="diagProductsBtn">View Products</button>' + 
+              '<button class="btn btn-accent" id="diagProductsBtn">View Products</button>' +
               '<button class="btn btn-blue" id="diagPlanBtn">View Campaign Plan</button>' +
               '<button class="btn btn-ghost" id="diagStatusBtn">Check Amazon Status</button>' +
             '</div>' +
@@ -664,11 +813,6 @@ async function loadCampaignDiagnostics() {
         if (planBtn) planBtn.onclick = loadCampaignPlan;
         if (statusBtn) statusBtn.onclick = loadCampaignDiagnostics;
 
-        var pBtn = $$('diagProductsBtn');
-        if (pBtn) pBtn.onclick = function() { switchTab('p'); };
-        var pBtn = $$('diagProductsBtn');
-        if (pBtn) pBtn.onclick = function() { switchTab('p'); };
-
         renderBanner({ bid_mode: 'UNKNOWN', note: 'Dashboard API error' });
         renderSummary({ spend: 0, sales: 0, clicks: 0, orders: 0, acos: null });
         toast(err.message, true);
@@ -677,7 +821,7 @@ async function loadCampaignDiagnostics() {
 
   function loadProducts() {
     fetch('/api/products')
-      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+      .then(parseApiResponse)
       .then(function(r){
         if (!r.ok || r.d.error) throw new Error(r.d.message || 'Load failed');
         allProducts = r.d.products || [];

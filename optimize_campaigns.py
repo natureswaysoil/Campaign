@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import csv
 import io
 import requests
+import threading
 from google.cloud import storage as gcs_storage
 from campaign_engine import build_all_campaign_plans, clean_product_rows
 
@@ -48,6 +49,8 @@ WINNER_MAX_ACOS = float(os.getenv("WINNER_MAX_ACOS", "0.35"))
 NEGATIVE_MIN_CLICKS = int(os.getenv("NEGATIVE_MIN_CLICKS", "20"))
 DEFAULT_WINNER_BID = float(os.getenv("DEFAULT_WINNER_BID", "0.90"))
 DEFAULT_FALLBACK_BID = float(os.getenv("DEFAULT_FALLBACK_BID", "0.75"))
+ZERO_ACTION_STREAK_THRESHOLD = int(os.getenv("ZERO_ACTION_STREAK_THRESHOLD", "3"))
+ZERO_ACTION_WINDOW_RUNS = int(os.getenv("ZERO_ACTION_WINDOW_RUNS", "10"))
 
 MEDIA_TYPES = {
     "campaigns_v3": "application/vnd.spcampaign.v3+json",
@@ -76,7 +79,7 @@ def iso_date_days_ago(days: int) -> str:
 
 
 def utc_now_iso() -> str:
-    return datetime.datetime.utcnow().isoformat() + "Z"
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def current_hour_eastern() -> int:
@@ -116,6 +119,53 @@ def save_optimizer_history(entry: Dict[str, Any]) -> None:
         OPTIMIZER_LOG_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning("Failed to save optimizer history: %s", e)
+
+
+def get_zero_action_streak_snapshot() -> Dict[str, Any]:
+    history = load_optimizer_history()
+    if not history:
+        return {
+            "current_zero_action_streak": 0,
+            "threshold": ZERO_ACTION_STREAK_THRESHOLD,
+            "window_runs": ZERO_ACTION_WINDOW_RUNS,
+        }
+
+    streak = 0
+    considered = 0
+
+    for entry in reversed(history):
+        action = str(entry.get("action") or "")
+        if action not in {"apply_optimization", "apply_winners", "apply_negatives", "retune_existing_bids"}:
+            continue
+
+        considered += 1
+        winners = int(entry.get("winners_applied_count", 0) or 0)
+        negatives = int(entry.get("negatives_applied_count", 0) or 0)
+        retuned = int(entry.get("existing_keyword_bids_updated", 0) or 0)
+
+        if winners == 0 and negatives == 0 and retuned == 0:
+            streak += 1
+        else:
+            break
+
+        if considered >= ZERO_ACTION_WINDOW_RUNS:
+            break
+
+    return {
+        "current_zero_action_streak": streak,
+        "threshold": ZERO_ACTION_STREAK_THRESHOLD,
+        "window_runs": ZERO_ACTION_WINDOW_RUNS,
+    }
+
+
+def api_optimizer_status() -> Dict[str, Any]:
+    return {
+        "schedule": "daily",
+        "lookback_days": 14,
+        "bid_mode": get_bid_mode(),
+        "peak_hours": {"start": PEAK_START, "end": PEAK_END},
+        "off_peak_hours": {"start": OFF_START, "end": OFF_END},
+    }
 
 
 def verify_internal_token(
@@ -210,6 +260,85 @@ def choose_bid(rec: Dict[str, float], fallback: float) -> Tuple[float, float, fl
     return round(low, 2), round(high, 2), applied
 
 
+def choose_campaign_applied_bid(
+    low: float,
+    high: float,
+    mode: str,
+    acos: Optional[float],
+    clicks: int,
+) -> float:
+    """Select an applied bid inside the low/high window using campaign performance."""
+    low = float(low or 0)
+    high = float(high or 0)
+    mode = (mode or "NORMAL").upper()
+
+    if low <= 0 or high <= 0:
+        return 0.0
+
+    if mode == "PEAK":
+        return round(high, 2)
+    if mode == "OFF_PEAK":
+        return round(low, 2)
+
+    # NORMAL mode: stronger efficiency trends toward the high side of the range.
+    if acos is None:
+        perf_weight = 0.50
+    elif acos <= 0.25:
+        perf_weight = 0.85
+    elif acos <= 0.35:
+        perf_weight = 0.70
+    elif acos <= 0.50:
+        perf_weight = 0.50
+    elif acos <= 0.70:
+        perf_weight = 0.35
+    else:
+        perf_weight = 0.20
+
+    confidence = max(0.0, min(float(clicks or 0) / 40.0, 1.0))
+    weight = 0.50 + ((perf_weight - 0.50) * confidence)
+    applied = low + ((high - low) * weight)
+    return round(applied, 2)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def estimate_campaign_center_bid(campaign_row: Dict[str, Any], fallback: float = DEFAULT_FALLBACK_BID) -> float:
+    """Estimate a campaign-level center bid when Amazon low/high recommendations are unavailable."""
+    applied = float(campaign_row.get("currentAppliedBid") or 0.0)
+    base = applied if applied > 0 else float(fallback)
+
+    budget = float(num(campaign_row, ["budget", "dailyBudget"], 0.0))
+    if not budget and isinstance(campaign_row.get("budget"), dict):
+        budget = float(num(campaign_row["budget"], ["budget"], 25.0))
+    if budget <= 0:
+        budget = 25.0
+
+    clicks = int(num(campaign_row, ["clicks"], 0))
+    acos_raw = campaign_row.get("acos")
+    acos = float(acos_raw) if acos_raw not in (None, "") else None
+
+    budget_factor = _clamp((budget / 25.0) ** 0.5, 0.80, 1.40)
+    volume_factor = _clamp(0.90 + (min(clicks, 200) / 1000.0), 0.90, 1.10)
+
+    if acos is None:
+        perf_factor = 0.95
+    elif acos <= 0.25:
+        perf_factor = 1.18
+    elif acos <= 0.35:
+        perf_factor = 1.08
+    elif acos <= 0.50:
+        perf_factor = 1.00
+    elif acos <= 0.70:
+        perf_factor = 0.90
+    else:
+        perf_factor = 0.80
+
+    center = base * budget_factor * volume_factor * perf_factor
+    return round(_clamp(center, 0.25, 2.50), 2)
+
+
 def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     winners: List[Dict[str, Any]] = []
     negatives: List[Dict[str, Any]] = []
@@ -277,6 +406,40 @@ def read_cache() -> Dict[str, Any]:
 
 def write_cache(data: Dict[str, Any]) -> None:
     CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+# Background cache-rebuild guard. Cloud Run /tmp is ephemeral, so the first
+# request after a cold start finds an empty cache. We must never block the
+# dashboard request on the (potentially 30+ minute) Amazon report flow.
+_cache_rebuild_lock = threading.Lock()
+_cache_rebuild_in_progress = False
+
+
+def _rebuild_cache_in_background(lookback_days: int = 14) -> None:
+    global _cache_rebuild_in_progress
+    try:
+        build_dashboard_cache(lookback_days=lookback_days)
+    except Exception as e:
+        logger.warning("Background cache rebuild failed: %s", e)
+    finally:
+        with _cache_rebuild_lock:
+            _cache_rebuild_in_progress = False
+
+
+def trigger_background_cache_rebuild(lookback_days: int = 14) -> bool:
+    """Start a non-blocking dashboard cache rebuild. Returns True if a rebuild
+    was started, False if one was already running."""
+    global _cache_rebuild_in_progress
+    with _cache_rebuild_lock:
+        if _cache_rebuild_in_progress:
+            return False
+        _cache_rebuild_in_progress = True
+    threading.Thread(
+        target=_rebuild_cache_in_background,
+        kwargs={"lookback_days": lookback_days},
+        daemon=True,
+    ).start()
+    return True
 
 
 class AmazonAdsClient:
@@ -552,7 +715,7 @@ def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict[s
     return [{
         "campaignId": str(campaign_id),
         "keywordText": term,
-        "matchType": "negativeExact",
+        "matchType": "NEGATIVE_EXACT",
         "state": "ENABLED",
     } for term in negatives]
 
@@ -623,16 +786,26 @@ def build_dashboard_cache(lookback_days: int = 14) -> Dict[str, Any]:
 
         if keywords:
             kw = keywords[0]
+            current_bid = float(kw.get("bid") or 0.0)
             rec = client.get_bid_recommendation(
                 cid,
                 str(kw.get("adGroupId") or ""),
                 str(kw.get("keywordText") or ""),
                 str(kw.get("matchType") or "PHRASE"),
             )
-            low, high, applied_bid = choose_bid(rec, float(kw.get("bid") or DEFAULT_FALLBACK_BID))
-            bid_low = low
-            bid_high = high
-            applied = applied_bid
+            low, high, applied_bid = choose_bid(
+                rec,
+                current_bid if current_bid > 0 else DEFAULT_FALLBACK_BID,
+            )
+            if low > 0 and high > 0:
+                applied_bid = choose_campaign_applied_bid(low, high, mode, acos, clicks)
+                bid_low = low
+                bid_high = high
+                applied = applied_bid
+            else:
+                bid_low = None
+                bid_high = None
+                applied = round(current_bid, 2) if current_bid > 0 else None
 
         results.append({
             **c,
@@ -849,6 +1022,9 @@ def retune_existing_bids_step(client: AmazonAdsClient) -> List[Dict[str, Any]]:
                 str(match_type),
             )
             low, high, applied = choose_bid(rec, current_bid)
+            if not (low > 0 and high > 0):
+                # Skip bid writes when Amazon does not provide a valid recommendation window.
+                continue
 
             # PUT payload: keywordId + bid + state ONLY (no keywordText/matchType — causes 400)
             update_rows.append({
@@ -872,6 +1048,72 @@ def retune_existing_bids_step(client: AmazonAdsClient) -> List[Dict[str, Any]]:
             client.update_keywords(update_rows)
 
     return bids_updated
+
+
+def apply_estimated_bids_step(
+    client: AmazonAdsClient,
+    max_campaigns: int = 50,
+    max_keywords_per_campaign: int = 100,
+    apply_live: bool = True,
+) -> List[Dict[str, Any]]:
+    cache = read_cache()
+    cache_campaigns = cache.get("campaigns") or []
+    by_campaign_id = {str(c.get("campaignId") or ""): c for c in cache_campaigns}
+
+    campaigns = client.list_campaigns()
+    updates: List[Dict[str, Any]] = []
+
+    for c in campaigns[:max_campaigns]:
+        cid = str(c.get("campaignId") or "")
+        if not cid:
+            continue
+
+        cached = by_campaign_id.get(cid, {})
+        center_bid = estimate_campaign_center_bid(cached or {}, DEFAULT_FALLBACK_BID)
+
+        try:
+            keywords = client.list_keywords(cid)
+        except Exception:
+            continue
+
+        put_rows: List[Dict[str, Any]] = []
+        for kw in keywords[:max_keywords_per_campaign]:
+            keyword_id = kw.get("keywordId")
+            if not keyword_id:
+                continue
+
+            match_type = str(kw.get("matchType") or "PHRASE").upper()
+            if match_type == "EXACT":
+                bid = round(center_bid * 1.08, 2)
+            elif match_type == "BROAD":
+                bid = round(center_bid * 0.90, 2)
+            else:
+                bid = center_bid
+
+            bid = round(_clamp(bid, 0.02, 5.00), 2)
+            state = str(kw.get("state") or "ENABLED").upper()
+            if state == "ARCHIVED":
+                continue
+
+            row = {
+                "keywordId": str(keyword_id),
+                "bid": bid,
+                "state": state,
+            }
+            put_rows.append(row)
+            updates.append({
+                "campaign_id": cid,
+                "keyword_id": str(keyword_id),
+                "keyword_text": str(kw.get("keywordText") or ""),
+                "match_type": match_type,
+                "applied_bid": bid,
+                "source": "estimated",
+            })
+
+        if apply_live and put_rows:
+            client.update_keywords(put_rows)
+
+    return updates
 
 
 # ========================= PRODUCTS =========================
@@ -915,9 +1157,79 @@ def normalized_product(p: dict) -> dict:
         "price": price,
         "active": active,
         "category": p.get("Category",""),
+        "keywords": p.get("Keywords",""),
+        "research_keywords": p.get("Research_Keywords",""),
         "suggested_budget": budget,
         "suggested_bid": bid,
     }
+
+
+# ========================= KEYWORD GENERATION =========================
+_KEYWORD_STOPWORDS = {
+    "the", "and", "for", "with", "from", "your", "you", "our", "this", "that",
+    "also", "very", "just", "any", "all", "each", "both", "into", "more",
+}
+
+
+def _normalize_kw(text_value: str) -> str:
+    text_value = (text_value or "").lower()
+    text_value = re.sub(r"[^a-z0-9\s-]", " ", text_value)
+    return re.sub(r"\s+", " ", text_value).strip()
+
+
+def _parse_keyword_cell(value: str) -> List[str]:
+    if not value:
+        return []
+    parts = re.split(r"[\n,;|]+", value)
+    return [_normalize_kw(p) for p in parts if _normalize_kw(p)]
+
+
+def _title_ngrams(title: str) -> List[str]:
+    clean = _normalize_kw(title)
+    words = [w for w in clean.split() if w not in _KEYWORD_STOPWORDS and len(w) > 2]
+    phrases = [clean] if clean else []
+    for n in (2, 3):
+        for i in range(len(words) - n + 1):
+            phrases.append(" ".join(words[i:i + n]))
+    return phrases
+
+
+def _category_keyword_hints(category: str) -> List[str]:
+    c = _normalize_kw(category)
+    hints: List[str] = []
+    if "dog" in c or "pet" in c:
+        hints += ["dog urine neutralizer", "dog urine lawn repair", "pet urine grass treatment"]
+    if "pasture" in c or "hay" in c or "lawn" in c:
+        hints += ["pasture fertilizer", "hay fertilizer", "liquid lawn fertilizer", "grass fertilizer"]
+    if "bone" in c or "bloom" in c:
+        hints += ["liquid bone meal", "phosphorus fertilizer", "bloom fertilizer"]
+    return hints
+
+
+def generate_keywords_for_product(product_row: dict, limit: int = 30) -> List[str]:
+    """Build keyword list from a raw product CSV row.
+
+    Combines explicit Keywords/Research_Keywords cells, n-grams from the title,
+    and category-based hints. Mirrors the launch-modal preview behavior so the
+    keywords actually attached to a launched campaign match what the user saw.
+    """
+    merged: List[str] = []
+    merged.extend(_parse_keyword_cell(product_row.get("Keywords", "")))
+    merged.extend(_parse_keyword_cell(product_row.get("Research_Keywords", "")))
+    merged.extend(_title_ngrams(product_row.get("Title", "")))
+    merged.extend(_category_keyword_hints(product_row.get("Category", "")))
+
+    seen: set = set()
+    out: List[str] = []
+    for kw in merged:
+        kw = _normalize_kw(kw)
+        if not kw or len(kw) < 3 or len(kw) > 40 or kw in seen:
+            continue
+        seen.add(kw)
+        out.append(kw)
+        if len(out) >= limit:
+            break
+    return out
 
 @app.get("/api/products")
 def api_products() -> JSONResponse:
@@ -1001,10 +1313,38 @@ def api_create_campaign(
         key = (payload.get("product_id") or payload.get("sku") or "").lower().strip()
         if not key:
             return JSONResponse({"error": True, "message": "product_id or sku required"}, status_code=400)
-        product = next((normalized_product(r) for r in load_products()
-                        if r.get("Product_ID","").lower()==key or r.get("SKU","").lower()==key), None)
+        product = None
+        product_row: Dict[str, Any] = {}
+        for r in load_products():
+            if r.get("Product_ID","").lower()==key or r.get("SKU","").lower()==key:
+                product = normalized_product(r)
+                product_row = r
+                break
         if not product:
             return JSONResponse({"error": True, "message": "Product not found"}, status_code=404)
+
+        # Respect user overrides from launch modal while preserving safe defaults.
+        def parse_positive_float(raw: Any, default: float, min_value: float) -> float:
+            if raw in (None, ""):
+                return round(float(default), 2)
+            try:
+                value = float(str(raw).strip())
+            except Exception:
+                raise ValueError(f"Invalid numeric value: {raw}")
+            if value < min_value:
+                raise ValueError(f"Value must be >= {min_value}")
+            return round(value, 2)
+
+        daily_budget = parse_positive_float(
+            payload.get("daily_budget", payload.get("budget")),
+            float(product["suggested_budget"]),
+            1.0,
+        )
+        starting_bid = parse_positive_float(
+            payload.get("starting_bid", payload.get("bid")),
+            float(product["suggested_bid"]),
+            0.02,
+        )
 
         client = AmazonAdsClient()
         import datetime, re, unicodedata, html as html_mod
@@ -1020,7 +1360,7 @@ def api_create_campaign(
                 "name": f"{sanitize(product['title'])[:80]} | MANUAL | {start_date}",
                 "targetingType": "MANUAL",
                 "state": "ENABLED",
-                "budget": {"budget": product["suggested_budget"], "budgetType": "DAILY"},
+                "budget": {"budget": daily_budget, "budgetType": "DAILY"},
                 "startDate": start_date,
             }]
         }, content_type="application/vnd.spcampaign.v3+json",
@@ -1050,7 +1390,7 @@ def api_create_campaign(
                 "name": "Main Ad Group",
                 "campaignId": str(camp_id),
                 "state": "ENABLED",
-                "defaultBid": product["suggested_bid"],
+                "defaultBid": starting_bid,
             }]
         }, content_type="application/vnd.spadgroup.v3+json",
            accept="application/vnd.spadgroup.v3+json")
@@ -1067,15 +1407,38 @@ def api_create_campaign(
         }, content_type="application/vnd.spproductad.v3+json",
            accept="application/vnd.spproductad.v3+json")
 
+        # Auto-generate and attach keywords so the launched campaign actually
+        # has targeted terms — this matches the keyword preview shown in the
+        # launch modal.
+        keywords = generate_keywords_for_product(product_row)
+        keywords_created = 0
+        if keywords and ag_id and camp_id:
+            try:
+                kw_rows = keyword_create_rows(
+                    keywords,
+                    int(camp_id),
+                    int(ag_id),
+                    {kw: starting_bid for kw in keywords},
+                )
+                if kw_rows:
+                    client.create_keywords(kw_rows)
+                    keywords_created = len(kw_rows)
+            except Exception as kw_err:
+                logger.warning("Keyword creation failed for new campaign %s: %s", camp_id, kw_err)
+
         return JSONResponse({
             "success": True,
             "campaign_id": camp_id,
             "ad_group_id": ag_id,
             "product": product["title"],
             "asin": product["asin"],
-            "daily_budget": product["suggested_budget"],
-            "starting_bid": product["suggested_bid"],
+            "daily_budget": daily_budget,
+            "starting_bid": starting_bid,
+            "keywords_count": len(keywords),
+            "keyword_rows_created": keywords_created,
         })
+    except ValueError as e:
+        return JSONResponse({"error": True, "message": str(e)}, status_code=400)
     except Exception as e:
         logger.exception("Campaign creation failed")
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
@@ -1088,11 +1451,21 @@ def dashboard() -> HTMLResponse:
         html = path.read_text(encoding="utf-8")
         # Inject token so browser never prompts — replaced at serve time
         token = os.getenv("DAILY_OPTIMIZER_TOKEN", "")
-        html = html.replace(
+        replaced = html.replace(
             "/* __SERVER_TOKEN__ */",
             "var SERVER_TOKEN = " + json.dumps(token) + ";",
         )
-        return HTMLResponse(html)
+        if replaced == html:
+            replaced = html.replace("var SERVER_TOKEN = '';", "var SERVER_TOKEN = " + json.dumps(token) + ";")
+
+        return HTMLResponse(
+            replaced,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     except Exception as e:
         logger.exception("Dashboard load failed")
         return HTMLResponse(
@@ -1113,7 +1486,11 @@ def optimizer_history() -> Dict[str, Any]:
 
 
 @app.get("/api/bid-recommendation")
-def api_bid_recommendation(asin: str = "", keyword: str = "fertilizer") -> JSONResponse:
+def api_bid_recommendation(
+    asin: str = "",
+    keyword: str = "fertilizer",
+    fallback_bid: float = DEFAULT_FALLBACK_BID,
+) -> JSONResponse:
     """Return live Amazon suggested bid range for a product/keyword.
     Used by the launch modal to pre-fill bids based on current peak/off-peak mode.
     """
@@ -1121,16 +1498,35 @@ def api_bid_recommendation(asin: str = "", keyword: str = "fertilizer") -> JSONR
         client = AmazonAdsClient()
         mode = get_bid_mode()
 
-        # Try to find the first campaign/ad-group to use as context for the recommendation
+        # Try to find a campaign/ad-group keyword context related to the requested keyword.
         try:
             campaigns = client.list_campaigns()
-            camp = campaigns[0] if campaigns else None
-            cid = str(camp.get("campaignId", "")) if camp else ""
-            kws = client.list_keywords(cid) if cid else []
-            kw = kws[0] if kws else {}
-            ag_id = str(kw.get("adGroupId", "")) if kw else ""
-            kw_text = kw.get("keywordText", keyword) or keyword
-            match_type = kw.get("matchType", "PHRASE") or "PHRASE"
+            cid, ag_id, kw_text, match_type = "", "", keyword, "PHRASE"
+            needle = (keyword or "").strip().lower()
+
+            for camp in campaigns[:30]:
+                candidate_cid = str(camp.get("campaignId", ""))
+                if not candidate_cid:
+                    continue
+                kws = client.list_keywords(candidate_cid)
+                if not kws:
+                    continue
+
+                match_kw = None
+                if needle:
+                    for k in kws[:80]:
+                        kt = str(k.get("keywordText") or "").lower()
+                        if needle in kt or kt in needle:
+                            match_kw = k
+                            break
+
+                kw = match_kw or kws[0]
+                cid = candidate_cid
+                ag_id = str(kw.get("adGroupId", ""))
+                kw_text = str(kw.get("keywordText") or keyword or "fertilizer")
+                match_type = str(kw.get("matchType") or "PHRASE")
+                if ag_id:
+                    break
         except Exception:
             cid, ag_id, kw_text, match_type = "", "", keyword, "PHRASE"
 
@@ -1138,24 +1534,26 @@ def api_bid_recommendation(asin: str = "", keyword: str = "fertilizer") -> JSONR
         if cid and ag_id:
             rec = client.get_bid_recommendation(cid, ag_id, kw_text, match_type)
 
-        low  = rec.get("low")
-        high = rec.get("high")
+        low, high, applied = choose_bid(rec, fallback_bid)
         suggested = rec.get("suggested")
+        if not suggested and low > 0 and high > 0:
+            suggested = round((low + high) / 2.0, 2)
 
-        # Choose applied bid based on mode
-        if low and high:
-            applied = high if mode == "PEAK" else (low if mode == "OFF_PEAK" else round((low + high) / 2, 2))
-        else:
-            applied = None
+        if not (low > 0 and high > 0):
+            low = None
+            high = None
+            suggested = None
 
         return JSONResponse({
             "bid_mode": mode,
             "peak_hours_label": f"{PEAK_START}:00-{PEAK_END}:59 EST",
+            "asin": asin,
+            "keyword": kw_text,
             "low": low,
             "high": high,
             "suggested": suggested,
             "applied": applied,
-            "note": "live" if rec else "fallback-no-recommendation-available",
+            "note": "live" if (low and high) else "fallback-no-recommendation-available",
         })
     except Exception as e:
         logger.warning("Bid recommendation endpoint failed: %s", e)
@@ -1166,13 +1564,33 @@ def api_bid_recommendation(asin: str = "", keyword: str = "fertilizer") -> JSONR
 @app.get("/api/dashboard-data")
 def dashboard_data() -> JSONResponse:
     cache = read_cache()
+    rebuild_started = False
     if not cache.get("campaigns"):
-        try:
-            logger.info("Cache empty — auto-rebuilding dashboard cache")
-            cache = build_dashboard_cache(lookback_days=14)
-        except Exception as e:
-            logger.warning("Auto cache rebuild failed: %s", e)
-    return JSONResponse(cache)
+        # Never block the dashboard request — the Amazon report flow can take
+        # 30+ minutes. Kick off a background rebuild and return the empty
+        # cache so the UI can render its empty state immediately.
+        rebuild_started = trigger_background_cache_rebuild(lookback_days=14)
+
+    payload = dict(cache)
+    payload["status"] = api_optimizer_status()
+    payload["ops"] = {"zero_action": get_zero_action_streak_snapshot()}
+    payload["cache_rebuild_in_progress"] = _cache_rebuild_in_progress
+    if rebuild_started:
+        payload["note"] = (
+            "Dashboard cache is rebuilding in the background. "
+            "This can take several minutes — refresh shortly."
+        )
+    return JSONResponse(payload)
+
+
+@app.get("/api/optimizer-status")
+def optimizer_status() -> Dict[str, Any]:
+    return api_optimizer_status()
+
+
+@app.get("/api/ops-status")
+def ops_status() -> Dict[str, Any]:
+    return {"alerts": {"zero_action": get_zero_action_streak_snapshot()}}
 
 
 @app.post("/api/refresh-dashboard-cache")
@@ -1400,6 +1818,50 @@ def retune_existing_bids(
         })
     except Exception as e:
         logger.exception("Retune existing bids failed")
+        return JSONResponse({"error": True, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/apply-estimated-bids")
+def apply_estimated_bids(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        apply_live = bool(payload.get("apply_live", False))
+        max_campaigns = int(payload.get("max_campaigns", 50))
+        max_keywords_per_campaign = int(payload.get("max_keywords_per_campaign", 100))
+
+        client = AmazonAdsClient()
+        updates = apply_estimated_bids_step(
+            client,
+            max_campaigns=max_campaigns,
+            max_keywords_per_campaign=max_keywords_per_campaign,
+            apply_live=apply_live,
+        )
+
+        entry = {
+            "timestamp": utc_now_iso(),
+            "action": "apply_estimated_bids",
+            "apply_live": apply_live,
+            "estimated_keyword_bids_count": len(updates),
+            "sample": [
+                f"{u['keyword_text']} {u['match_type']} -> {u['applied_bid']}"
+                for u in updates[:3]
+            ],
+        }
+        save_optimizer_history(entry)
+
+        return JSONResponse({
+            "success": True,
+            "action": "apply_estimated_bids",
+            "apply_live": apply_live,
+            "estimated_keyword_bids_count": len(updates),
+            "updates_sample": updates[:25],
+        })
+    except Exception as e:
+        logger.exception("Apply estimated bids failed")
         return JSONResponse({"error": True, "message": str(e)}, status_code=500)
 
 
