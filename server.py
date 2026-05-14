@@ -1,21 +1,17 @@
 """Cloud Run entrypoint wrapper for the Amazon PPC Optimizer.
 
-The main FastAPI application lives in app.py. Its dashboard route renders
-`templates/dashboard.html` through Jinja2, but the dashboard is a static
-HTML + JavaScript app. Some JavaScript object syntax can be interpreted by
-Jinja before the browser sees it, causing errors such as:
+The full dashboard/API application lives in optimize_campaigns.py. Its root
+route serves the dashboard HTML directly, but this wrapper keeps Cloud Run on a
+stable entrypoint and makes sure the dashboard is served as plain static HTML.
 
-    TypeError: unhashable type: 'dict'
-
-This wrapper imports the main app, removes the Jinja-rendered root route,
-and replaces it with a plain static HTML response. All API routes from app.py
-remain available.
+Do not import app.py here; app.py is a smaller alternate app and does not expose
+all dashboard endpoints such as /api/dashboard-data.
 """
 from pathlib import Path
 
 from fastapi.responses import HTMLResponse
 
-from app import app
+from optimize_campaigns import app
 
 BASE_DIR = Path(__file__).parent.absolute()
 DASHBOARD_PATH = BASE_DIR / "templates" / "dashboard.html"
@@ -28,7 +24,8 @@ def _is_root_get_route(route) -> bool:
     )
 
 
-# Remove the original Jinja dashboard route from app.py.
+# Remove the original root dashboard route and replace it with a static response.
+# All API routes from optimize_campaigns.py remain available.
 app.router.routes = [route for route in app.router.routes if not _is_root_get_route(route)]
 
 
