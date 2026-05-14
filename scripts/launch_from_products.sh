@@ -107,7 +107,7 @@ launch_one() {
     '{confirm:$confirm, product:$product, budget:$budget}' \
   | curl -sS -X POST "$API_BASE_URL/api/launch-optimized" \
       -H "Content-Type: application/json" \
-      -H "Authorization: Bearer '$DAILY_OPTIMIZER_TOKEN'" \
+      -H "Authorization: Bearer $DAILY_OPTIMIZER_TOKEN" \
       --data-binary @- \
   | python -m json.tool
 

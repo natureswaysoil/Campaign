@@ -1323,6 +1323,14 @@ def api_create_campaign(
         if not product:
             return JSONResponse({"error": True, "message": "Product not found"}, status_code=404)
 
+        product_sku = str(product.get("sku") or "").strip()
+        product_asin = str(product.get("asin") or "").strip()
+        if not product_sku and not product_asin:
+            return JSONResponse(
+                {"error": True, "message": "Product must include at least one of SKU or ASIN"},
+                status_code=400,
+            )
+
         # Respect user overrides from launch modal while preserving safe defaults.
         def parse_positive_float(raw: Any, default: float, min_value: float) -> float:
             if raw in (None, ""):
@@ -1397,13 +1405,18 @@ def api_create_campaign(
 
         ag_id = extract_id(ag_resp, "adGroups", "adGroup", "adGroupId")
 
+        product_ad = {
+            "campaignId": str(camp_id),
+            "adGroupId": str(ag_id),
+            "state": "ENABLED",
+        }
+        if product_sku:
+            product_ad["sku"] = product_sku
+        if product_asin:
+            product_ad["asin"] = product_asin
+
         client.post("/sp/productAds", {
-            "productAds": [{
-                "campaignId": str(camp_id),
-                "adGroupId": str(ag_id),
-                "asin": product["asin"],
-                "state": "ENABLED",
-            }]
+            "productAds": [product_ad]
         }, content_type="application/vnd.spproductad.v3+json",
            accept="application/vnd.spproductad.v3+json")
 
