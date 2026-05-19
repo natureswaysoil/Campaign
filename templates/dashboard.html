@@ -172,6 +172,8 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     .empty { text-align: center; padding: 52px 20px; color: var(--muted); font-size: 12px; }
     .empty .ico { font-size: 30px; margin-bottom: 10px; }
+    .camp-card-paused { opacity: 0.55; border-style: dashed; }
+    .camp-card-paused:hover { opacity: 0.85; }
   </style>
 </head>
 <body>
@@ -285,8 +287,8 @@
 <div class="toast" id="toast"></div>
 
 <script>
-  var SERVER_TOKEN = '';
-  /* __SERVER_TOKEN__ */
+  var SERVER_TOKEN = '{{ server_token }}';
+  /* injected by server */
 
   var allProducts = [];
   var bidMode = 'UNKNOWN';
@@ -565,13 +567,21 @@ async function loadCampaignDiagnostics() {
           '</div>'
         : '<div class="bid-window"><div style="font-size:10px;color:var(--muted);text-align:center;padding:4px 0">Bid window unavailable</div></div>';
 
-      return '<div class="camp-card">' +
+      var isPaused = state === 'PAUSED';
+      var statePill = isPaused
+        ? '<span class="pill pill-gray">PAUSED</span>'
+        : '<span class="pill pill-green">ENABLED</span>';
+      var stateBtn = isPaused
+        ? '<button class="btn btn-accent btn-sm" onclick="setCampaignState(\'' + cid + '\',\'ENABLED\')">▶ Resume</button>'
+        : '<button class="btn btn-danger btn-sm" onclick="setCampaignState(\'' + cid + '\',\'PAUSED\')">⏸ Pause</button>';
+
+      return '<div class="camp-card' + (isPaused ? ' camp-card-paused' : '') + '">' +
         '<div class="camp-hdr">' +
           '<div>' +
             '<div class="camp-name">' + name + '</div>' +
             '<div class="camp-id">ID: ' + cid + '</div>' +
           '</div>' +
-          '<span class="pill pill-green">ENABLED</span>' +
+          statePill +
         '</div>' +
         '<div class="metrics-row">' +
           '<div><div class="m-label">Budget/Day</div><div class="m-val">'   + budget + '</div></div>' +
@@ -584,6 +594,7 @@ async function loadCampaignDiagnostics() {
           '<div><div class="m-label">ACoS</div><div class="m-val ' + acCls(acos) + '">' + pct(acos) + '</div></div>' +
         '</div>' +
         bidWindowHtml +
+        '<div style="margin-top:12px;display:flex;justify-content:flex-end">' + stateBtn + '</div>' +
       '</div>';
     }).join('');
   }
@@ -757,6 +768,7 @@ async function loadCampaignDiagnostics() {
     fetch('/api/apply-optimization', {
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+token,'X-Daily-Optimizer-Token':token},
+      body: JSON.stringify({}),
     }).then(parseApiResponse)
     .then(function(r){
       if (r.status === 202) { toast('⏱ ' + (r.d.message || 'Report not ready yet'), true); return; }
@@ -829,6 +841,23 @@ async function loadCampaignDiagnostics() {
       }).catch(function(e){
         $$('prodBody').innerHTML = '<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--danger)">⚠️ ' + esc(e.message) + '</td></tr>';
       });
+  }
+
+  function setCampaignState(campaignId, newState) {
+    var label = newState === 'PAUSED' ? 'Pause' : 'Resume';
+    if (!confirm(label + ' campaign ' + campaignId + '?')) return;
+    var token = getToken(); if (!token) return;
+    toast('⏳ ' + label + ' in progress...');
+    fetch('/api/update-campaign-state', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
+      body: JSON.stringify({campaign_id: campaignId, state: newState})
+    }).then(parseApiResponse)
+    .then(function(r) {
+      if (!r.ok || r.d.error) throw new Error(r.d.message || 'Failed');
+      toast('✅ Campaign ' + campaignId + ' is now ' + newState);
+      setTimeout(loadDashboard, 1200);
+    }).catch(function(e) { toast('❌ ' + e.message, true); });
   }
 
   function loadAll() { loadDashboard(); loadProducts(); }
