@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Request, Header
-from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, Header
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import csv
 import datetime
@@ -88,6 +88,13 @@ STOPWORDS = {
 }
 
 OPTIMIZER_LOG_FILE = Path("/tmp/optimizer_history.json")
+PENDING_REPORT_FILE = Path("/tmp/pending_report.json")
+
+# ========================= IN-MEMORY CACHE =========================
+_dashboard_cache: Dict[str, Any] = {"data": None, "ts": 0.0, "rebuilding": False}
+_perf_cache: Dict[str, Any] = {"data": None, "ts": 0.0}
+CACHE_TTL = 600        # 10 min — campaigns list
+PERF_CACHE_TTL = 3600  # 1 hr — 14-day report data
 
 
 # ========================= HELPERS =========================
@@ -181,6 +188,106 @@ def bid_from_price(price_value: str) -> float:
         return 1.10
     except Exception:
         return 0.85
+
+
+def get_bid_mode() -> Dict[str, Any]:
+    """PEAK = 10:00–20:59 EST, else OFF_PEAK."""
+    est_tz = datetime.timezone(datetime.timedelta(hours=-4))  # EDT
+    now_est = datetime.datetime.now(est_tz)
+    hour = now_est.hour
+    mode = "PEAK" if 10 <= hour <= 20 else "OFF_PEAK"
+    return {
+        "bid_mode": mode,
+        "peak_hours_label": "10:00–20:59",
+        "refreshed_at": datetime.datetime.utcnow().isoformat(),
+        "note": f"EST hour {hour:02d}:xx  ·  peak 10:00–20:59",
+    }
+
+
+def load_pending_report() -> Dict[str, Any]:
+    try:
+        if PENDING_REPORT_FILE.exists():
+            with open(PENDING_REPORT_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"report_id": None, "settings": {}, "ts": 0.0}
+
+
+def save_pending_report(entry: Dict[str, Any]):
+    try:
+        with open(PENDING_REPORT_FILE, "w") as f:
+            json.dump(entry, f)
+    except Exception as e:
+        logger.warning(f"Could not save pending report: {e}")
+
+
+def _rebuild_dashboard_cache():
+    global _dashboard_cache
+    try:
+        client = AmazonAdsClient()
+        list_resp = client.session.post(
+            f"{client.base_url}/sp/campaigns/list",
+            headers={
+                "Authorization": f"Bearer {client.access_token}",
+                "Amazon-Advertising-API-ClientId": client.client_id,
+                "Amazon-Advertising-API-Scope": client.profile_id,
+                "Content-Type": "application/vnd.spcampaign.v3+json",
+                "Accept": "application/vnd.spcampaign.v3+json",
+            },
+            json={"maxResults": 100, "filters": {"stateFilter": {"include": ["ENABLED", "PAUSED"]}}},
+            timeout=30,
+        )
+        list_resp.raise_for_status()
+        raw = list_resp.json()
+        campaigns = raw.get("campaigns", []) if isinstance(raw, dict) else raw
+
+        perf_by_id: Dict[str, Dict] = {}
+        if _perf_cache.get("data"):
+            for c in (_perf_cache["data"].get("campaigns") or []):
+                cid = str(c.get("campaignId") or "")
+                if cid:
+                    perf_by_id[cid] = c
+
+        enriched = []
+        for c in campaigns:
+            cid = str(c.get("campaignId") or "")
+            perf = perf_by_id.get(cid, {})
+            enriched.append({
+                **c,
+                "spend": round(float(perf.get("spend") or 0), 2),
+                "sales": round(float(perf.get("sales") or 0), 2),
+                "clicks": int(perf.get("clicks") or 0),
+                "orders": int(perf.get("orders") or 0),
+                "impressions": int(perf.get("impressions") or 0),
+                "acos": perf.get("acos"),
+                "daily_trend": perf.get("daily_trend") or [],
+            })
+
+        total_spend = sum(float(c.get("spend") or 0) for c in enriched)
+        total_sales = sum(float(c.get("sales") or 0) for c in enriched)
+        total_clicks = sum(int(c.get("clicks") or 0) for c in enriched)
+        total_orders = sum(int(c.get("orders") or 0) for c in enriched)
+        portfolio_acos = (total_spend / total_sales) if total_sales > 0 else None
+
+        _dashboard_cache["data"] = {
+            **get_bid_mode(),
+            "cache_rebuild_in_progress": False,
+            "summary": {
+                "spend": round(total_spend, 2),
+                "sales": round(total_sales, 2),
+                "acos": round(portfolio_acos, 4) if portfolio_acos is not None else None,
+                "clicks": total_clicks,
+                "orders": total_orders,
+            },
+            "campaigns": enriched,
+        }
+        _dashboard_cache["ts"] = time.time()
+        logger.info(f"Dashboard cache rebuilt: {len(enriched)} campaigns")
+    except Exception as e:
+        logger.error(f"Dashboard cache rebuild failed: {e}", exc_info=True)
+    finally:
+        _dashboard_cache["rebuilding"] = False
 
 
 def parse_keyword_cell(value: str) -> List[str]:
@@ -363,6 +470,16 @@ class AmazonAdsClient:
             raise RuntimeError(f"GET failed {resp.status_code}: {resp.text[:300]}")
         return resp.json() if resp.text.strip() else None
 
+    def put(self, endpoint: str, body: Any):
+        url = f"{self.base_url}{endpoint}"
+        wrapped = self._wrap_batch(endpoint, body)
+        content_type = self._content_type_for(endpoint)
+        resp = self.session.put(url, headers=self.headers(content_type), json=wrapped, timeout=60)
+        if not resp.ok:
+            logger.error(f"PUT API Error {resp.status_code}: {resp.text[:400]}")
+            raise RuntimeError(f"Amazon Ads API PUT error {resp.status_code}: {resp.text[:500]}")
+        return resp.json() if resp.text.strip() else None
+
     def download_binary(self, url: str) -> bytes:
         resp = self.session.get(url, timeout=120)
         resp.raise_for_status()
@@ -477,16 +594,23 @@ def verify_internal_token(authorization: Optional[str]):
 
 
 # ========================= CAMPAIGN CREATION =========================
-def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
+def create_live_campaign_for_product(
+    product: Dict[str, Any],
+    daily_budget: Optional[float] = None,
+    starting_bid: Optional[float] = None,
+) -> Dict[str, Any]:
     client = AmazonAdsClient()
     start_date = today_iso_date()
     keywords = generate_keywords(product)
+
+    budget = round(daily_budget if daily_budget and daily_budget >= 1 else product["suggested_budget"], 2)
+    bid = round(starting_bid if starting_bid and starting_bid >= 0.02 else product["suggested_bid"], 2)
 
     campaign_payload = [{
         "name": f"{sanitize_campaign_name(product.get('title'))[:100]} | MANUAL | {start_date}",
         "targetingType": "MANUAL",
         "state": "ENABLED",
-        "budget": {"budget": round(product["suggested_budget"], 2), "budgetType": "DAILY"},
+        "budget": {"budget": budget, "budgetType": "DAILY"},
         "startDate": start_date,
     }]
     campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
@@ -507,12 +631,11 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "asin": product["asin"],
         "state": "ENABLED",
     }]
-    product_ad_resp = client.post(ENDPOINTS["product_ads"], product_ad_payload)
+    client.post(ENDPOINTS["product_ads"], product_ad_payload)
 
-    keywords_resp = None
     if keywords:
-        kw_rows = keyword_rows(keywords, campaign_id, ad_group_id, product["suggested_bid"])
-        keywords_resp = client.post(ENDPOINTS["keywords"], kw_rows)
+        kw_rows = keyword_rows(keywords, campaign_id, ad_group_id, bid)
+        client.post(ENDPOINTS["keywords"], kw_rows)
 
     return {
         "message": "Campaign created successfully",
@@ -521,6 +644,8 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "asin": product["asin"],
         "campaign_id": campaign_id,
         "ad_group_id": ad_group_id,
+        "daily_budget": budget,
+        "starting_bid": bid,
         "keywords_count": len(keywords),
     }
 
@@ -529,7 +654,8 @@ def create_live_campaign_for_product(product: Dict[str, Any]) -> Dict[str, Any]:
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     try:
-        return templates.TemplateResponse("dashboard.html", {"request": request})
+        server_token = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN", "")
+        return templates.TemplateResponse("dashboard.html", {"request": request, "server_token": server_token})
     except Exception as e:
         logger.error(f"Template loading failed: {type(e).__name__} - {e}")
         return HTMLResponse(f"""
@@ -561,12 +687,20 @@ def api_product(key: str):
 
 
 @app.post("/api/create-campaign-from-product")
-def api_create_campaign(payload: Dict[str, Any]):
+def api_create_campaign(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+):
+    verify_internal_token(authorization)
     key = payload.get("product_id") or payload.get("sku")
     if not key:
         raise HTTPException(400, "product_id or sku is required")
     product = find_product(key)
-    return create_live_campaign_for_product(product)
+    return create_live_campaign_for_product(
+        product,
+        daily_budget=payload.get("daily_budget"),
+        starting_bid=payload.get("starting_bid"),
+    )
 
 
 @app.post("/api/bulk-create-campaigns")
@@ -603,12 +737,13 @@ def api_bulk_create(payload: Dict[str, Any]):
 @app.post("/api/run-daily-optimization")
 def api_run_optimizer(
     payload: Dict[str, Any],
-    authorization: Optional[str] = Header(default=None)
+    authorization: Optional[str] = Header(default=None),
 ):
+    """Request a search-term report and store the job for /api/apply-optimization to finish."""
     verify_internal_token(authorization)
 
-    apply_negatives = payload.get("apply_negatives_live", False)
-    apply_winners = payload.get("apply_winners_live", False)
+    apply_negatives = payload.get("apply_negatives_live", True)
+    apply_winners = payload.get("apply_winners_live", True)
     winner_bid = float(payload.get("winner_bid", 0.90))
     lookback_days = int(payload.get("lookback_days", 14))
 
@@ -626,81 +761,33 @@ def api_run_optimizer(
             "reportTypeId": "spSearchTerm",
             "timeUnit": "SUMMARY",
             "format": "GZIP_JSON",
-        }
+        },
     })
 
     report_id = (report_resp or {}).get("reportId")
     if not report_id:
-        raise HTTPException(status_code=500, detail="Failed to request report ID")
+        raise HTTPException(status_code=500, detail="Failed to request report ID from Amazon")
 
-    for _ in range(30):
-        status_resp = client.get(f"{ENDPOINTS['reports']}/{report_id}")
-        if status_resp.get("status") == "SUCCESS":
-            break
-        if status_resp.get("status") in ("FAILURE", "CANCELLED"):
-            raise HTTPException(status_code=500, detail="Report generation failed")
-        time.sleep(10)
-    else:
-        raise HTTPException(status_code=504, detail="Report generation timed out")
-
-    content = client.download_binary(status_resp.get("location") or status_resp.get("url"))
-    rows = parse_report_json_bytes(content)
-    classified = classify_terms(rows)
-
-    winners_applied = []
-    negatives_applied = []
-
-    if apply_negatives and classified["negatives"]:
-        by_campaign: Dict[int, List[str]] = {}
-        for item in classified["negatives"]:
-            cid = item.get("campaign_id")
-            if cid:
-                by_campaign.setdefault(cid, []).append(item["term"])
-        for cid, terms in by_campaign.items():
-            neg_rows = negative_keyword_rows(unique_in_order(terms), cid)
-            client.post(ENDPOINTS["negative_keywords"], neg_rows)
-            negatives_applied.append({"campaign_id": cid, "count": len(terms), "terms_sample": terms[:8]})
-
-    if apply_winners and classified["winners"]:
-        by_adgroup: Dict[int, Dict] = {}
-        for item in classified["winners"]:
-            agid = item.get("ad_group_id")
-            cid = item.get("campaign_id")
-            if agid and cid:
-                if agid not in by_adgroup:
-                    by_adgroup[agid] = {"campaign_id": cid, "terms": []}
-                by_adgroup[agid]["terms"].append(item["term"])
-        for agid, data in by_adgroup.items():
-            kw_rows = keyword_rows(unique_in_order(data["terms"]), data["campaign_id"], agid, winner_bid)
-            client.post(ENDPOINTS["keywords"], kw_rows)
-            winners_applied.append({"ad_group_id": agid, "campaign_id": data["campaign_id"], "count": len(data["terms"]), "terms_sample": data["terms"][:8]})
-
-    run_entry = {
-        "timestamp": datetime.datetime.utcnow().isoformat(),
-        "lookback_days": lookback_days,
-        "rows_analyzed": len(rows),
-        "winners_found": len(classified["winners"]),
-        "negatives_found": len(classified["negatives"]),
-        "winners_applied": len(winners_applied),
-        "negatives_applied": len(negatives_applied),
-        "winners_details": winners_applied,
-        "negatives_details": negatives_applied,
-        "apply_winners_live": apply_winners,
-        "apply_negatives_live": apply_negatives
+    entry = {
+        "report_id": report_id,
+        "ts": time.time(),
+        "settings": {
+            "apply_negatives": apply_negatives,
+            "apply_winners": apply_winners,
+            "winner_bid": winner_bid,
+            "lookback_days": lookback_days,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
     }
-    save_optimizer_history(run_entry)
+    save_pending_report(entry)
+    logger.info(f"Optimization report requested: {report_id}")
 
     return {
         "success": True,
         "report_id": report_id,
+        "message": "Report requested. Use 'Apply Pending Report' in 30–60 min once Amazon finishes generating it.",
         "date_range": {"start": start_date, "end": end_date},
-        "rows_analyzed": len(rows),
-        "winners": len(classified["winners"]),
-        "negatives": len(classified["negatives"]),
-        "winners_applied_count": len(winners_applied),
-        "negatives_applied_count": len(negatives_applied),
-        "winners_applied": winners_applied,
-        "negatives_applied": negatives_applied
     }
 
 
@@ -876,11 +963,381 @@ def api_campaign_performance():
                 "daily_trend": daily_data
             })
 
-        return {"count": len(enriched), "campaigns": enriched}
+        result = {"count": len(enriched), "campaigns": enriched}
+        _perf_cache["data"] = result
+        _perf_cache["ts"] = time.time()
+        return result
 
     except Exception as e:
         logger.error(f"Daily performance report failed: {e}", exc_info=True)
         return {"count": len(campaigns), "campaigns": campaigns, "note": "Trend data unavailable"}
+
+
+# ========================= MISSING / NEW ROUTES =========================
+
+@app.get("/api/dashboard-data")
+def api_dashboard_data(background_tasks: BackgroundTasks):
+    """Main dashboard endpoint — fast campaign list + bid mode + cached perf data."""
+    now = time.time()
+
+    if _dashboard_cache["data"] and now - _dashboard_cache["ts"] < CACHE_TTL:
+        data = dict(_dashboard_cache["data"])
+        # Background pre-warm when cache is halfway expired
+        if now - _dashboard_cache["ts"] > CACHE_TTL / 2 and not _dashboard_cache["rebuilding"]:
+            _dashboard_cache["rebuilding"] = True
+            background_tasks.add_task(_rebuild_dashboard_cache)
+        return data
+
+    if _dashboard_cache["rebuilding"]:
+        stale = _dashboard_cache["data"] or {}
+        return {**get_bid_mode(), **stale, "cache_rebuild_in_progress": True,
+                "summary": stale.get("summary", {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0}),
+                "campaigns": stale.get("campaigns", [])}
+
+    # Cold start — build synchronously
+    _dashboard_cache["rebuilding"] = True
+    _rebuild_dashboard_cache()
+    return _dashboard_cache["data"] or {
+        **get_bid_mode(), "cache_rebuild_in_progress": False,
+        "summary": {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0},
+        "campaigns": [],
+    }
+
+
+@app.post("/api/refresh-dashboard-cache")
+def api_refresh_cache(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+):
+    verify_internal_token(authorization)
+    _dashboard_cache["data"] = None
+    _dashboard_cache["ts"] = 0.0
+    _dashboard_cache["rebuilding"] = True
+    _rebuild_dashboard_cache()
+    return {"success": True, "message": "Cache refreshed", "campaigns": len((_dashboard_cache.get("data") or {}).get("campaigns", []))}
+
+
+@app.post("/api/update-campaign-state")
+def api_update_campaign_state(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+):
+    """Pause or resume a campaign. state must be ENABLED or PAUSED."""
+    verify_internal_token(authorization)
+    campaign_id = payload.get("campaign_id")
+    new_state = str(payload.get("state", "")).upper()
+    if not campaign_id:
+        raise HTTPException(400, "campaign_id is required")
+    if new_state not in ("ENABLED", "PAUSED"):
+        raise HTTPException(400, "state must be ENABLED or PAUSED")
+
+    client = AmazonAdsClient()
+    result = client.put(ENDPOINTS["campaigns"], [{"campaignId": str(campaign_id), "state": new_state}])
+
+    # Invalidate cache so next load reflects new state
+    _dashboard_cache["data"] = None
+    _dashboard_cache["ts"] = 0.0
+    logger.info(f"Campaign {campaign_id} set to {new_state}")
+    return {"success": True, "campaign_id": campaign_id, "new_state": new_state, "api_response": result}
+
+
+@app.post("/api/apply-negatives")
+def api_apply_negatives(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Request a search-term report scoped to negative application only."""
+    verify_internal_token(authorization)
+    lookback_days = int(payload.get("lookback_days", 14))
+    client = AmazonAdsClient()
+    start_date = iso_date_days_ago(lookback_days)
+    end_date = today_iso_date()
+
+    report_resp = client.post(ENDPOINTS["reports"], {
+        "startDate": start_date, "endDate": end_date,
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["searchTerm"],
+            "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
+            "reportTypeId": "spSearchTerm", "timeUnit": "SUMMARY", "format": "GZIP_JSON",
+        },
+    })
+    report_id = (report_resp or {}).get("reportId")
+    if not report_id:
+        raise HTTPException(500, "Failed to get report ID")
+
+    entry = {"report_id": report_id, "ts": time.time(),
+             "settings": {"apply_negatives": True, "apply_winners": False,
+                          "winner_bid": 0.90, "lookback_days": lookback_days,
+                          "start_date": start_date, "end_date": end_date}}
+    save_pending_report(entry)
+    return {"success": True, "report_id": report_id,
+            "message": "Report requested. Use 'Apply Pending Report' in 30–60 min."}
+
+
+@app.post("/api/apply-winners")
+def api_apply_winners(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Request a search-term report scoped to winner keyword promotion only."""
+    verify_internal_token(authorization)
+    lookback_days = int(payload.get("lookback_days", 14))
+    winner_bid = float(payload.get("winner_bid", 0.90))
+    client = AmazonAdsClient()
+    start_date = iso_date_days_ago(lookback_days)
+    end_date = today_iso_date()
+
+    report_resp = client.post(ENDPOINTS["reports"], {
+        "startDate": start_date, "endDate": end_date,
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["searchTerm"],
+            "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
+            "reportTypeId": "spSearchTerm", "timeUnit": "SUMMARY", "format": "GZIP_JSON",
+        },
+    })
+    report_id = (report_resp or {}).get("reportId")
+    if not report_id:
+        raise HTTPException(500, "Failed to get report ID")
+
+    entry = {"report_id": report_id, "ts": time.time(),
+             "settings": {"apply_negatives": False, "apply_winners": True,
+                          "winner_bid": winner_bid, "lookback_days": lookback_days,
+                          "start_date": start_date, "end_date": end_date}}
+    save_pending_report(entry)
+    return {"success": True, "report_id": report_id,
+            "message": "Report requested. Use 'Apply Pending Report' in 30–60 min."}
+
+
+@app.post("/api/apply-optimization")
+def api_apply_optimization(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Apply the stored pending report when Amazon has finished generating it."""
+    verify_internal_token(authorization)
+    pending = load_pending_report()
+    report_id = pending.get("report_id")
+    if not report_id:
+        raise HTTPException(404, "No pending report found. Run Full Optimization first.")
+
+    client = AmazonAdsClient()
+    status_resp = client.get(f"{ENDPOINTS['reports']}/{report_id}")
+    status = (status_resp or {}).get("status", "")
+
+    if status in ("PENDING", "PROCESSING", "IN_PROGRESS"):
+        return JSONResponse(status_code=202, content={"message": f"Report not ready yet (status: {status})", "status": status})
+    if status in ("FAILURE", "CANCELLED"):
+        save_pending_report({"report_id": None, "settings": {}, "ts": 0.0})
+        raise HTTPException(500, f"Report failed with status: {status}")
+    if status != "SUCCESS":
+        return JSONResponse(status_code=202, content={"message": f"Report status: {status}", "status": status})
+
+    content = client.download_binary(status_resp.get("location") or status_resp.get("url"))
+    rows = parse_report_json_bytes(content)
+    classified = classify_terms(rows)
+    settings = pending.get("settings", {})
+    apply_neg = settings.get("apply_negatives", True)
+    apply_win = settings.get("apply_winners", True)
+    winner_bid = float(settings.get("winner_bid", 0.90))
+
+    winners_applied: List[Dict] = []
+    negatives_applied: List[Dict] = []
+
+    if apply_neg and classified["negatives"]:
+        by_campaign: Dict[int, List[str]] = {}
+        for item in classified["negatives"]:
+            cid = item.get("campaign_id")
+            if cid:
+                by_campaign.setdefault(cid, []).append(item["term"])
+        for cid, terms in by_campaign.items():
+            client.post(ENDPOINTS["negative_keywords"], negative_keyword_rows(unique_in_order(terms), cid))
+            negatives_applied.append({"campaign_id": cid, "count": len(terms), "sample": terms[:5]})
+
+    if apply_win and classified["winners"]:
+        by_adgroup: Dict[int, Dict] = {}
+        for item in classified["winners"]:
+            agid, cid = item.get("ad_group_id"), item.get("campaign_id")
+            if agid and cid:
+                by_adgroup.setdefault(agid, {"campaign_id": cid, "terms": []})["terms"].append(item["term"])
+        for agid, data in by_adgroup.items():
+            client.post(ENDPOINTS["keywords"], keyword_rows(unique_in_order(data["terms"]), data["campaign_id"], agid, winner_bid))
+            winners_applied.append({"ad_group_id": agid, "campaign_id": data["campaign_id"], "count": len(data["terms"])})
+
+    save_pending_report({"report_id": None, "settings": {}, "ts": 0.0})
+    _dashboard_cache["data"] = None
+    _dashboard_cache["ts"] = 0.0
+
+    run_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "rows_analyzed": len(rows),
+        "winners_found": len(classified["winners"]),
+        "negatives_found": len(classified["negatives"]),
+        "winners_applied": len(winners_applied),
+        "negatives_applied": len(negatives_applied),
+    }
+    save_optimizer_history(run_entry)
+
+    return {
+        "success": True,
+        "rows_analyzed": len(rows),
+        "winners_applied_count": len(winners_applied),
+        "negatives_applied_count": len(negatives_applied),
+        "winners_applied": winners_applied,
+        "negatives_applied": negatives_applied,
+    }
+
+
+@app.post("/api/retune-existing-bids")
+def api_retune_bids(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Adjust all ad group default bids up (PEAK) or down (OFF_PEAK) by 15%."""
+    verify_internal_token(authorization)
+    client = AmazonAdsClient()
+    bid_info = get_bid_mode()
+    mode = bid_info["bid_mode"]
+
+    list_resp = client.session.post(
+        f"{client.base_url}/sp/adGroups/list",
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Amazon-Advertising-API-ClientId": client.client_id,
+            "Amazon-Advertising-API-Scope": client.profile_id,
+            "Content-Type": "application/vnd.spadgroup.v3+json",
+            "Accept": "application/vnd.spadgroup.v3+json",
+        },
+        json={"maxResults": 100, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
+        timeout=30,
+    )
+    list_resp.raise_for_status()
+    raw = list_resp.json()
+    ad_groups = (raw.get("adGroups") or []) if isinstance(raw, dict) else []
+
+    if not ad_groups:
+        return {"success": True, "message": "No ad groups found", "updated": 0, "mode": mode}
+
+    factor = 1.15 if mode == "PEAK" else 0.85
+    updates = []
+    for ag in ad_groups:
+        current = float(ag.get("defaultBid") or 0.75)
+        new_bid = round(max(0.25, min(2.50, current * factor)), 2)
+        updates.append({"adGroupId": str(ag["adGroupId"]), "defaultBid": new_bid})
+
+    client.put("/sp/adGroups", updates)
+    _dashboard_cache["data"] = None
+    _dashboard_cache["ts"] = 0.0
+    return {"success": True, "mode": mode, "updated": len(updates),
+            "message": f"Updated {len(updates)} ad group bids for {mode} mode (×{factor})"}
+
+
+@app.post("/api/apply-estimated-bids")
+def api_apply_estimated_bids(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Apply estimated peak/off-peak bids to ad groups based on bid window model."""
+    verify_internal_token(authorization)
+    apply_live = bool(payload.get("apply_live", False))
+    max_campaigns = int(payload.get("max_campaigns", 50))
+    bid_info = get_bid_mode()
+    mode = bid_info["bid_mode"]
+
+    client = AmazonAdsClient()
+    list_resp = client.session.post(
+        f"{client.base_url}/sp/adGroups/list",
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Amazon-Advertising-API-ClientId": client.client_id,
+            "Amazon-Advertising-API-Scope": client.profile_id,
+            "Content-Type": "application/vnd.spadgroup.v3+json",
+            "Accept": "application/vnd.spadgroup.v3+json",
+        },
+        json={"maxResults": max_campaigns, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
+        timeout=30,
+    )
+    list_resp.raise_for_status()
+    raw = list_resp.json()
+    ad_groups = (raw.get("adGroups") or []) if isinstance(raw, dict) else []
+
+    if not ad_groups:
+        return {"success": True, "message": "No ad groups found", "updated": 0}
+
+    updates = []
+    for ag in ad_groups:
+        current = float(ag.get("defaultBid") or 0.75)
+        est_low = round(max(0.25, current * 0.72), 2)
+        est_high = round(min(2.50, current * 1.28), 2)
+        new_bid = est_high if mode == "PEAK" else est_low
+        updates.append({"adGroupId": str(ag["adGroupId"]), "currentBid": current,
+                        "estimatedBid": new_bid, "mode": mode})
+
+    if apply_live:
+        client.put("/sp/adGroups", [{"adGroupId": u["adGroupId"], "defaultBid": u["estimatedBid"]} for u in updates])
+        _dashboard_cache["data"] = None
+        _dashboard_cache["ts"] = 0.0
+
+    return {"success": True, "dry_run": not apply_live, "mode": mode,
+            "updated": len(updates) if apply_live else 0, "preview": updates[:10],
+            "message": f"{'Applied' if apply_live else 'Preview'}: {len(updates)} ad groups in {mode} mode"}
+
+
+@app.get("/api/bid-recommendation")
+def api_bid_recommendation(asin: str = "", keyword: str = "", fallback_bid: float = 0.85):
+    """Return estimated bid low/high/suggested based on product price + current bid mode."""
+    bid_info = get_bid_mode()
+    mode = bid_info["bid_mode"]
+    base = fallback_bid
+    try:
+        if asin:
+            for row in load_products():
+                if (row.get("ASIN") or "").upper() == asin.upper():
+                    base = bid_from_price(row.get("Selling_Price", ""))
+                    break
+    except Exception:
+        pass
+    low = round(base * 0.72, 2)
+    high = round(base * 1.28, 2)
+    suggested = high if mode == "PEAK" else low
+    return {"low": low, "high": high, "suggested": round(suggested, 2), "bid_mode": mode, "asin": asin}
+
+
+@app.get("/api/campaigns-debug")
+def api_campaigns_debug():
+    """Count campaigns by state for diagnostics."""
+    client = AmazonAdsClient()
+    resp = client.session.post(
+        f"{client.base_url}/sp/campaigns/list",
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Amazon-Advertising-API-ClientId": client.client_id,
+            "Amazon-Advertising-API-Scope": client.profile_id,
+            "Content-Type": "application/vnd.spcampaign.v3+json",
+            "Accept": "application/vnd.spcampaign.v3+json",
+        },
+        json={"maxResults": 100},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    campaigns = (resp.json().get("campaigns", []) if isinstance(resp.json(), dict) else resp.json()) if resp.text.strip() else []
+    enabled = sum(1 for c in campaigns if str(c.get("state", "")).upper() == "ENABLED")
+    paused = sum(1 for c in campaigns if str(c.get("state", "")).upper() == "PAUSED")
+    archived = sum(1 for c in campaigns if str(c.get("state", "")).upper() == "ARCHIVED")
+    return {"total": len(campaigns), "enabled_count": enabled, "paused_count": paused,
+            "archived_count": archived,
+            "message": f"Found {len(campaigns)} campaigns: {enabled} enabled, {paused} paused, {archived} archived."}
+
+
+@app.get("/api/campaign-plan")
+def api_campaign_plan():
+    """Return count and preview of active products from the Google Sheet."""
+    products = [p for p in [normalized_product(r) for r in load_products()] if p["active"]]
+    return {
+        "product_count": len(products),
+        "products_preview": [{"sku": p["sku"], "title": p["title"][:60]} for p in products[:5]],
+    }
 
 
 if __name__ == "__main__":
