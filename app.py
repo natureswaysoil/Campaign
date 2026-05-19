@@ -1,5 +1,5 @@
-from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, Header
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import BackgroundTasks, Body, FastAPI, Form, HTTPException, Request, Header
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import csv
 import datetime
@@ -26,6 +26,97 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Amazon Ads Campaign Optimizer")
+
+# ========================= SESSION AUTH =========================
+import hashlib, secrets as _secrets
+
+SESSION_COOKIE = "nws_session"
+_PUBLIC_PATHS = {"/login", "/health", "/favicon.ico"}
+
+
+def _session_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def _valid_session(cookie_val: Optional[str]) -> bool:
+    raw = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN", "")
+    if not raw or not cookie_val:
+        return False
+    return _secrets.compare_digest(cookie_val, _session_token(raw))
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    if path in _PUBLIC_PATHS or path.startswith("/static"):
+        return await call_next(request)
+    session = request.cookies.get(SESSION_COOKIE)
+    if not _valid_session(session):
+        return RedirectResponse(f"/login?next={path}", status_code=302)
+    return await call_next(request)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(next: str = "/", error: str = ""):
+    err_html = f'<p style="color:#e85c4a;margin-bottom:16px;font-size:12px">{html.escape(error)}</p>' if error else ""
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Login — Nature's Way Soil</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:'DM Mono',monospace;background:#0d0f0a;color:#e8ead4;min-height:100vh;display:flex;align-items:center;justify-content:center}}
+    .card{{background:#141710;border:1px solid #2a2f23;border-radius:18px;padding:36px 32px;width:100%;max-width:380px}}
+    .logo{{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;color:#7ec850;margin-bottom:6px}}
+    .sub{{font-size:11px;color:#8a9077;margin-bottom:28px}}
+    label{{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#8a9077;display:block;margin-bottom:6px}}
+    input{{font-family:'DM Mono',monospace;font-size:13px;background:#1b1f16;border:1px solid #2a2f23;color:#e8ead4;padding:10px 14px;border-radius:8px;width:100%;outline:none;transition:border-color 200ms}}
+    input:focus{{border-color:#7ec850}}
+    button{{font-family:'DM Mono',monospace;font-size:12px;font-weight:700;background:#7ec850;color:#0d0f0a;border:none;padding:11px;border-radius:8px;width:100%;cursor:pointer;margin-top:18px;transition:background 200ms}}
+    button:hover{{background:#c8e86c}}
+  </style>
+</head><body>
+  <div class="card">
+    <div class="logo">Nature's Way Soil</div>
+    <div class="sub">Amazon Ad Manager — enter your access token</div>
+    {err_html}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{html.escape(next)}"/>
+      <label>Access Token</label>
+      <input type="password" name="token" placeholder="Enter token…" autofocus required/>
+      <button type="submit">→ Sign In</button>
+    </form>
+  </div>
+</body></html>""")
+
+
+@app.post("/login")
+def do_login(
+    response: RedirectResponse = None,
+    token: str = Form(...),
+    next: str = Form(default="/"),
+):
+    raw = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN", "")
+    if not raw or not _secrets.compare_digest(token.strip(), raw):
+        return RedirectResponse(f"/login?next={next}&error=Invalid+token", status_code=302)
+    resp = RedirectResponse(next or "/", status_code=302)
+    resp.set_cookie(
+        SESSION_COOKIE,
+        _session_token(raw),
+        max_age=60 * 60 * 24 * 7,  # 7 days
+        httponly=True,
+        samesite="lax",
+    )
+    return resp
+
+
+@app.post("/logout")
+def do_logout():
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
 
 # CRITICAL FIX: Use absolute path for templates (fixes Cloud Run issues)
 BASE_DIR = Path(__file__).parent.absolute()
