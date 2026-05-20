@@ -568,6 +568,7 @@ async function loadCampaignDiagnostics() {
           '</div>'
         : '<div class="bid-window"><div style="font-size:10px;color:var(--muted);text-align:center;padding:4px 0">Bid window unavailable</div></div>';
 
+      var state = (c.state || '').toUpperCase();
       var isPaused = state === 'PAUSED';
       var statePill = isPaused
         ? '<span class="pill pill-gray">PAUSED</span>'
