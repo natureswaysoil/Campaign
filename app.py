@@ -1085,11 +1085,11 @@ def api_dashboard_data(background_tasks: BackgroundTasks):
                 "summary": stale.get("summary", {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0}),
                 "campaigns": stale.get("campaigns", [])}
 
-    # Cold start — build synchronously
+    # Cold start — return immediately, rebuild in background
     _dashboard_cache["rebuilding"] = True
-    _rebuild_dashboard_cache()
-    return _dashboard_cache["data"] or {
-        **get_bid_mode(), "cache_rebuild_in_progress": False,
+    background_tasks.add_task(_rebuild_dashboard_cache)
+    return {
+        **get_bid_mode(), "cache_rebuild_in_progress": True,
         "summary": {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0},
         "campaigns": [],
     }
@@ -1104,8 +1104,8 @@ def api_refresh_cache(
     _dashboard_cache["data"] = None
     _dashboard_cache["ts"] = 0.0
     _dashboard_cache["rebuilding"] = True
-    _rebuild_dashboard_cache()
-    return {"success": True, "message": "Cache refreshed", "campaigns": len((_dashboard_cache.get("data") or {}).get("campaigns", []))}
+    background_tasks.add_task(_rebuild_dashboard_cache)
+    return {"success": True, "message": "Cache rebuild started in background"}
 
 
 @app.post("/api/update-campaign-state")
