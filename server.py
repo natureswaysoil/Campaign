@@ -40,6 +40,8 @@ from budget_dayparting import (
     get_budget_protection_mode,
 )
 from ppc_waste_rules import (
+    COMPETITOR_OR_BRAND_PHRASES,
+    WRONG_INTENT_PHRASES,
     apply_negatives_step_with_match_types,
     classify_search_terms,
     summarize_classification,
@@ -58,6 +60,10 @@ optimizer_core.get_bid_mode = get_budget_protection_mode
 
 BASE_DIR = Path(__file__).parent.absolute()
 DASHBOARD_PATH = BASE_DIR / "templates" / "dashboard.html"
+GENERIC_EXACT_BLOCKLIST = {
+    "compost", "soil", "fertilizer", "plant", "plants", "garden", "lawn",
+    "organic", "natural", "liquid", "outdoor", "indoor", "premium",
+}
 
 
 def _is_route(route, path: str, method: Optional[str] = None) -> bool:
@@ -109,7 +115,10 @@ def _primary_keyword(raw_row: Dict[str, Any], product: Dict[str, Any]) -> str:
         pass
 
     title = str(product.get("title") or raw_row.get("Title") or "fertilizer").lower()
-    for phrase in ("dog urine", "fruit tree fertilizer", "liquid kelp", "humic acid", "bone meal", "pasture fertilizer", "lawn fertilizer"):
+    for phrase in (
+        "dog urine", "fruit tree fertilizer", "liquid kelp", "humic acid",
+        "bone meal", "pasture fertilizer", "lawn fertilizer", "compost",
+    ):
         if phrase in title:
             return phrase
     return "fertilizer"
@@ -201,23 +210,82 @@ def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: s
                 accept="application/vnd.spproductad.v3+json")
 
 
-def _exact_keyword_rows(keywords: List[str], campaign_id: str, ad_group_id: str, bid: float) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+def _normalize_keyword(keyword: str) -> str:
+    kw = str(keyword or "").strip().lower()
+    kw = re.sub(r"[^a-z0-9'&\s-]", " ", kw)
+    return re.sub(r"\s+", " ", kw).strip()
+
+
+def _select_exact_keywords(keywords: List[str], max_keywords: int) -> List[str]:
+    """Keep exact launch keywords focused on buyer-intent phrases."""
+    selected: List[str] = []
     seen = set()
     for keyword in keywords:
-        kw = str(keyword or "").strip().lower()
+        kw = _normalize_keyword(keyword)
+        if not kw or kw in seen:
+            continue
+        seen.add(kw)
+        # Do not launch exact campaigns on single generic words like compost/soil.
+        if kw in GENERIC_EXACT_BLOCKLIST:
+            continue
+        # Prefer phrase keywords; one-word terms only survive if they are distinctive.
+        if len(kw.split()) == 1 and len(kw) < 7:
+            continue
+        selected.append(kw)
+        if len(selected) >= max_keywords:
+            break
+    return selected
+
+
+def _exact_keyword_rows(keywords: List[str], campaign_id: str, ad_group_id: str, bid: float) -> List[Dict[str, Any]]:
+    return [{
+        "campaignId": str(campaign_id),
+        "adGroupId": str(ad_group_id),
+        "keywordText": keyword,
+        "matchType": "EXACT",
+        "state": "ENABLED",
+        "bid": round(float(bid), 2),
+    } for keyword in keywords]
+
+
+def _seed_negative_rows(campaign_id: str, limit: int = 35) -> List[Dict[str, Any]]:
+    """Seed launch campaigns with obvious wrong-intent negatives on day one."""
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    seed_terms = list(WRONG_INTENT_PHRASES) + list(COMPETITOR_OR_BRAND_PHRASES)
+    for term in seed_terms:
+        kw = _normalize_keyword(term)
         if not kw or kw in seen:
             continue
         seen.add(kw)
         rows.append({
             "campaignId": str(campaign_id),
-            "adGroupId": str(ad_group_id),
             "keywordText": kw,
-            "matchType": "EXACT",
+            "matchType": "NEGATIVE_PHRASE",
             "state": "ENABLED",
-            "bid": round(float(bid), 2),
         })
+        if len(rows) >= limit:
+            break
     return rows
+
+
+def _apply_launch_seed_negatives(client: AmazonAdsClient, campaign_ids: List[str]) -> Dict[str, Any]:
+    applied: List[Dict[str, Any]] = []
+    for campaign_id in campaign_ids:
+        rows = _seed_negative_rows(campaign_id)
+        if not rows:
+            continue
+        client.create_negative_keywords(rows)
+        applied.append({
+            "campaign_id": campaign_id,
+            "count": len(rows),
+            "terms_sample": [row["keywordText"] for row in rows[:10]],
+        })
+    return {
+        "campaigns_seeded": len(applied),
+        "negative_rows_created": sum(item["count"] for item in applied),
+        "details": applied,
+    }
 
 
 def _enrich_product_bid(
@@ -321,7 +389,9 @@ def api_create_recommended_campaigns(
     """Launch the recommended two-campaign structure: AUTO DISCOVERY + MANUAL EXACT.
 
     The old launcher created one manual campaign with exact/phrase/broad mixed in a
-    single ad group. This version keeps discovery spend separate from exact spend.
+    single ad group. This version keeps discovery spend separate from exact spend,
+    seeds wrong-intent negatives immediately, and limits exact keywords to the
+    strongest buyer-intent phrases.
     """
     auth_error = _optional_dashboard_auth(authorization, x_daily_optimizer_token)
     if auth_error:
@@ -352,13 +422,16 @@ def api_create_recommended_campaigns(
         discovery_budget_pct = max(0.10, min(0.50, discovery_budget_pct))
         discovery_budget = round(max(1.0, total_budget * discovery_budget_pct), 2)
         exact_budget = round(max(1.0, total_budget - discovery_budget), 2)
+        max_exact_keywords = int(payload.get("max_exact_keywords", 40))
+        max_exact_keywords = max(5, min(80, max_exact_keywords))
 
         # Protect discovery bids more aggressively. Exact gets the higher-quality budget.
         _, _, protected_bid = choose_budget_protected_bid({}, base_bid)
         discovery_bid = round(max(0.10, protected_bid * 0.70), 2)
         exact_bid = round(max(0.10, protected_bid * 1.15), 2)
 
-        keywords = generate_keywords_for_product(product_row)
+        raw_keywords = generate_keywords_for_product(product_row)
+        exact_keywords = _select_exact_keywords(raw_keywords, max_exact_keywords)
         client = AmazonAdsClient()
         start_date = datetime.date.today().isoformat()
         safe_title = _sanitize_name(str(product.get("title") or "Product"))[:70]
@@ -385,11 +458,14 @@ def api_create_recommended_campaigns(
         exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
         _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
 
-        exact_rows = _exact_keyword_rows(keywords, exact_campaign_id, exact_ad_group_id, exact_bid)
+        exact_rows = _exact_keyword_rows(exact_keywords, exact_campaign_id, exact_ad_group_id, exact_bid)
         exact_keywords_created = 0
         if exact_rows:
             client.create_keywords(exact_rows)
             exact_keywords_created = len(exact_rows)
+
+        # Seed both campaigns with obvious wrong-intent negatives from day one.
+        launch_negatives = _apply_launch_seed_negatives(client, [discovery_campaign_id, exact_campaign_id])
 
         return JSONResponse({
             "success": True,
@@ -399,6 +475,13 @@ def api_create_recommended_campaigns(
             "asin": asin,
             "total_daily_budget": total_budget,
             "budget_protection": budget_protection_status(),
+            "launch_negatives": launch_negatives,
+            "keyword_filtering": {
+                "generated_keywords_count": len(raw_keywords),
+                "exact_keywords_selected": len(exact_keywords),
+                "max_exact_keywords": max_exact_keywords,
+                "blocked_generic_single_terms": sorted(GENERIC_EXACT_BLOCKLIST),
+            },
             "campaigns_created": [
                 {
                     "campaign_type": "AUTO_DISCOVERY",
@@ -406,6 +489,7 @@ def api_create_recommended_campaigns(
                     "ad_group_id": discovery_ad_group_id,
                     "daily_budget": discovery_budget,
                     "default_bid": discovery_bid,
+                    "seed_negative_rows_created": launch_negatives["details"][0]["count"] if launch_negatives["details"] else 0,
                     "purpose": "Find converting search terms cheaply without mixing discovery spend into exact winners.",
                 },
                 {
@@ -414,9 +498,10 @@ def api_create_recommended_campaigns(
                     "ad_group_id": exact_ad_group_id,
                     "daily_budget": exact_budget,
                     "default_bid": exact_bid,
-                    "keywords_count": len(keywords),
+                    "keywords_count": len(exact_keywords),
                     "keyword_rows_created": exact_keywords_created,
-                    "purpose": "Control spend on the most relevant buyer-intent keywords.",
+                    "seed_negative_rows_created": launch_negatives["details"][1]["count"] if len(launch_negatives["details"]) > 1 else 0,
+                    "purpose": "Control spend on the most relevant buyer-intent exact keywords.",
                 },
             ],
         })
