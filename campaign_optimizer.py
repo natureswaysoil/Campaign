@@ -295,7 +295,7 @@ class CampaignOptimizer:
             return "OFF_PEAK"
         return "NORMAL"
 
-      def classify_campaign(self, metrics: CampaignMetrics) -> PerformanceTier:
+    def classify_campaign(self, metrics: CampaignMetrics) -> PerformanceTier:
         if metrics.impressions < self.MIN_IMPRESSIONS:
             return PerformanceTier.ZERO_PERFORMANCE
 
@@ -354,7 +354,6 @@ class CampaignOptimizer:
 
         return 0.0
 
-    return 0.0
     def hydrate_bid_recommendations(self, metrics: CampaignMetrics) -> CampaignMetrics:
         if not self.ads_client or not self.USE_AMAZON_SUGGESTED_BIDS:
             return metrics
