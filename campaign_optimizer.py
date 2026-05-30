@@ -251,19 +251,19 @@ class AmazonAdsClient:
 
 
 class CampaignOptimizer:
-    TOP_PERFORMER_ROAS_MIN = 3.0
-    TOP_PERFORMER_ACOS_MAX = 0.35
+    TOP_PERFORMER_ROAS_MIN = 4.0
+    TOP_PERFORMER_ACOS_MAX = 0.25
 
-    PROFITABLE_ROAS_MIN = 1.5
-    PROFITABLE_ACOS_MAX = 0.67
+    PROFITABLE_ROAS_MIN = 3.0
+    PROFITABLE_ACOS_MAX = 0.33
 
-    MARGINAL_ROAS_MIN = 0.5
-    MARGINAL_ACOS_MAX = 2.0
+    MARGINAL_ROAS_MIN = 2.0
+    MARGINAL_ACOS_MAX = 0.50
 
-    TOP_PERFORMER_SCALE = 1.30
-    PROFITABLE_SCALE = 1.15
-    MARGINAL_SCALE = 0.85
-    TEST_BUDGET = 5.0
+    TOP_PERFORMER_SCALE = 1.20
+    PROFITABLE_SCALE = 1.10
+    MARGINAL_SCALE = 0.75
+    TEST_BUDGET = 3.0
 
     MIN_IMPRESSIONS = 100
     MIN_CLICKS = 5
@@ -299,8 +299,8 @@ class CampaignOptimizer:
         if metrics.impressions < self.MIN_IMPRESSIONS:
             return PerformanceTier.ZERO_PERFORMANCE
 
-        if metrics.clicks >= 20 and metrics.purchases == 0:
-            return PerformanceTier.UNPROFITABLE
+        if metrics.clicks >= 12 and metrics.purchases == 0:
+    return PerformanceTier.UNPROFITABLE
 
         if (
             metrics.roas >= self.TOP_PERFORMER_ROAS_MIN
@@ -322,18 +322,37 @@ class CampaignOptimizer:
 
         return PerformanceTier.UNPROFITABLE
 
-    def calculate_recommended_budget(self, metrics: CampaignMetrics, tier: PerformanceTier) -> float:
-        current = metrics.current_budget
-        if tier == PerformanceTier.TOP_PERFORMER:
-            return round(current * self.TOP_PERFORMER_SCALE, 2)
-        if tier == PerformanceTier.PROFITABLE:
-            return round(current * self.PROFITABLE_SCALE, 2)
-        if tier == PerformanceTier.MARGINAL:
-            return round(current * self.MARGINAL_SCALE, 2)
-        if tier == PerformanceTier.ZERO_PERFORMANCE:
-            return self.TEST_BUDGET
-        return 0.0
+   def is_priority_compost_campaign(self, metrics: CampaignMetrics) -> bool:
+    name = (metrics.campaign_name or "").lower()
+    keyword = (metrics.keyword_text or "").lower()
+    text = f"{name} {keyword}"
+    return any(term in text for term in [
+        "compost",
+        "living soil",
+        "worm castings",
+        "biochar compost",
+        "mycorrhizae",
+    ])
 
+def calculate_recommended_budget(self, metrics: CampaignMetrics, tier: PerformanceTier) -> float:
+    current = metrics.current_budget
+    is_compost = self.is_priority_compost_campaign(metrics)
+
+    if tier == PerformanceTier.TOP_PERFORMER:
+        scale = 1.30 if is_compost and metrics.acos <= 0.40 else self.TOP_PERFORMER_SCALE
+        return round(current * scale, 2)
+
+    if tier == PerformanceTier.PROFITABLE:
+        scale = 1.20 if is_compost and metrics.acos <= 0.40 else self.PROFITABLE_SCALE
+        return round(current * scale, 2)
+
+    if tier == PerformanceTier.MARGINAL:
+        return round(current * self.MARGINAL_SCALE, 2)
+
+    if tier == PerformanceTier.ZERO_PERFORMANCE:
+        return 8.0 if is_compost else self.TEST_BUDGET
+
+    return 0.0
     def hydrate_bid_recommendations(self, metrics: CampaignMetrics) -> CampaignMetrics:
         if not self.ads_client or not self.USE_AMAZON_SUGGESTED_BIDS:
             return metrics
