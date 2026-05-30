@@ -22,13 +22,17 @@ from optimize_campaigns import (
     AmazonAdsClient,
     DEFAULT_FALLBACK_BID,
     app,
-    choose_bid,
     generate_keywords_for_product,
-    get_bid_mode,
     load_products,
     normalized_product,
     parse_report_json_bytes,
     verify_internal_token,
+)
+from budget_dayparting import (
+    budget_protection_status,
+    choose_budget_protected_bid,
+    choose_budget_protected_campaign_bid,
+    get_budget_protection_mode,
 )
 from ppc_waste_rules import (
     apply_negatives_step_with_match_types,
@@ -38,10 +42,14 @@ from ppc_waste_rules import (
 
 # Patch the live optimizer before any route handlers execute. Existing endpoints
 # in optimize_campaigns.py resolve these globals at request time, so replacing
-# them here changes /api/apply-negatives, /api/apply-winners, and
-# /api/apply-optimization without duplicating those routes.
+# them here changes /api/apply-negatives, /api/apply-winners,
+# /api/apply-optimization, /api/retune-existing-bids, and product launch bids
+# without duplicating those routes.
 optimizer_core.classify_terms = classify_search_terms
 optimizer_core.apply_negatives_step = apply_negatives_step_with_match_types
+optimizer_core.choose_bid = choose_budget_protected_bid
+optimizer_core.choose_campaign_applied_bid = choose_budget_protected_campaign_bid
+optimizer_core.get_bid_mode = get_budget_protection_mode
 
 BASE_DIR = Path(__file__).parent.absolute()
 DASHBOARD_PATH = BASE_DIR / "templates" / "dashboard.html"
@@ -106,19 +114,20 @@ def _enrich_product_bid(
 ) -> Dict[str, Any]:
     fallback_bid = float(product.get("suggested_bid") or DEFAULT_FALLBACK_BID)
     keyword = _primary_keyword(raw_row, product)
-    mode = get_bid_mode()
+    status = budget_protection_status()
 
-    product["bid_mode"] = mode
+    product["bid_mode"] = status["bid_mode"]
     product["bid_keyword"] = keyword
     product["bid_source"] = "fallback_price_tier"
     product["amazon_bid_low"] = None
     product["amazon_bid_high"] = None
     product["amazon_bid_suggested"] = None
+    product["budget_protection"] = status
 
     if not client or not campaign_id or not ad_group_id:
-        low, high, applied = choose_bid({}, fallback_bid)
+        low, high, applied = choose_budget_protected_bid({}, fallback_bid)
         product["suggested_bid"] = applied
-        product["bid_source_note"] = "Amazon bid context unavailable; used fallback with time-of-day multiplier."
+        product["bid_source_note"] = "Amazon bid context unavailable; used budget-protected fallback bid."
         return product
 
     try:
@@ -128,21 +137,21 @@ def _enrich_product_bid(
             keyword=keyword,
             match_type="PHRASE",
         )
-        low, high, applied = choose_bid(rec, fallback_bid)
+        low, high, applied = choose_budget_protected_bid(rec, fallback_bid)
         if low > 0 and high > 0:
             product["suggested_bid"] = applied
             product["amazon_bid_low"] = low
             product["amazon_bid_high"] = high
             product["amazon_bid_suggested"] = rec.get("suggested")
-            product["bid_source"] = "amazon_suggested"
-            product["bid_source_note"] = "Amazon suggested range used, then adjusted for PEAK/OFF_PEAK/NORMAL mode."
+            product["bid_source"] = "amazon_suggested_budget_protected"
+            product["bid_source_note"] = "Amazon suggested range used, then protected until PRIME time."
         else:
             product["suggested_bid"] = applied
-            product["bid_source_note"] = "Amazon did not return low/high bid range; used fallback with time-of-day multiplier."
+            product["bid_source_note"] = "Amazon did not return low/high bid range; used budget-protected fallback bid."
     except Exception as exc:
-        low, high, applied = choose_bid({}, fallback_bid)
+        low, high, applied = choose_budget_protected_bid({}, fallback_bid)
         product["suggested_bid"] = applied
-        product["bid_source_note"] = f"Amazon bid recommendation failed; used fallback. {type(exc).__name__}"
+        product["bid_source_note"] = f"Amazon bid recommendation failed; used budget-protected fallback. {type(exc).__name__}"
 
     return product
 
@@ -196,12 +205,19 @@ def api_products_with_live_bids():
 
         return JSONResponse({
             "count": len(enriched),
-            "bid_mode": get_bid_mode(),
+            "bid_mode": get_budget_protection_mode(),
+            "budget_protection": budget_protection_status(),
             "bid_context_available": bool(client and campaign_id and ad_group_id),
             "products": enriched,
         })
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/dayparting-status")
+def dayparting_status() -> Dict[str, Any]:
+    """Show whether the optimizer is currently protecting budget or competing hard."""
+    return budget_protection_status()
 
 
 @app.post("/api/search-term-waste-preview")
