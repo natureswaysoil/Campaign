@@ -2,17 +2,22 @@
 
 The full dashboard/API application lives in optimize_campaigns.py. This wrapper
 keeps Cloud Run on a stable entrypoint, serves the dashboard as plain static
-HTML, overrides the product list endpoint so launch bids try Amazon's live
-suggested bid range before falling back to the old price-tier bid, and patches
-search-term waste rules so the optimizer catches costly irrelevant traffic.
+HTML, overrides product/campaign launch behavior, and patches search-term waste
+rules plus dayparting so the optimizer protects budget before prime time.
 
 Do not import app.py here; app.py is a smaller alternate app and does not expose
 all dashboard endpoints such as /api/dashboard-data.
 """
 import csv
+import datetime
+import hmac
+import html as html_mod
 import io
+import os
+import re
+import unicodedata
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, Header
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -55,18 +60,23 @@ BASE_DIR = Path(__file__).parent.absolute()
 DASHBOARD_PATH = BASE_DIR / "templates" / "dashboard.html"
 
 
-def _is_get_route(route, path: str) -> bool:
-    return (
-        getattr(route, "path", None) == path
-        and "GET" in set(getattr(route, "methods", set()) or set())
-    )
+def _is_route(route, path: str, method: Optional[str] = None) -> bool:
+    if getattr(route, "path", None) != path:
+        return False
+    if not method:
+        return True
+    return method.upper() in set(getattr(route, "methods", set()) or set())
 
 
-# Remove the original root dashboard route and the original fallback-only product
-# route. All other API routes from optimize_campaigns.py remain available.
+# Remove the original root dashboard route, fallback-only product route, and old
+# single-campaign launcher. All other API routes from optimize_campaigns.py remain.
 app.router.routes = [
     route for route in app.router.routes
-    if not (_is_get_route(route, "/") or _is_get_route(route, "/api/products"))
+    if not (
+        _is_route(route, "/", "GET")
+        or _is_route(route, "/api/products", "GET")
+        or _is_route(route, "/api/create-campaign-from-product", "POST")
+    )
 ]
 
 
@@ -105,6 +115,111 @@ def _primary_keyword(raw_row: Dict[str, Any], product: Dict[str, Any]) -> str:
     return "fertilizer"
 
 
+def _sanitize_name(name: str) -> str:
+    name = html_mod.unescape(name or "")
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _parse_positive_float(raw: Any, default: float, min_value: float) -> float:
+    if raw in (None, ""):
+        return round(float(default), 2)
+    try:
+        value = float(str(raw).strip())
+    except Exception:
+        raise ValueError(f"Invalid numeric value: {raw}")
+    if value < min_value:
+        raise ValueError(f"Value must be >= {min_value}")
+    return round(value, 2)
+
+
+def _extract_id(resp: Dict[str, Any], batch_key: str, item_key: str, id_key: str) -> Optional[str]:
+    inner = resp.get(batch_key, {}) if isinstance(resp, dict) else {}
+    if isinstance(inner, dict):
+        success = inner.get("success", [])
+        if success:
+            return str((success[0].get(item_key) or success[0]).get(id_key) or "")
+    if isinstance(inner, list) and inner:
+        return str(inner[0].get(id_key) or "")
+    return str(resp.get(id_key) or "") if isinstance(resp, dict) else None
+
+
+def _optional_dashboard_auth(authorization: Optional[str], x_daily_optimizer_token: Optional[str]) -> Optional[JSONResponse]:
+    """Match the old launch route: enforce token only when a token is configured."""
+    token = os.getenv("DAILY_OPTIMIZER_TOKEN", "")
+    if not token:
+        return None
+    supplied = None
+    if x_daily_optimizer_token:
+        supplied = x_daily_optimizer_token.strip()
+    elif authorization and authorization.startswith("Bearer "):
+        supplied = authorization.replace("Bearer ", "", 1).strip()
+    if supplied and not hmac.compare_digest(supplied, token):
+        return JSONResponse({"error": True, "message": "Invalid token"}, status_code=403)
+    return None
+
+
+def _create_campaign(client: AmazonAdsClient, name: str, targeting_type: str, daily_budget: float, start_date: str) -> str:
+    resp = client.post("/sp/campaigns", {
+        "campaigns": [{
+            "name": name,
+            "targetingType": targeting_type,
+            "state": "ENABLED",
+            "budget": {"budget": round(daily_budget, 2), "budgetType": "DAILY"},
+            "startDate": start_date,
+        }]
+    }, content_type="application/vnd.spcampaign.v3+json", accept="application/vnd.spcampaign.v3+json")
+    campaign_id = _extract_id(resp, "campaigns", "campaign", "campaignId")
+    if not campaign_id:
+        raise RuntimeError(f"Campaign creation failed: {resp}")
+    return campaign_id
+
+
+def _create_ad_group(client: AmazonAdsClient, campaign_id: str, name: str, default_bid: float) -> str:
+    resp = client.post("/sp/adGroups", {
+        "adGroups": [{
+            "name": name,
+            "campaignId": str(campaign_id),
+            "state": "ENABLED",
+            "defaultBid": round(default_bid, 2),
+        }]
+    }, content_type="application/vnd.spadgroup.v3+json", accept="application/vnd.spadgroup.v3+json")
+    ad_group_id = _extract_id(resp, "adGroups", "adGroup", "adGroupId")
+    if not ad_group_id:
+        raise RuntimeError(f"Ad group creation failed: {resp}")
+    return ad_group_id
+
+
+def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: str, sku: str, asin: str) -> None:
+    product_ad = {"campaignId": str(campaign_id), "adGroupId": str(ad_group_id), "state": "ENABLED"}
+    if sku:
+        product_ad["sku"] = sku
+    if asin:
+        product_ad["asin"] = asin
+    client.post("/sp/productAds", {"productAds": [product_ad]},
+                content_type="application/vnd.spproductad.v3+json",
+                accept="application/vnd.spproductad.v3+json")
+
+
+def _exact_keyword_rows(keywords: List[str], campaign_id: str, ad_group_id: str, bid: float) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for keyword in keywords:
+        kw = str(keyword or "").strip().lower()
+        if not kw or kw in seen:
+            continue
+        seen.add(kw)
+        rows.append({
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
+            "keywordText": kw,
+            "matchType": "EXACT",
+            "state": "ENABLED",
+            "bid": round(float(bid), 2),
+        })
+    return rows
+
+
 def _enrich_product_bid(
     client: Optional[AmazonAdsClient],
     campaign_id: Optional[str],
@@ -131,12 +246,7 @@ def _enrich_product_bid(
         return product
 
     try:
-        rec = client.get_bid_recommendation(
-            campaign_id=campaign_id,
-            ad_group_id=ad_group_id,
-            keyword=keyword,
-            match_type="PHRASE",
-        )
+        rec = client.get_bid_recommendation(campaign_id=campaign_id, ad_group_id=ad_group_id, keyword=keyword, match_type="PHRASE")
         low, high, applied = choose_budget_protected_bid(rec, fallback_bid)
         if low > 0 and high > 0:
             product["suggested_bid"] = applied
@@ -161,11 +271,7 @@ def dashboard_static():
     try:
         return HTMLResponse(
             DASHBOARD_PATH.read_text(encoding="utf-8"),
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"},
         )
     except Exception as exc:
         return HTMLResponse(
@@ -173,11 +279,9 @@ def dashboard_static():
             <h2>Amazon PPC Optimizer Dashboard</h2>
             <p>Service is running.</p>
             <p style=\"color: red; margin: 20px 0;\">
-                <strong>Dashboard File Error:</strong> {type(exc).__name__}<br>
-                {exc}
+                <strong>Dashboard File Error:</strong> {type(exc).__name__}<br>{exc}
             </p>
-            <p>Base directory: {BASE_DIR}</p>
-            <p>Dashboard path: {DASHBOARD_PATH}</p>
+            <p>Base directory: {BASE_DIR}</p><p>Dashboard path: {DASHBOARD_PATH}</p>
             """,
             status_code=500,
         )
@@ -188,7 +292,6 @@ def api_products_with_live_bids():
     try:
         rows = load_products()
         products = [normalized_product(row) for row in rows]
-
         client = None
         campaign_id = None
         ad_group_id = None
@@ -197,12 +300,7 @@ def api_products_with_live_bids():
             campaign_id, ad_group_id = _first_bid_context(client)
         except Exception:
             client = None
-
-        enriched = [
-            _enrich_product_bid(client, campaign_id, ad_group_id, raw_row, product)
-            for raw_row, product in zip(rows, products)
-        ]
-
+        enriched = [_enrich_product_bid(client, campaign_id, ad_group_id, raw_row, product) for raw_row, product in zip(rows, products)]
         return JSONResponse({
             "count": len(enriched),
             "bid_mode": get_budget_protection_mode(),
@@ -210,6 +308,120 @@ def api_products_with_live_bids():
             "bid_context_available": bool(client and campaign_id and ad_group_id),
             "products": enriched,
         })
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/create-campaign-from-product")
+def api_create_recommended_campaigns(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Launch the recommended two-campaign structure: AUTO DISCOVERY + MANUAL EXACT.
+
+    The old launcher created one manual campaign with exact/phrase/broad mixed in a
+    single ad group. This version keeps discovery spend separate from exact spend.
+    """
+    auth_error = _optional_dashboard_auth(authorization, x_daily_optimizer_token)
+    if auth_error:
+        return auth_error
+    try:
+        key = (payload.get("product_id") or payload.get("sku") or "").lower().strip()
+        if not key:
+            return JSONResponse({"error": True, "message": "product_id or sku required"}, status_code=400)
+
+        product = None
+        product_row: Dict[str, Any] = {}
+        for row in load_products():
+            if row.get("Product_ID", "").lower() == key or row.get("SKU", "").lower() == key:
+                product = normalized_product(row)
+                product_row = row
+                break
+        if not product:
+            return JSONResponse({"error": True, "message": "Product not found"}, status_code=404)
+
+        sku = str(product.get("sku") or "").strip()
+        asin = str(product.get("asin") or "").strip()
+        if not sku and not asin:
+            return JSONResponse({"error": True, "message": "Product must include at least one of SKU or ASIN"}, status_code=400)
+
+        total_budget = _parse_positive_float(payload.get("daily_budget", payload.get("budget")), float(product["suggested_budget"]), 2.0)
+        base_bid = _parse_positive_float(payload.get("starting_bid", payload.get("bid")), float(product["suggested_bid"]), 0.02)
+        discovery_budget_pct = float(payload.get("discovery_budget_pct", 0.30))
+        discovery_budget_pct = max(0.10, min(0.50, discovery_budget_pct))
+        discovery_budget = round(max(1.0, total_budget * discovery_budget_pct), 2)
+        exact_budget = round(max(1.0, total_budget - discovery_budget), 2)
+
+        # Protect discovery bids more aggressively. Exact gets the higher-quality budget.
+        _, _, protected_bid = choose_budget_protected_bid({}, base_bid)
+        discovery_bid = round(max(0.10, protected_bid * 0.70), 2)
+        exact_bid = round(max(0.10, protected_bid * 1.15), 2)
+
+        keywords = generate_keywords_for_product(product_row)
+        client = AmazonAdsClient()
+        start_date = datetime.date.today().isoformat()
+        safe_title = _sanitize_name(str(product.get("title") or "Product"))[:70]
+
+        # 1) Amazon-recommended discovery: automatic targeting campaign.
+        discovery_campaign_id = _create_campaign(
+            client,
+            f"{safe_title} | AUTO DISCOVERY | {start_date}",
+            "AUTO",
+            discovery_budget,
+            start_date,
+        )
+        discovery_ad_group_id = _create_ad_group(client, discovery_campaign_id, "Auto Discovery", discovery_bid)
+        _create_product_ad(client, discovery_campaign_id, discovery_ad_group_id, sku, asin)
+
+        # 2) Controlled harvesting campaign: exact-only manual campaign.
+        exact_campaign_id = _create_campaign(
+            client,
+            f"{safe_title} | MANUAL EXACT | {start_date}",
+            "MANUAL",
+            exact_budget,
+            start_date,
+        )
+        exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
+        _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
+
+        exact_rows = _exact_keyword_rows(keywords, exact_campaign_id, exact_ad_group_id, exact_bid)
+        exact_keywords_created = 0
+        if exact_rows:
+            client.create_keywords(exact_rows)
+            exact_keywords_created = len(exact_rows)
+
+        return JSONResponse({
+            "success": True,
+            "structure": "recommended_auto_discovery_plus_manual_exact",
+            "product": product["title"],
+            "sku": sku,
+            "asin": asin,
+            "total_daily_budget": total_budget,
+            "budget_protection": budget_protection_status(),
+            "campaigns_created": [
+                {
+                    "campaign_type": "AUTO_DISCOVERY",
+                    "campaign_id": discovery_campaign_id,
+                    "ad_group_id": discovery_ad_group_id,
+                    "daily_budget": discovery_budget,
+                    "default_bid": discovery_bid,
+                    "purpose": "Find converting search terms cheaply without mixing discovery spend into exact winners.",
+                },
+                {
+                    "campaign_type": "MANUAL_EXACT",
+                    "campaign_id": exact_campaign_id,
+                    "ad_group_id": exact_ad_group_id,
+                    "daily_budget": exact_budget,
+                    "default_bid": exact_bid,
+                    "keywords_count": len(keywords),
+                    "keyword_rows_created": exact_keywords_created,
+                    "purpose": "Control spend on the most relevant buyer-intent keywords.",
+                },
+            ],
+        })
+    except ValueError as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=400)
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
 
