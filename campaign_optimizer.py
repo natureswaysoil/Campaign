@@ -295,12 +295,12 @@ class CampaignOptimizer:
             return "OFF_PEAK"
         return "NORMAL"
 
-    def classify_campaign(self, metrics: CampaignMetrics) -> PerformanceTier:
+      def classify_campaign(self, metrics: CampaignMetrics) -> PerformanceTier:
         if metrics.impressions < self.MIN_IMPRESSIONS:
             return PerformanceTier.ZERO_PERFORMANCE
 
         if metrics.clicks >= 12 and metrics.purchases == 0:
-    return PerformanceTier.UNPROFITABLE
+            return PerformanceTier.UNPROFITABLE
 
         if (
             metrics.roas >= self.TOP_PERFORMER_ROAS_MIN
@@ -322,35 +322,37 @@ class CampaignOptimizer:
 
         return PerformanceTier.UNPROFITABLE
 
-   def is_priority_compost_campaign(self, metrics: CampaignMetrics) -> bool:
-    name = (metrics.campaign_name or "").lower()
-    keyword = (metrics.keyword_text or "").lower()
-    text = f"{name} {keyword}"
-    return any(term in text for term in [
-        "compost",
-        "living soil",
-        "worm castings",
-        "biochar compost",
-        "mycorrhizae",
-    ])
+    def is_priority_compost_campaign(self, metrics: CampaignMetrics) -> bool:
+        name = (metrics.campaign_name or "").lower()
+        keyword = (metrics.keyword_text or "").lower()
+        text = f"{name} {keyword}"
+        return any(term in text for term in [
+            "compost",
+            "living soil",
+            "worm castings",
+            "biochar compost",
+            "mycorrhizae",
+        ])
 
-def calculate_recommended_budget(self, metrics: CampaignMetrics, tier: PerformanceTier) -> float:
-    current = metrics.current_budget
-    is_compost = self.is_priority_compost_campaign(metrics)
+    def calculate_recommended_budget(self, metrics: CampaignMetrics, tier: PerformanceTier) -> float:
+        current = metrics.current_budget
+        is_compost = self.is_priority_compost_campaign(metrics)
 
-    if tier == PerformanceTier.TOP_PERFORMER:
-        scale = 1.30 if is_compost and metrics.acos <= 0.40 else self.TOP_PERFORMER_SCALE
-        return round(current * scale, 2)
+        if tier == PerformanceTier.TOP_PERFORMER:
+            scale = 1.30 if is_compost and metrics.acos <= 0.40 else self.TOP_PERFORMER_SCALE
+            return round(current * scale, 2)
 
-    if tier == PerformanceTier.PROFITABLE:
-        scale = 1.20 if is_compost and metrics.acos <= 0.40 else self.PROFITABLE_SCALE
-        return round(current * scale, 2)
+        if tier == PerformanceTier.PROFITABLE:
+            scale = 1.20 if is_compost and metrics.acos <= 0.40 else self.PROFITABLE_SCALE
+            return round(current * scale, 2)
 
-    if tier == PerformanceTier.MARGINAL:
-        return round(current * self.MARGINAL_SCALE, 2)
+        if tier == PerformanceTier.MARGINAL:
+            return round(current * self.MARGINAL_SCALE, 2)
 
-    if tier == PerformanceTier.ZERO_PERFORMANCE:
-        return 8.0 if is_compost else self.TEST_BUDGET
+        if tier == PerformanceTier.ZERO_PERFORMANCE:
+            return 8.0 if is_compost else self.TEST_BUDGET
+
+        return 0.0
 
     return 0.0
     def hydrate_bid_recommendations(self, metrics: CampaignMetrics) -> CampaignMetrics:
