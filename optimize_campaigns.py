@@ -64,3 +64,6 @@ with open(output_file, "w", encoding="utf-8") as f:
 print(f"\n💾 Campaign plan saved to: {output_file}")
 print(f"   Harvested keywords this run: {sum(len(p.get('harvested_keywords', [])) for p in plans['plans'])}")
 print(f"\n🎉 OPTIMIZER COMPLETE! (DRY RUN = {DRY_RUN})")
+
+DEFAULT_FALLBACK_BID = 0.75
+
