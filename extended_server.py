@@ -2,7 +2,8 @@
 
 This wraps server.py and overrides only the launch route so duplicate launches are
 blocked. It also adds a harvest endpoint that promotes proven AUTO DISCOVERY
-search terms into the matching MANUAL EXACT campaign.
+search terms into the matching MANUAL EXACT campaign, plus a small dashboard UI
+patch so these controls are visible without rewriting the whole template.
 """
 import datetime
 import hmac
@@ -10,13 +11,163 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 import server as base
 from server import app
 from optimize_campaigns import AmazonAdsClient, DEFAULT_FALLBACK_BID, generate_keywords_for_product, load_products, normalized_product, parse_report_json_bytes, verify_internal_token
 from budget_dayparting import budget_protection_status, choose_budget_protected_bid
 from ppc_waste_rules import classify_search_terms, summarize_classification
+
+
+DASHBOARD_PATCH_JS = r"""
+<script>
+(function(){
+  function byId(id){ return document.getElementById(id); }
+  function fmtMoney(v){ return '$' + Number(v || 0).toFixed(2); }
+  function notify(msg, isErr){
+    if (typeof toast === 'function') toast(msg, !!isErr);
+    else alert(msg);
+  }
+  function token(){
+    if (typeof getToken === 'function') return getToken();
+    return (localStorage.getItem('nws_token') || '').trim();
+  }
+  function apiJson(url, body){
+    var t = token();
+    if (!t) throw new Error('Missing DAILY_OPTIMIZER_TOKEN');
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + t,
+        'X-Daily-Optimizer-Token': t
+      },
+      body: JSON.stringify(body || {})
+    }).then(function(res){
+      return res.text().then(function(txt){
+        var data = txt ? JSON.parse(txt) : {};
+        if (!res.ok || data.error) throw new Error(data.message || data.detail || 'Request failed');
+        return data;
+      });
+    });
+  }
+
+  function addHarvestButton(){
+    var bar = document.querySelector('.prod-bar');
+    if (!bar || byId('harvestDiscoveryBtn')) return;
+    var btn = document.createElement('button');
+    btn.id = 'harvestDiscoveryBtn';
+    btn.className = 'btn btn-blue';
+    btn.textContent = '🌾 Harvest Discovery Winners';
+    btn.onclick = function(){
+      var sku = prompt('Enter SKU to harvest from AUTO DISCOVERY into MANUAL EXACT:');
+      if (!sku) return;
+      btn.disabled = true;
+      btn.textContent = 'Checking winners...';
+      apiJson('/api/harvest-discovery-winners', {
+        sku: sku.trim(),
+        lookback_days: 14,
+        max_terms: 25,
+        apply_live: false
+      }).then(function(preview){
+        var terms = preview.terms_harvested || [];
+        var msg = 'Preview for ' + sku + '\n\n' +
+          'Rows analyzed: ' + (preview.rows_analyzed || 0) + '\n' +
+          'Winners found: ' + (preview.winners_found || 0) + '\n' +
+          'New exact terms selected: ' + (preview.terms_selected || 0) + '\n\n' +
+          (terms.length ? terms.slice(0,25).join('\n') : 'No new winners to harvest yet.') +
+          '\n\nApply live now?';
+        if (!terms.length) {
+          notify('No discovery winners ready to harvest yet.');
+          return null;
+        }
+        if (!confirm(msg)) return null;
+        return apiJson('/api/harvest-discovery-winners', {
+          sku: sku.trim(),
+          lookback_days: 14,
+          max_terms: 25,
+          apply_live: true
+        });
+      }).then(function(result){
+        if (!result) return;
+        notify('✅ Harvest complete: ' + (result.keywords_created || 0) + ' exact keywords added.');
+        if (typeof loadDashboard === 'function') setTimeout(loadDashboard, 1500);
+      }).catch(function(err){
+        notify('❌ ' + err.message, true);
+      }).finally(function(){
+        btn.disabled = false;
+        btn.textContent = '🌾 Harvest Discovery Winners';
+      });
+    };
+    bar.appendChild(btn);
+  }
+
+  function improveLaunchText(){
+    var launchBtn = byId('launchBtn');
+    if (launchBtn) launchBtn.innerHTML = '🚀 Launch AUTO + EXACT';
+    var sub = byId('lSub');
+    if (sub && /Review and confirm/i.test(sub.textContent || '')) {
+      sub.textContent = 'Creates AUTO DISCOVERY + MANUAL EXACT with seed negatives and duplicate protection.';
+    }
+  }
+
+  window.doLaunch = function(){
+    var pid = byId('lPid') && byId('lPid').value;
+    if (!pid) return;
+    var budget = +(byId('lBudget') && byId('lBudget').value);
+    var bid = +(byId('lBid') && byId('lBid').value);
+    if (!isFinite(budget) || budget < 1) return notify('❌ Daily budget must be at least $1.00', true);
+    if (!isFinite(bid) || bid < 0.02) return notify('❌ Starting bid must be at least $0.02', true);
+
+    var btn = byId('launchBtn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Launching AUTO + EXACT...'; }
+    apiJson('/api/create-campaign-from-product', {
+      product_id: pid,
+      daily_budget: Number(budget.toFixed(2)),
+      starting_bid: Number(bid.toFixed(2)),
+      discovery_budget_pct: 0.30,
+      max_exact_keywords: 40
+    }).then(function(data){
+      if (data.duplicate_launch_prevented) {
+        notify('✅ Duplicate prevented — existing AUTO DISCOVERY / MANUAL EXACT campaigns found.');
+        return;
+      }
+      var campaigns = data.campaigns_created || [];
+      var auto = campaigns.find(function(c){ return c.campaign_type === 'AUTO_DISCOVERY'; }) || {};
+      var exact = campaigns.find(function(c){ return c.campaign_type === 'MANUAL_EXACT'; }) || {};
+      var negatives = data.launch_negatives ? data.launch_negatives.negative_rows_created : 0;
+      notify('✅ Launched AUTO + EXACT. Auto budget ' + fmtMoney(auto.daily_budget) +
+        ', Exact budget ' + fmtMoney(exact.daily_budget) +
+        ', Exact keywords ' + (exact.keyword_rows_created || 0) +
+        ', Seed negatives ' + negatives + '.');
+      if (typeof closeModal === 'function') closeModal();
+      if (typeof loadDashboard === 'function') setTimeout(loadDashboard, 2500);
+    }).catch(function(err){
+      notify('❌ ' + err.message, true);
+    }).finally(function(){
+      if (btn) { btn.disabled = false; btn.innerHTML = '🚀 Launch AUTO + EXACT'; }
+    });
+  };
+
+  function patch(){
+    addHarvestButton();
+    improveLaunchText();
+    var oldOpen = window.openLaunch;
+    if (typeof oldOpen === 'function' && !oldOpen.__nwsPatched) {
+      window.openLaunch = function(pid){
+        oldOpen(pid);
+        setTimeout(improveLaunchText, 50);
+      };
+      window.openLaunch.__nwsPatched = true;
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', patch);
+  else patch();
+  setTimeout(patch, 1000);
+})();
+</script>
+"""
 
 
 def _remove_route(path: str, method: str) -> None:
@@ -30,6 +181,24 @@ def _remove_route(path: str, method: str) -> None:
 
 
 _remove_route("/api/create-campaign-from-product", "POST")
+_remove_route("/", "GET")
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def dashboard_with_extended_controls():
+    try:
+        html = base.DASHBOARD_PATH.read_text(encoding="utf-8")
+        html = html.replace("</body>", DASHBOARD_PATCH_JS + "\n</body>")
+        return HTMLResponse(
+            html,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    except Exception as exc:
+        return HTMLResponse(f"<h2>Dashboard Error</h2><p>{exc}</p>", status_code=500)
 
 
 def _optional_dashboard_auth(authorization: Optional[str], x_daily_optimizer_token: Optional[str]) -> Optional[JSONResponse]:
@@ -152,7 +321,6 @@ def api_create_campaign_with_duplicate_protection(
                 },
             })
 
-        # Reuse the tested launcher in server.py after duplicate protection passes.
         return base.api_create_recommended_campaigns(payload, authorization, x_daily_optimizer_token)
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
