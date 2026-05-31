@@ -1,5 +1,4 @@
-"""Enhanced Campaign Engine for Nature's Way Soil Amazon PPC
-   Target ACOS: 35% | Product Margin: 40% | Cash-flow protected"""
+"""Enhanced Campaign Engine - Fixed harvesting for real Amazon reports"""
 
 from __future__ import annotations
 import csv
@@ -20,7 +19,7 @@ PRODUCTS_CSV_URL = os.getenv(
     "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv",
 )
 
-# ====================== ORIGINAL HELPERS (unchanged) ======================
+# ====================== HELPERS (unchanged) ======================
 def normalize(text: str) -> str:
     text = (text or "").lower()
     text = re.sub(r"[^a-z0-9\s-]", " ", text)
@@ -31,8 +30,7 @@ def slugify(text: str) -> str:
     return re.sub(r"_+", "_", text).strip("_")[:60] or "product"
 
 def split_keywords(value: str) -> List[str]:
-    if not value:
-        return []
+    if not value: return []
     parts = re.split(r"[\n,;|]+", str(value))
     out: List[str] = []
     seen = set()
@@ -54,7 +52,7 @@ def first(row: Dict[str, Any], *names: str, default: str = "") -> str:
 def money(value: str, default: float = 0.0) -> float:
     try:
         return float(str(value).replace("$", "").replace(",", "").strip())
-    except Exception:
+    except:
         return default
 
 def load_rules(path: Path = RULES_PATH) -> Dict[str, Any]:
@@ -108,7 +106,7 @@ def merge_unique(*groups: Iterable[str]) -> List[str]:
     return out
 
 
-# ====================== NEW GROWTH ENGINE ======================
+# ====================== FIXED HARVESTING ENGINE ======================
 class CampaignEngine:
     def __init__(self, target_acos: float = 0.35, product_margin: float = 0.40,
                  max_bid: float = 3.50, min_bid: float = 0.30):
@@ -143,7 +141,7 @@ class CampaignEngine:
         campaign_name = f"BROAD_Discovery_{short_name}"
         keywords = self.generate_long_tail_keywords(product)
         negatives = []
-        if search_terms_df is not None:
+        if search_terms_df is not None and len(search_terms_df) > 0:
             bad_terms = search_terms_df[
                 (search_terms_df.get("acos", 999) > self.target_acos * 1.8) |
                 ((search_terms_df.get("orders", 0) == 0) & (search_terms_df.get("clicks", 0) > 8))
@@ -168,14 +166,31 @@ class CampaignEngine:
     def harvest_search_terms_to_exact_phrase(self, search_terms_df: pd.DataFrame, min_orders: int = 2, max_acos: float = 0.32) -> List[Dict]:
         if search_terms_df is None or len(search_terms_df) == 0:
             return []
-        winners = search_terms_df[
-            (search_terms_df.get("orders", 0) >= min_orders) &
-            (search_terms_df.get("acos", 999) <= max_acos) &
-            (search_terms_df.get("clicks", 0) >= 5)
+
+        # Map Amazon's actual column names
+        df = search_terms_df.copy()
+        col_map = {
+            "Customer Search Term": "search_term",
+            "7 Day Total Orders (#)": "orders",
+            "Total Advertising Cost of Sales (ACOS)": "acos",
+            "Clicks": "clicks",
+            "Impressions": "impressions"
+        }
+        for old, new in col_map.items():
+            if old in df.columns:
+                df = df.rename(columns={old: new})
+
+        winners = df[
+            (df.get("orders", 0) >= min_orders) &
+            (df.get("acos", 999) <= max_acos) &
+            (df.get("clicks", 0) >= 5)
         ].copy()
+
         harvested = []
         for _, row in winners.iterrows():
-            term = str(row.get("search_term") or row.get("keywordText", ""))
+            term = str(row.get("search_term") or row.get("Customer Search Term", ""))
+            if not term:
+                continue
             match_type = "exact" if len(term.split()) > 5 else "phrase"
             harvested.append({
                 "keywordText": term,
@@ -213,7 +228,7 @@ class CampaignEngine:
         return {"action": action, "new_bid": new_bid, "reason": f"Orders:{orders} ACOS:{acos:.1%} CR:{conv_rate:.1%}"}
 
 
-# ====================== FIXED BUILD FUNCTION ======================
+# ====================== BUILD FUNCTION ======================
 def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None, 
                        search_terms_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     rules = rules or load_rules()
@@ -230,9 +245,8 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
 
     campaigns: List[Dict[str, Any]] = []
 
-    # === ORIGINAL CAMPAIGN TYPES (skip old Broad to avoid duplication) ===
     for campaign_type, config in rules["campaign_types"].items():
-        if campaign_type == "BROAD_Discovery":   # ← Skip old one
+        if campaign_type == "BROAD_Discovery":
             continue
 
         keywords: List[str] = []
@@ -268,11 +282,11 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
             "bidding_strategy": "dynamicBidsUpAndDown"
         })
 
-    # === NEW Enhanced Broad Discovery (only one per product) ===
+    # Enhanced Broad Discovery
     broad_camp = engine.build_broad_match_campaign(row, search_terms_df)
     campaigns.append(broad_camp)
 
-    # === Harvested keywords ===
+    # Real harvesting
     harvested = engine.harvest_search_terms_to_exact_phrase(search_terms_df) if search_terms_df is not None else []
 
     return {
@@ -299,4 +313,4 @@ def build_all_campaign_plans(rows: List[Dict[str, Any]] | None = None, search_te
 
 
 if __name__ == "__main__":
-    print("✅ Enhanced Campaign Engine loaded successfully (duplicates fixed)")
+    print("✅ Enhanced Campaign Engine loaded with REAL harvesting support")
