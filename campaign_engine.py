@@ -117,7 +117,7 @@ class CampaignEngine:
         self.max_bid = max_bid
         self.min_bid = min_bid
 
-    def generate_long_tail_keywords(self, product: Dict[str, str], num_variations: int = 15) -> List[str]:
+    def generate_long_tail_keywords(self, product: Dict[str, str], num_variations: int = 12) -> List[str]:
         title = product.get("title", "") or product.get("Product_Name", "") or product.get("Title", "")
         title = title.lower()
         attributes = [product.get(k, "") for k in ("brand", "category", "type", "size", "feature", "organic", "living")]
@@ -139,7 +139,8 @@ class CampaignEngine:
         return list(long_tails)[:num_variations]
 
     def build_broad_match_campaign(self, product: Dict[str, Any], search_terms_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-        campaign_name = f"BROAD_Discovery_{slugify(product_name(product))}"
+        short_name = slugify(product_name(product))[:40]
+        campaign_name = f"BROAD_Discovery_{short_name}"
         keywords = self.generate_long_tail_keywords(product)
         negatives = []
         if search_terms_df is not None:
@@ -165,6 +166,8 @@ class CampaignEngine:
         }
 
     def harvest_search_terms_to_exact_phrase(self, search_terms_df: pd.DataFrame, min_orders: int = 2, max_acos: float = 0.32) -> List[Dict]:
+        if search_terms_df is None or len(search_terms_df) == 0:
+            return []
         winners = search_terms_df[
             (search_terms_df.get("orders", 0) >= min_orders) &
             (search_terms_df.get("acos", 999) <= max_acos) &
@@ -227,8 +230,11 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
 
     campaigns: List[Dict[str, Any]] = []
 
-    # === ORIGINAL CAMPAIGN TYPES (fully restored) ===
+    # === ORIGINAL CAMPAIGN TYPES (skip old Broad to avoid duplication) ===
     for campaign_type, config in rules["campaign_types"].items():
+        if campaign_type == "BROAD_Discovery":   # ← Skip old one
+            continue
+
         keywords: List[str] = []
         if campaign_type == "AUTO_Discovery":
             keywords = []
@@ -238,8 +244,6 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
             keywords = groups["EXACT_Long_Tail"]
         elif campaign_type == "PHRASE_Research":
             keywords = groups["PHRASE_Research"]
-        elif campaign_type == "BROAD_Discovery":
-            keywords = merge_unique(groups["EXACT_Core"], groups["PHRASE_Research"], groups["EXACT_Long_Tail"])
         elif campaign_type == "COMPETITOR":
             keywords = groups["COMPETITOR"]
         elif campaign_type == "PRODUCT_Targeting":
@@ -264,11 +268,11 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
             "bidding_strategy": "dynamicBidsUpAndDown"
         })
 
-    # === NEW: Broad Match Discovery Campaign ===
+    # === NEW Enhanced Broad Discovery (only one per product) ===
     broad_camp = engine.build_broad_match_campaign(row, search_terms_df)
     campaigns.append(broad_camp)
 
-    # === NEW: Harvested keywords ===
+    # === Harvested keywords ===
     harvested = engine.harvest_search_terms_to_exact_phrase(search_terms_df) if search_terms_df is not None else []
 
     return {
@@ -295,4 +299,4 @@ def build_all_campaign_plans(rows: List[Dict[str, Any]] | None = None, search_te
 
 
 if __name__ == "__main__":
-    print("✅ Enhanced Campaign Engine loaded successfully (bug fixed)")
+    print("✅ Enhanced Campaign Engine loaded successfully (duplicates fixed)")
