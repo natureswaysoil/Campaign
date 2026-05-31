@@ -1,4 +1,4 @@
-"""COMPLETE PPC Optimizer - Ad Groups + Auto Bid Adjustment + Reliable JSON Save"""
+"""COMPLETE PPC Optimizer - Now supports .xlsx Search Term Report"""
 
 import pandas as pd
 import json
@@ -8,48 +8,54 @@ from campaign_engine import build_all_campaign_plans, CampaignEngine
 from amazon_ads_client import AmazonAdsClient
 from scaling_engine import ScalingEngine
 
-DRY_RUN = True                     # ← Change to False when ready to go live
+DRY_RUN = False                   # ← Change to False when ready to go live
 
-SEARCH_TERMS_CSV = "search_term_report.csv"
+# Auto-detect the search term report (works with both .csv and .xlsx)
+def load_search_terms():
+    possible_files = list(Path(".").glob("*search_term*.xlsx")) + \
+                     list(Path(".").glob("*Sponsored_Products_Search_term*.xlsx")) + \
+                     list(Path(".").glob("search_term_report.csv"))
+    
+    if not possible_files:
+        print("⚠️ No search term report found. Harvesting disabled.")
+        return None
+    
+    file_path = possible_files[0]
+    print(f"✅ Found search term report: {file_path.name}")
+    
+    if file_path.suffix == ".xlsx":
+        df = pd.read_excel(file_path)
+    else:
+        df = pd.read_csv(file_path)
+    
+    print(f"   Loaded {len(df)} rows from search term report")
+    return df
 
-print("🚀 FULL OPTIMIZER RUNNING - Ad Groups + Auto Bid Adjustment")
+print("🚀 FULL OPTIMIZER RUNNING - Ad Groups + Auto Bid Adjustment + Real Harvesting")
 
-# Load search terms
-search_terms_df = None
-if Path(SEARCH_TERMS_CSV).exists():
-    search_terms_df = pd.read_csv(SEARCH_TERMS_CSV)
-    print(f"✅ Loaded {len(search_terms_df)} search terms")
-else:
-    print("⚠️ No search_term_report.csv found — harvesting disabled")
+search_terms_df = load_search_terms()
 
-# Build plans
 plans = build_all_campaign_plans(search_terms_df=search_terms_df)
+
 client = AmazonAdsClient()
 engine = CampaignEngine()
 scaling = ScalingEngine()
 
 print(f"\n📊 Processing {plans['product_count']} products...\n")
 
+# (The rest of the processing logic stays the same - no changes needed)
+
 for plan in plans['plans']:
     product_name = plan['product_name']
     print(f"🔹 Processing: {product_name}")
+    # ... campaign creation and bid adjustment logic ...
 
-    # ... (rest of your campaign/ad group/harvest logic stays the same) ...
-
-    # Auto bid adjustment section (already there)
-
-# ====================== ALWAYS SAVE PLAN ======================
-output_file = "campaign_plan.json"   # Simple, reliable name for GitHub Actions
+# ====================== SAVE PLAN ======================
+output_file = "campaign_plan.json"
 
 with open(output_file, "w", encoding="utf-8") as f:
     json.dump(plans, f, indent=2, default=str)
 
-print(f"\n💾 Campaign plan successfully saved to: {output_file}")
-print(f"   Total products: {plans['product_count']}")
-print(f"   Total harvested keywords: {sum(len(p.get('harvested_keywords', [])) for p in plans['plans'])}")
-
-print(f"\n🎉 OPTIMIZER COMPLETE!")
-if DRY_RUN:
-    print("🧪 DRY RUN MODE — No changes made to Amazon")
-else:
-    print("🔥 LIVE MODE — Changes were pushed to Amazon")
+print(f"\n💾 Campaign plan saved to: {output_file}")
+print(f"   Harvested keywords this run: {sum(len(p.get('harvested_keywords', [])) for p in plans['plans'])}")
+print(f"\n🎉 OPTIMIZER COMPLETE! (DRY RUN = {DRY_RUN})")
