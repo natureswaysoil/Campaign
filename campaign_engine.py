@@ -20,8 +20,7 @@ PRODUCTS_CSV_URL = os.getenv(
     "https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv",
 )
 
-
-# ====================== ORIGINAL HELPERS (kept unchanged) ======================
+# ====================== ORIGINAL HELPERS (unchanged) ======================
 def normalize(text: str) -> str:
     text = (text or "").lower()
     text = re.sub(r"[^a-z0-9\s-]", " ", text)
@@ -109,7 +108,7 @@ def merge_unique(*groups: Iterable[str]) -> List[str]:
     return out
 
 
-# ====================== NEW GROWTH FEATURES ======================
+# ====================== NEW GROWTH ENGINE ======================
 class CampaignEngine:
     def __init__(self, target_acos: float = 0.35, product_margin: float = 0.40,
                  max_bid: float = 3.50, min_bid: float = 0.30):
@@ -119,21 +118,17 @@ class CampaignEngine:
         self.min_bid = min_bid
 
     def generate_long_tail_keywords(self, product: Dict[str, str], num_variations: int = 15) -> List[str]:
-        """Dynamic long-tail keywords using product title + attributes."""
         title = product.get("title", "") or product.get("Product_Name", "") or product.get("Title", "")
         title = title.lower()
         attributes = [product.get(k, "") for k in ("brand", "category", "type", "size", "feature", "organic", "living")]
-        
         base_words = re.findall(r'\w+', title)[:8]
         long_tails = set()
-
         for attr in attributes:
             if attr and len(attr) > 2:
                 for base in base_words:
                     if base in ["soil", "compost", "fertilizer", "organic", "lawn"]:
                         long_tails.add(f"{base} {attr.lower()}".strip())
                         long_tails.add(f"organic living {base} {attr.lower()}".strip())
-
         patterns = [
             f"{title.split()[0]} for raised beds",
             f"best {title.split()[0]} for vegetables",
@@ -144,11 +139,8 @@ class CampaignEngine:
         return list(long_tails)[:num_variations]
 
     def build_broad_match_campaign(self, product: Dict[str, Any], search_terms_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-        """Broad Match campaign with strong negative controls."""
         campaign_name = f"BROAD_Discovery_{slugify(product_name(product))}"
-        
         keywords = self.generate_long_tail_keywords(product)
-        
         negatives = []
         if search_terms_df is not None:
             bad_terms = search_terms_df[
@@ -162,23 +154,22 @@ class CampaignEngine:
             "campaign_name": campaign_name,
             "match_type": "broad",
             "purpose": "Discovery + volume ramp",
-            "daily_budget": 20.0,           # Conservative start for cash protection
+            "daily_budget": 20.0,
             "default_bid": 0.75,
             "min_bid": self.min_bid,
             "max_bid": self.max_bid,
             "keywords": [{"keywordText": kw, "matchType": "broad"} for kw in keywords],
             "negative_keywords": negatives,
-            "bidding_strategy": "dynamicBidsUpAndDown"
+            "bidding_strategy": "dynamicBidsUpAndDown",
+            "keyword_count": len(keywords)
         }
 
     def harvest_search_terms_to_exact_phrase(self, search_terms_df: pd.DataFrame, min_orders: int = 2, max_acos: float = 0.32) -> List[Dict]:
-        """Auto-harvest top performers into Exact/Phrase."""
         winners = search_terms_df[
             (search_terms_df.get("orders", 0) >= min_orders) &
             (search_terms_df.get("acos", 999) <= max_acos) &
             (search_terms_df.get("clicks", 0) >= 5)
         ].copy()
-
         harvested = []
         for _, row in winners.iterrows():
             term = str(row.get("search_term") or row.get("keywordText", ""))
@@ -193,19 +184,16 @@ class CampaignEngine:
         return harvested[:50]
 
     def decide_bid(self, row: Dict[str, Any], current_bid: float) -> Dict[str, Any]:
-        """Aggressive winner scaling + cash protection (35% ACOS / 40% margin)."""
         spend = money(row.get("spend") or row.get("cost"), 0)
         orders = int(row.get("orders", 0) or row.get("purchases7d", 0))
         acos = money(row.get("acos"), 999)
         clicks = int(row.get("clicks", 0))
         conv_rate = (orders / clicks) if clicks > 0 else 0.0
 
-        # CASH PROTECTION (critical at $8k balance)
         if spend > 120 and orders < 2:
             new_bid = round(max(current_bid * 0.60, self.min_bid), 2)
             return {"action": "decrease", "new_bid": new_bid, "reason": "CASH PROTECTION - high spend, low orders"}
 
-        # AGGRESSIVE GROWTH SCALING
         if orders >= 3 and acos <= self.target_acos * 0.90:
             multiplier = 1.32 if conv_rate >= 0.13 else 1.24
             new_bid = round(min(current_bid * multiplier, self.max_bid), 2)
@@ -222,7 +210,7 @@ class CampaignEngine:
         return {"action": action, "new_bid": new_bid, "reason": f"Orders:{orders} ACOS:{acos:.1%} CR:{conv_rate:.1%}"}
 
 
-# ====================== ENHANCED BUILD FUNCTION ======================
+# ====================== FIXED BUILD FUNCTION ======================
 def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None, 
                        search_terms_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     rules = rules or load_rules()
@@ -234,31 +222,53 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
     asin = first(row, "ASIN")
     sku = first(row, "SKU")
 
-    # Merge ingredient/problem terms
     groups["EXACT_Core"] = merge_unique(groups["EXACT_Core"], groups["ingredient"])
     groups["PHRASE_Research"] = merge_unique(groups["PHRASE_Research"], groups["problem"], groups["ingredient"])
 
     campaigns: List[Dict[str, Any]] = []
 
-    # Original campaign types (kept for backward compatibility)
+    # === ORIGINAL CAMPAIGN TYPES (fully restored) ===
     for campaign_type, config in rules["campaign_types"].items():
-        # ... (your original logic stays here - unchanged) ...
-        keywords = []
+        keywords: List[str] = []
         if campaign_type == "AUTO_Discovery":
             keywords = []
         elif campaign_type == "EXACT_Core":
             keywords = groups["EXACT_Core"]
-        # ... rest of your original campaign_type logic ...
+        elif campaign_type == "EXACT_Long_Tail":
+            keywords = groups["EXACT_Long_Tail"]
+        elif campaign_type == "PHRASE_Research":
+            keywords = groups["PHRASE_Research"]
+        elif campaign_type == "BROAD_Discovery":
+            keywords = merge_unique(groups["EXACT_Core"], groups["PHRASE_Research"], groups["EXACT_Long_Tail"])
+        elif campaign_type == "COMPETITOR":
+            keywords = groups["COMPETITOR"]
+        elif campaign_type == "PRODUCT_Targeting":
+            keywords = []
 
         daily_budget = money(first(row, "Daily_Budget", "Daily Budget"), float(config.get("daily_budget", 5.0)))
-        # ... build campaign dict (unchanged) ...
-        campaigns.append({ ... })   # ← your original campaign dict here
+        default_bid = money(first(row, "Default_Bid", "Default Bid"), float(config.get("default_bid", 0.55)))
 
-    # NEW: Broad Match Discovery Campaign
+        campaigns.append({
+            "campaign_type": campaign_type,
+            "campaign_name": rules.get("campaign_name_pattern", "SP_{campaign_type}_{product_slug}").format(
+                campaign_type=campaign_type, product_slug=slug),
+            "match_type": config.get("match_type"),
+            "purpose": config.get("purpose"),
+            "daily_budget": daily_budget,
+            "default_bid": default_bid,
+            "min_bid": money(first(row, "Min_Bid", "Min Bid"), 0.25),
+            "max_bid": money(first(row, "Max_Bid", "Max Bid"), 1.0),
+            "keywords": [{"keywordText": kw, "matchType": config.get("match_type", "phrase")} for kw in keywords],
+            "keyword_count": len(keywords),
+            "negative_keywords": [],
+            "bidding_strategy": "dynamicBidsUpAndDown"
+        })
+
+    # === NEW: Broad Match Discovery Campaign ===
     broad_camp = engine.build_broad_match_campaign(row, search_terms_df)
     campaigns.append(broad_camp)
 
-    # NEW: Harvested Exact/Phrase keywords
+    # === NEW: Harvested keywords ===
     harvested = engine.harvest_search_terms_to_exact_phrase(search_terms_df) if search_terms_df is not None else []
 
     return {
@@ -270,7 +280,7 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
         "campaigns": campaigns,
         "harvested_keywords": harvested,
         "total_keywords": sum(c.get("keyword_count", 0) for c in campaigns) + len(harvested),
-        "engine": engine   # for bid decisions later
+        "engine": engine
     }
 
 
@@ -284,11 +294,5 @@ def build_all_campaign_plans(rows: List[Dict[str, Any]] | None = None, search_te
     }
 
 
-# ====================== USAGE EXAMPLE ======================
 if __name__ == "__main__":
-    print("✅ Enhanced Campaign Engine loaded with:")
-    print("   • Broad Match + strong negatives")
-    print("   • Dynamic long-tail generation")
-    print("   • Auto-harvest Exact/Phrase")
-    print("   • Aggressive scaling (35% ACOS)")
-    print("   • Cash-protection filter (active)")
+    print("✅ Enhanced Campaign Engine loaded successfully (bug fixed)")
