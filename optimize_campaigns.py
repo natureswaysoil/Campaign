@@ -12,9 +12,14 @@ DRY_RUN = False                    # ← Change to False when ready to go live
 
 # Auto-detect the search term report (works with both .csv and .xlsx)
 def load_search_terms():
-    possible_files = list(Path(".").glob("*search_term*.xlsx")) + \
-                     list(Path(".").glob("*Sponsored_Products_Search_term*.xlsx")) + \
-                     list(Path(".").glob("search_term_report.csv"))
+    """Super-broad detection for any Amazon Search Term Report"""
+    possible_files = (
+        list(Path(".").glob("*Search_term_report*")) +
+        list(Path(".").glob("*Sponsored_Products_Search_term*")) +
+        list(Path(".").glob("*search_term*")) +
+        list(Path(".").glob("*report*.csv")) +
+        list(Path(".").glob("*report*.xlsx"))
+    )
     
     if not possible_files:
         print("⚠️ No search term report found. Harvesting disabled.")
@@ -23,7 +28,7 @@ def load_search_terms():
     file_path = possible_files[0]
     print(f"✅ Found search term report: {file_path.name}")
     
-    if file_path.suffix == ".xlsx":
+    if file_path.suffix.lower() == ".xlsx":
         df = pd.read_excel(file_path)
     else:
         df = pd.read_csv(file_path)
