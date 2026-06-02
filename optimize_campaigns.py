@@ -380,8 +380,21 @@ def api_dashboard_data(authorization: Optional[str] = Header(default=None), x_da
     verify_internal_token(authorization, x_daily_optimizer_token)
     try:
         client = AmazonAdsClient()
-        campaigns = client.list_campaigns()
-        return JSONResponse({"success": True, "campaign_count": len(campaigns), "campaigns": campaigns})
+        all_campaigns = client.list_campaigns()
+        active_campaigns = [
+            campaign for campaign in all_campaigns
+            if str(campaign.get("state") or "").upper() == "ENABLED"
+        ]
+        return JSONResponse({
+            "success": True,
+            "active_only": True,
+            "campaign_count": len(active_campaigns),
+            "active_campaign_count": len(active_campaigns),
+            "total_campaign_count": len(all_campaigns),
+            "paused_campaign_count": sum(1 for c in all_campaigns if str(c.get("state") or "").upper() == "PAUSED"),
+            "archived_campaign_count": sum(1 for c in all_campaigns if str(c.get("state") or "").upper() == "ARCHIVED"),
+            "campaigns": active_campaigns,
+        })
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
 
