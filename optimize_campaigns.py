@@ -21,10 +21,38 @@ import requests
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
+<<<<<<< HEAD
 try:
     from campaign_engine import build_all_campaign_plans
 except Exception:
     build_all_campaign_plans = None  # type: ignore
+=======
+# Auto-detect the search term report (works with both .csv and .xlsx)
+def load_search_terms():
+    """Super-broad detection for any Amazon Search Term Report"""
+    possible_files = (
+        list(Path(".").glob("*Search_term_report*")) +
+        list(Path(".").glob("*Sponsored_Products_Search_term*")) +
+        list(Path(".").glob("*search_term*")) +
+        list(Path(".").glob("*report*.csv")) +
+        list(Path(".").glob("*report*.xlsx"))
+    )
+    
+    if not possible_files:
+        print("⚠️ No search term report found. Harvesting disabled.")
+        return None
+    
+    file_path = possible_files[0]
+    print(f"✅ Found search term report: {file_path.name}")
+    
+    if file_path.suffix.lower() == ".xlsx":
+        df = pd.read_excel(file_path)
+    else:
+        df = pd.read_csv(file_path)
+    
+    print(f"   Loaded {len(df)} rows from search term report")
+    return df
+>>>>>>> origin/main
 
 app = FastAPI(title="Nature's Way Soil Amazon PPC Optimizer")
 
@@ -86,6 +114,7 @@ def normalize_text(text: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+<<<<<<< HEAD
 def _first(row: Dict[str, Any], *names: str, default: str = "") -> str:
     lower_map = {str(k).lower(): v for k, v in row.items()}
     for name in names:
@@ -397,3 +426,11 @@ def api_run_optimizer(payload: Dict[str, Any] = Body(default={}), authorization:
 
 if __name__ == "__main__":
     print(json.dumps(run_optimizer(dry_run=True), indent=2, default=str))
+=======
+print(f"\n💾 Campaign plan saved to: {output_file}")
+print(f"   Harvested keywords this run: {sum(len(p.get('harvested_keywords', [])) for p in plans['plans'])}")
+print(f"\n🎉 OPTIMIZER COMPLETE! (DRY RUN = {DRY_RUN})")
+
+DEFAULT_FALLBACK_BID = 0.75
+
+>>>>>>> origin/main
