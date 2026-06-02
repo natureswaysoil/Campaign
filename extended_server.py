@@ -53,8 +53,58 @@ DASHBOARD_PATCH_JS = r"""
     });
   }
 
+  function isEnabledCampaign(c){
+    return String((c && c.state) || '').toUpperCase() === 'ENABLED';
+  }
+
+  function forceActiveCampaignsOnly(){
+    var filter = byId('stateFilter');
+    if (filter) {
+      filter.value = 'ENABLED';
+      for (var i = filter.options.length - 1; i >= 0; i--) {
+        var val = String(filter.options[i].value || '').toUpperCase();
+        if (val !== 'ENABLED') filter.remove(i);
+      }
+    }
+    if (Array.isArray(window.allCampaigns)) {
+      window.allCampaigns = window.allCampaigns.filter(isEnabledCampaign);
+    }
+  }
+
+  function patchCampaignRendering(){
+    if (typeof window.renderCampaigns === 'function' && !window.renderCampaigns.__activeOnly) {
+      var oldRenderCampaigns = window.renderCampaigns;
+      window.renderCampaigns = function(campaigns, opts){
+        forceActiveCampaignsOnly();
+        campaigns = Array.isArray(campaigns) ? campaigns.filter(isEnabledCampaign) : [];
+        return oldRenderCampaigns(campaigns, opts);
+      };
+      window.renderCampaigns.__activeOnly = true;
+    }
+    if (typeof window.renderCampaignsFromState === 'function' && !window.renderCampaignsFromState.__activeOnly) {
+      var oldRenderFromState = window.renderCampaignsFromState;
+      window.renderCampaignsFromState = function(){
+        forceActiveCampaignsOnly();
+        return oldRenderFromState();
+      };
+      window.renderCampaignsFromState.__activeOnly = true;
+    }
+    if (typeof window.loadDashboard === 'function' && !window.loadDashboard.__activeOnly) {
+      var oldLoadDashboard = window.loadDashboard;
+      window.loadDashboard = function(){
+        var result = oldLoadDashboard.apply(this, arguments);
+        setTimeout(function(){
+          forceActiveCampaignsOnly();
+          if (typeof window.renderCampaignsFromState === 'function') window.renderCampaignsFromState();
+        }, 500);
+        return result;
+      };
+      window.loadDashboard.__activeOnly = true;
+    }
+  }
+
   function addHarvestButton(){
-    var bar = document.querySelector('.prod-bar');
+    var bar = document.querySelector('.prod-bar') || document.querySelector('#panel-products .toolbar');
     if (!bar || byId('harvestDiscoveryBtn')) return;
     var btn = document.createElement('button');
     btn.id = 'harvestDiscoveryBtn';
@@ -151,6 +201,8 @@ DASHBOARD_PATCH_JS = r"""
   };
 
   function patch(){
+    forceActiveCampaignsOnly();
+    patchCampaignRendering();
     addHarvestButton();
     improveLaunchText();
     var oldOpen = window.openLaunch;
@@ -161,10 +213,13 @@ DASHBOARD_PATCH_JS = r"""
       };
       window.openLaunch.__nwsPatched = true;
     }
+    if (typeof window.renderCampaignsFromState === 'function') window.renderCampaignsFromState();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', patch);
   else patch();
+  setTimeout(patch, 300);
   setTimeout(patch, 1000);
+  setInterval(patch, 5000);
 })();
 </script>
 """
