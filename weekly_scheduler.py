@@ -1,8 +1,11 @@
-"""Weekly Scheduler - Run this via cron or GitHub Actions"""
+"""Weekly Scheduler - Run this via cron or GitHub Actions."""
 
-from optimize_campaigns import main as run_optimizer  # or just call the logic directly
+from datetime import datetime
+
+from optimize_campaigns import run_optimizer
+
 
 if __name__ == "__main__":
     print(f"📅 Scheduled run started: {datetime.now()}")
-    run_optimizer()   # or paste the full logic here
-    print("✅ Scheduled optimization complete")
+    result = run_optimizer(dry_run=True)
+    print(f"✅ Scheduled optimization complete: {result.get('product_count', 0)} products processed")
