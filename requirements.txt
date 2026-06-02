@@ -5,6 +5,8 @@ gunicorn>=22.0.0
 
 # HTTP Client & Parsing
 requests>=2.32.0
+pandas>=2.2.0
+openpyxl>=3.1.0
 
 # Google Cloud Secret Manager
 google-cloud-secret-manager>=2.21.0
