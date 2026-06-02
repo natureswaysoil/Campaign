@@ -52,7 +52,7 @@ def first(row: Dict[str, Any], *names: str, default: str = "") -> str:
 def money(value: Any, default: float = 0.0) -> float:
     try:
         return float(str(value).replace("$", "").replace(",", "").strip())
-    except:
+    except Exception:
         return default
 
 def load_rules(path: Path = RULES_PATH) -> Dict[str, Any]:
@@ -115,23 +115,23 @@ class CampaignEngine:
         self.min_bid = min_bid
 
     def generate_long_tail_keywords(self, product: Dict[str, str], num_variations: int = 12) -> List[str]:
-        title = product.get("title", "") or product.get("Product_Name", "") or product.get("Title", "")
-        title = title.lower()
+        title = product.get("title", "") or product.get("Product_Name", "") or product.get("Title", "") or product_name(product)
+        words = title.lower().split()
+        seed = words[0] if words else "fertilizer"
         patterns = [
-            f"{title.split()[0]} for raised beds",
-            f"best {title.split()[0]} for vegetables",
-            f"organic living {title.split()[0]}",
-            f"{title.split()[0]} with beneficial microbes",
+            f"{seed} for raised beds",
+            f"best {seed} for vegetables",
+            f"organic living {seed}",
+            f"{seed} with beneficial microbes",
         ]
-        return list(set(patterns))[:num_variations]
+        return list(dict.fromkeys(patterns))[:num_variations]
 
     def build_broad_match_campaign(self, product: Dict[str, Any], search_terms_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         short_name = slugify(product_name(product))[:40]
-        campaign_name = f"BROAD_Discovery_{short_name}"
         keywords = self.generate_long_tail_keywords(product)
         return {
             "campaign_type": "BROAD_Discovery",
-            "campaign_name": campaign_name,
+            "campaign_name": f"BROAD_Discovery_{short_name}",
             "match_type": "broad",
             "purpose": "Discovery + volume ramp",
             "daily_budget": 20.0,
@@ -144,17 +144,14 @@ class CampaignEngine:
             "keyword_count": len(keywords)
         }
 
-    def harvest_search_terms_to_exact_phrase(self, search_terms_df: pd.DataFrame, min_orders: int = 1, max_acos: float = 0.50) -> List[Dict]:
+    def harvest_search_terms_to_exact_phrase(self, search_terms_df: pd.DataFrame, min_orders: int = 1, max_acos: float = 0.50) -> List[Dict[str, Any]]:
         if search_terms_df is None or len(search_terms_df) == 0:
             print("❌ No search term data loaded")
             return []
 
         print(f"🔍 Search term report columns found: {list(search_terms_df.columns)}")
         print(f"📊 Total rows in report: {len(search_terms_df)}")
-
         df = search_terms_df.copy()
-
-        # ROBUST COLUMN MAPPING
         col_map = {
             "Customer Search Term": "search_term",
             "Search Term": "search_term",
@@ -168,24 +165,31 @@ class CampaignEngine:
             "Clicks": "clicks",
             "clicks": "clicks",
         }
-
         for old, new in col_map.items():
             if old in df.columns:
                 df = df.rename(columns={old: new})
 
+        if "orders" not in df.columns:
+            df["orders"] = 0
+        if "acos" not in df.columns:
+            df["acos"] = 999
+        if "clicks" not in df.columns:
+            df["clicks"] = 0
+        if "search_term" not in df.columns:
+            return []
+
+        df["orders"] = pd.to_numeric(df["orders"], errors="coerce").fillna(0)
+        df["clicks"] = pd.to_numeric(df["clicks"], errors="coerce").fillna(0)
+        df["acos"] = df["acos"].apply(lambda v: money(v, 999))
+        df.loc[df["acos"] > 1, "acos"] = df.loc[df["acos"] > 1, "acos"] / 100.0
+
         print(f"✅ Mapped columns → search_term: {'search_term' in df.columns}, orders: {'orders' in df.columns}, acos: {'acos' in df.columns}")
-
-        winners = df[
-            (df.get("orders", 0) >= min_orders) &
-            (df.get("acos", 999) <= max_acos) &
-            (df.get("clicks", 0) >= 3)
-        ].copy()
-
+        winners = df[(df["orders"] >= min_orders) & (df["acos"] <= max_acos) & (df["clicks"] >= 3)].copy()
         print(f"🏆 Found {len(winners)} winning search terms to harvest")
 
-        harvested = []
+        harvested: List[Dict[str, Any]] = []
         for _, row in winners.iterrows():
-            term = str(row.get("search_term") or row.get("Customer Search Term", "")).strip()
+            term = str(row.get("search_term") or "").strip()
             if not term:
                 continue
             match_type = "exact" if len(term.split()) > 5 else "phrase"
@@ -193,15 +197,16 @@ class CampaignEngine:
                 "keywordText": term,
                 "matchType": match_type,
                 "bid": round(1.2 * 1.15, 2),
-                "reason": f"{row.get('orders',0)} orders @ ACOS {row.get('acos',0):.1%}"
+                "reason": f"{int(row.get('orders',0))} orders @ ACOS {float(row.get('acos',0)):.1%}"
             })
-
         return harvested[:60]
 
     def decide_bid(self, row: Dict[str, Any], current_bid: float) -> Dict[str, Any]:
         spend = money(row.get("spend") or row.get("cost"), 0)
         orders = int(row.get("orders", 0) or row.get("purchases7d", 0))
         acos = money(row.get("acos"), 999)
+        if acos > 1:
+            acos = acos / 100.0
         clicks = int(row.get("clicks", 0))
         conv_rate = (orders / clicks) if clicks > 0 else 0.0
 
@@ -226,11 +231,11 @@ class CampaignEngine:
 
 
 # ====================== BUILD FUNCTION ======================
-def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None, 
+def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None,
                        search_terms_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     rules = rules or load_rules()
     engine = CampaignEngine(target_acos=0.35, product_margin=0.40)
-    
+
     groups = keyword_groups(row)
     name = product_name(row)
     slug = slugify(name)
@@ -279,11 +284,8 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
             "bidding_strategy": "dynamicBidsUpAndDown"
         })
 
-    # Enhanced Broad Discovery
     broad_camp = engine.build_broad_match_campaign(row, search_terms_df)
     campaigns.append(broad_camp)
-
-    # Real harvesting
     harvested = engine.harvest_search_terms_to_exact_phrase(search_terms_df) if search_terms_df is not None else []
 
     return {
@@ -295,7 +297,6 @@ def build_campaign_plan(row: Dict[str, Any], rules: Dict[str, Any] | None = None
         "campaigns": campaigns,
         "harvested_keywords": harvested,
         "total_keywords": sum(c.get("keyword_count", 0) for c in campaigns) + len(harvested),
-        "engine": engine
     }
 
 
