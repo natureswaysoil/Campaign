@@ -45,13 +45,24 @@ def _valid_session(cookie_val: Optional[str]) -> bool:
     return _secrets.compare_digest(cookie_val, _session_token(raw))
 
 
+def _valid_authorization(authorization: Optional[str]) -> bool:
+    raw = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN", "")
+    if not raw or not authorization or not authorization.startswith("Bearer "):
+        return False
+    supplied = authorization.replace("Bearer ", "", 1).strip()
+    return bool(supplied) and _secrets.compare_digest(supplied, raw)
+
+
 @app.middleware("http")
 async def require_login(request: Request, call_next):
     path = request.url.path
     if path in _PUBLIC_PATHS or path.startswith("/static"):
         return await call_next(request)
     session = request.cookies.get(SESSION_COOKIE)
-    if not _valid_session(session):
+    authorization = request.headers.get("Authorization")
+    if not (_valid_session(session) or _valid_authorization(authorization)):
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "Authentication required"}, status_code=401)
         return RedirectResponse(f"/login?next={path}", status_code=302)
     return await call_next(request)
 
@@ -137,6 +148,10 @@ BASE_URLS = {
     "na": "https://advertising-api.amazon.com",
     "eu": "https://advertising-api-eu.amazon.com",
     "fe": "https://advertising-api-fe.amazon.com",
+}
+GENERIC_EXACT_BLOCKLIST = {
+    "compost", "soil", "fertilizer", "plant", "plants", "garden", "lawn",
+    "organic", "natural", "liquid", "outdoor", "indoor", "premium",
 }
 
 ENDPOINTS = {
@@ -326,7 +341,7 @@ def _rebuild_dashboard_cache():
                 "Content-Type": "application/vnd.spcampaign.v3+json",
                 "Accept": "application/vnd.spcampaign.v3+json",
             },
-            json={"maxResults": 100, "filters": {"stateFilter": {"include": ["ENABLED", "PAUSED"]}}},
+            json={"maxResults": 100, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
             timeout=30,
         )
         list_resp.raise_for_status()
@@ -363,6 +378,7 @@ def _rebuild_dashboard_cache():
 
         _dashboard_cache["data"] = {
             **get_bid_mode(),
+            "active_only": True,
             "cache_rebuild_in_progress": False,
             "summary": {
                 "spend": round(total_spend, 2),
@@ -607,7 +623,7 @@ def negative_keyword_rows(negatives: List[str], campaign_id: int) -> List[Dict]:
     return [{
         "campaignId": str(campaign_id),
         "keywordText": term,
-        "matchType": "negativeExact",
+        "matchType": "NEGATIVE_EXACT",
         "state": "ENABLED",
     } for term in negatives]
 
@@ -673,15 +689,17 @@ def classify_terms(rows: List[Dict]):
     return {"winners": winners, "negatives": negatives, "hold": hold}
 
 
-def verify_internal_token(authorization: Optional[str]):
+def verify_internal_token(authorization: Optional[str], request: Optional[Request] = None):
     token = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN")
     if not token:
         raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN not configured")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    supplied = authorization.replace("Bearer ", "").strip()
-    if not hmac.compare_digest(supplied, token):
+    if request and _valid_session(request.cookies.get(SESSION_COOKIE)):
+        return
+    if _valid_authorization(authorization):
+        return
+    if authorization:
         raise HTTPException(status_code=403, detail="Invalid token")
+    raise HTTPException(status_code=401, detail="Authentication required")
 
 
 # ========================= CAMPAIGN CREATION =========================
@@ -689,55 +707,160 @@ def create_live_campaign_for_product(
     product: Dict[str, Any],
     daily_budget: Optional[float] = None,
     starting_bid: Optional[float] = None,
+    discovery_budget_pct: float = 0.30,
+    max_exact_keywords: int = 40,
+    force_relaunch: bool = False,
 ) -> Dict[str, Any]:
     client = AmazonAdsClient()
     start_date = today_iso_date()
-    keywords = generate_keywords(product)
+    budget = round(daily_budget if daily_budget and float(daily_budget) >= 2 else float(product["suggested_budget"]), 2)
+    base_bid = round(starting_bid if starting_bid and float(starting_bid) >= 0.02 else float(product["suggested_bid"]), 2)
+    discovery_budget_pct = max(0.10, min(0.50, float(discovery_budget_pct or 0.30)))
+    discovery_budget = round(max(1.0, budget * discovery_budget_pct), 2)
+    exact_budget = round(max(1.0, budget - discovery_budget), 2)
+    max_exact_keywords = max(10, min(40, int(max_exact_keywords or 40)))
 
-    budget = round(daily_budget if daily_budget and daily_budget >= 1 else product["suggested_budget"], 2)
-    bid = round(starting_bid if starting_bid and starting_bid >= 0.02 else product["suggested_bid"], 2)
+    safe_title = sanitize_campaign_name(product.get("title"))[:70]
+    raw_keywords = generate_keywords(product)
+    exact_keywords = []
+    seen = set()
+    for keyword in raw_keywords:
+        kw = normalize(keyword)
+        if not kw or kw in seen:
+            continue
+        seen.add(kw)
+        if kw in GENERIC_EXACT_BLOCKLIST:
+            continue
+        if len(kw.split()) == 1 and len(kw) < 7:
+            continue
+        exact_keywords.append(kw)
+        if len(exact_keywords) >= max_exact_keywords:
+            break
 
-    campaign_payload = [{
-        "name": f"{sanitize_campaign_name(product.get('title'))[:100]} | MANUAL | {start_date}",
-        "targetingType": "MANUAL",
+    list_resp = client.session.post(
+        f"{client.base_url}/sp/campaigns/list",
+        headers=client.headers(ENDPOINT_CONTENT_TYPES[ENDPOINTS["campaigns"]]),
+        json={"maxResults": 100},
+        timeout=30,
+    )
+    list_resp.raise_for_status()
+    all_campaigns = list_resp.json().get("campaigns", []) if isinstance(list_resp.json(), dict) else list_resp.json()
+    existing = {}
+    prefix = f"{safe_title} | "
+    for campaign in all_campaigns:
+        name = str(campaign.get("name") or "")
+        if not name.startswith(prefix):
+            continue
+        if "| AUTO DISCOVERY |" in name:
+            existing["AUTO_DISCOVERY"] = campaign
+        if "| MANUAL EXACT |" in name:
+            existing["MANUAL_EXACT"] = campaign
+    if existing and not force_relaunch:
+        return {
+            "success": True,
+            "duplicate_launch_prevented": True,
+            "message": "Matching launch campaigns already exist.",
+            "product": product["title"],
+            "existing_campaigns": {
+                campaign_type: {
+                    "campaign_id": str(campaign.get("campaignId") or ""),
+                    "name": campaign.get("name"),
+                    "state": campaign.get("state"),
+                }
+                for campaign_type, campaign in existing.items()
+            },
+        }
+
+    def _create_campaign(name: str, targeting_type: str, daily_budget_value: float) -> int:
+        resp = client.post(ENDPOINTS["campaigns"], [{
+            "name": name,
+            "targetingType": targeting_type,
+            "state": "ENABLED",
+            "budget": {"budget": round(daily_budget_value, 2), "budgetType": "DAILY"},
+            "startDate": start_date,
+        }])
+        return extract_first_id(resp)
+
+    def _create_ad_group(campaign_id: int, name: str, default_bid: float) -> int:
+        resp = client.post(ENDPOINTS["ad_groups"], [{
+            "name": name,
+            "campaignId": str(campaign_id),
+            "state": "ENABLED",
+            "defaultBid": round(default_bid, 2),
+        }])
+        return extract_first_id(resp)
+
+    def _create_product_ad(campaign_id: int, ad_group_id: int) -> None:
+        payload = [{
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
+            "state": "ENABLED",
+            "asin": product["asin"],
+        }]
+        if product.get("sku"):
+            payload[0]["sku"] = product["sku"]
+        client.post(ENDPOINTS["product_ads"], payload)
+
+    discovery_bid = round(max(0.10, base_bid * 0.70), 2)
+    exact_bid = round(max(0.10, base_bid * 1.15), 2)
+
+    discovery_campaign_id = _create_campaign(
+        f"{safe_title} | AUTO DISCOVERY | {start_date}",
+        "AUTO",
+        discovery_budget,
+    )
+    discovery_ad_group_id = _create_ad_group(discovery_campaign_id, "Auto Discovery", discovery_bid)
+    _create_product_ad(discovery_campaign_id, discovery_ad_group_id)
+
+    exact_campaign_id = _create_campaign(
+        f"{safe_title} | MANUAL EXACT | {start_date}",
+        "MANUAL",
+        exact_budget,
+    )
+    exact_ad_group_id = _create_ad_group(exact_campaign_id, "Exact Winners", exact_bid)
+    _create_product_ad(exact_campaign_id, exact_ad_group_id)
+
+    exact_rows = [{
+        "campaignId": str(exact_campaign_id),
+        "adGroupId": str(exact_ad_group_id),
+        "keywordText": kw,
+        "matchType": "EXACT",
         "state": "ENABLED",
-        "budget": {"budget": budget, "budgetType": "DAILY"},
-        "startDate": start_date,
-    }]
-    campaign_resp = client.post(ENDPOINTS["campaigns"], campaign_payload)
-    campaign_id = extract_first_id(campaign_resp)
-
-    ad_group_payload = [{
-        "name": "Main Ad Group",
-        "campaignId": str(campaign_id),
-        "state": "ENABLED",
-        "defaultBid": round(product["suggested_bid"], 2),
-    }]
-    ad_group_resp = client.post(ENDPOINTS["ad_groups"], ad_group_payload)
-    ad_group_id = extract_first_id(ad_group_resp)
-
-    product_ad_payload = [{
-        "campaignId": str(campaign_id),
-        "adGroupId": str(ad_group_id),
-        "asin": product["asin"],
-        "state": "ENABLED",
-    }]
-    client.post(ENDPOINTS["product_ads"], product_ad_payload)
-
-    if keywords:
-        kw_rows = keyword_rows(keywords, campaign_id, ad_group_id, bid)
-        client.post(ENDPOINTS["keywords"], kw_rows)
+        "bid": exact_bid,
+    } for kw in exact_keywords]
+    if exact_rows:
+        client.post(ENDPOINTS["keywords"], exact_rows)
 
     return {
-        "message": "Campaign created successfully",
+        "success": True,
+        "message": "Campaigns created successfully",
         "product_id": product["product_id"],
         "sku": product["sku"],
         "asin": product["asin"],
-        "campaign_id": campaign_id,
-        "ad_group_id": ad_group_id,
-        "daily_budget": budget,
-        "starting_bid": bid,
-        "keywords_count": len(keywords),
+        "total_daily_budget": budget,
+        "keyword_filtering": {
+            "generated_keywords_count": len(raw_keywords),
+            "exact_keywords_selected": len(exact_keywords),
+            "max_exact_keywords": max_exact_keywords,
+        },
+        "campaigns_created": [
+            {
+                "campaign_type": "AUTO_DISCOVERY",
+                "campaign_id": discovery_campaign_id,
+                "ad_group_id": discovery_ad_group_id,
+                "daily_budget": discovery_budget,
+                "default_bid": discovery_bid,
+            },
+            {
+                "campaign_type": "MANUAL_EXACT",
+                "campaign_id": exact_campaign_id,
+                "ad_group_id": exact_ad_group_id,
+                "daily_budget": exact_budget,
+                "default_bid": exact_bid,
+                "keywords_count": len(exact_keywords),
+                "keyword_rows_created": len(exact_rows),
+            },
+        ],
     }
 
 
@@ -745,8 +868,7 @@ def create_live_campaign_for_product(
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     try:
-        server_token = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN", "")
-        return templates.TemplateResponse("dashboard.html", {"request": request, "server_token": server_token})
+        return templates.TemplateResponse("dashboard.html", {"request": request, "server_token": ""})
     except Exception as e:
         logger.error(f"Template loading failed: {type(e).__name__} - {e}")
         return HTMLResponse(f"""
@@ -779,10 +901,11 @@ def api_product(key: str):
 
 @app.post("/api/create-campaign-from-product")
 def api_create_campaign(
+    request: Request,
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
 ):
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     key = payload.get("product_id") or payload.get("sku")
     if not key:
         raise HTTPException(400, "product_id or sku is required")
@@ -791,6 +914,9 @@ def api_create_campaign(
         product,
         daily_budget=payload.get("daily_budget"),
         starting_bid=payload.get("starting_bid"),
+        discovery_budget_pct=payload.get("discovery_budget_pct", 0.30),
+        max_exact_keywords=payload.get("max_exact_keywords", 40),
+        force_relaunch=bool(payload.get("force_relaunch", False)),
     )
 
 
@@ -827,11 +953,12 @@ def api_bulk_create(payload: Dict[str, Any]):
 
 @app.post("/api/run-daily-optimization")
 def api_run_optimizer(
+    request: Request,
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
 ):
     """Request a search-term report and store the job for /api/apply-optimization to finish."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
 
     apply_negatives = payload.get("apply_negatives_live", True)
     apply_winners = payload.get("apply_winners_live", True)
@@ -1081,7 +1208,7 @@ def api_dashboard_data(background_tasks: BackgroundTasks):
 
     if _dashboard_cache["rebuilding"]:
         stale = _dashboard_cache["data"] or {}
-        return {**get_bid_mode(), **stale, "cache_rebuild_in_progress": True,
+        return {**get_bid_mode(), **stale, "active_only": True, "cache_rebuild_in_progress": True,
                 "summary": stale.get("summary", {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0}),
                 "campaigns": stale.get("campaigns", [])}
 
@@ -1089,7 +1216,7 @@ def api_dashboard_data(background_tasks: BackgroundTasks):
     _dashboard_cache["rebuilding"] = True
     background_tasks.add_task(_rebuild_dashboard_cache)
     return {
-        **get_bid_mode(), "cache_rebuild_in_progress": True,
+        **get_bid_mode(), "active_only": True, "cache_rebuild_in_progress": True,
         "summary": {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0},
         "campaigns": [],
     }
@@ -1097,10 +1224,12 @@ def api_dashboard_data(background_tasks: BackgroundTasks):
 
 @app.post("/api/refresh-dashboard-cache")
 def api_refresh_cache(
+    request: Request,
+    background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(default={}),
     authorization: Optional[str] = Header(default=None),
 ):
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     _dashboard_cache["data"] = None
     _dashboard_cache["ts"] = 0.0
     _dashboard_cache["rebuilding"] = True
@@ -1110,11 +1239,12 @@ def api_refresh_cache(
 
 @app.post("/api/update-campaign-state")
 def api_update_campaign_state(
+    request: Request,
     payload: Dict[str, Any],
     authorization: Optional[str] = Header(default=None),
 ):
     """Pause or resume a campaign. state must be ENABLED or PAUSED."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     campaign_id = payload.get("campaign_id")
     new_state = str(payload.get("state", "")).upper()
     if not campaign_id:
@@ -1134,11 +1264,12 @@ def api_update_campaign_state(
 
 @app.post("/api/apply-negatives")
 def api_apply_negatives(
+    request: Request,
     payload: Dict[str, Any] = Body(default={}),
     authorization: Optional[str] = Header(default=None),
 ):
     """Request a search-term report scoped to negative application only."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     lookback_days = int(payload.get("lookback_days", 14))
     client = AmazonAdsClient()
     start_date = iso_date_days_ago(lookback_days)
@@ -1168,11 +1299,12 @@ def api_apply_negatives(
 
 @app.post("/api/apply-winners")
 def api_apply_winners(
+    request: Request,
     payload: Dict[str, Any] = Body(default={}),
     authorization: Optional[str] = Header(default=None),
 ):
     """Request a search-term report scoped to winner keyword promotion only."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     lookback_days = int(payload.get("lookback_days", 14))
     winner_bid = float(payload.get("winner_bid", 0.90))
     client = AmazonAdsClient()
@@ -1203,11 +1335,12 @@ def api_apply_winners(
 
 @app.post("/api/apply-optimization")
 def api_apply_optimization(
+    request: Request,
     payload: Dict[str, Any] = Body(default={}),
     authorization: Optional[str] = Header(default=None),
 ):
     """Apply the stored pending report when Amazon has finished generating it."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     pending = load_pending_report()
     report_id = pending.get("report_id")
     if not report_id:
@@ -1282,11 +1415,12 @@ def api_apply_optimization(
 
 @app.post("/api/retune-existing-bids")
 def api_retune_bids(
+    request: Request,
     payload: Dict[str, Any] = Body(default={}),
     authorization: Optional[str] = Header(default=None),
 ):
     """Adjust all ad group default bids up (PEAK) or down (OFF_PEAK) by 15%."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     client = AmazonAdsClient()
     bid_info = get_bid_mode()
     mode = bid_info["bid_mode"]
@@ -1326,11 +1460,12 @@ def api_retune_bids(
 
 @app.post("/api/apply-estimated-bids")
 def api_apply_estimated_bids(
+    request: Request,
     payload: Dict[str, Any] = Body(default={}),
     authorization: Optional[str] = Header(default=None),
 ):
     """Apply estimated peak/off-peak bids to ad groups based on bid window model."""
-    verify_internal_token(authorization)
+    verify_internal_token(authorization, request)
     apply_live = bool(payload.get("apply_live", False))
     max_campaigns = int(payload.get("max_campaigns", 50))
     bid_info = get_bid_mode()
@@ -1429,6 +1564,13 @@ def api_campaign_plan():
         "product_count": len(products),
         "products_preview": [{"sku": p["sku"], "title": p["title"][:60]} for p in products[:5]],
     }
+
+
+@app.post("/api/run-optimizer")
+def api_run_optimizer_preview():
+    """Dashboard compatibility alias: return the launchable campaign plan preview."""
+    payload = api_campaign_plan()
+    return {**payload, "success": True, "dry_run": True, "output_file": "campaign_plan.json"}
 
 
 if __name__ == "__main__":

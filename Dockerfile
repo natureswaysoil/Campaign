@@ -20,7 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 EXPOSE 8080
 
-CMD ["gunicorn", "final_server:app", \
+CMD ["gunicorn", "app:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", \
      "--bind", "0.0.0.0:8080", \
