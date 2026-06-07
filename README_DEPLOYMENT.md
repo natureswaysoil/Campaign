@@ -21,10 +21,10 @@ This creates a Cloud Scheduler job that runs daily at 9 AM EST
 ./smoke-test-cloud-run.sh
 ```
 
-This verifies the private Cloud Run service with the same auth model used in production:
-- `GET /` returns the authenticated landing page
+This verifies the deployed `app.py` dashboard stack with the same auth model used in production:
+- `GET /login` returns the dashboard login page
+- `POST /login` accepts the `DAILY_OPTIMIZER_TOKEN` and creates the session cookie used by the dashboard
 - `GET /health` returns the health payload
-- `GET /api/ops-status` returns ops metrics
 - `POST /api/run-daily-optimization` can be exercised separately via `./trigger-optimizer.sh`
 
 ### Manual Trigger
@@ -39,11 +39,12 @@ SERVICE_URL=$(gcloud run services describe campaign-optimizer \
   --format='value(status.url)' \
   --project=amazon-ppc-bid-optimizer)
 
-TOKEN=$(gcloud auth print-identity-token)
-
-curl -H "Authorization: Bearer ${TOKEN}" "${SERVICE_URL}/"
-curl -H "Authorization: Bearer ${TOKEN}" "${SERVICE_URL}/health"
-curl -H "Authorization: Bearer ${TOKEN}" "${SERVICE_URL}/api/ops-status"
+curl "${SERVICE_URL}/login"
+curl "${SERVICE_URL}/health"
+curl -X POST "${SERVICE_URL}/api/run-daily-optimization" \
+  -H "Authorization: ******" \
+  -H "Content-Type: application/json" \
+  -d '{"apply_negatives_live":true,"apply_winners_live":true,"lookback_days":14,"winner_bid":0.90}'
 ```
 
 ### View Logs
@@ -73,9 +74,9 @@ Edit environment variables in `deploy-cloud-run.sh`:
 
 ## 🔒 Security
 
-- Service is **not publicly accessible** (requires authentication)
-- Browser hits to the service URL without a Google identity token will return `403` at the Cloud Run layer
-- The root route `/` exists in the app, but you only reach it after Cloud Run authentication succeeds
+- Cloud Run is deployed with `--allow-unauthenticated`, but the dashboard and control APIs are protected inside the app
+- Browser users authenticate through `/login` with `DAILY_OPTIMIZER_TOKEN`, which creates the session cookie used by the dashboard
+- Automation can call protected APIs with the same bearer token used by the UI
 - Uses GCP Secret Manager for Amazon Ads credentials
 - Runs with minimal IAM permissions
 
