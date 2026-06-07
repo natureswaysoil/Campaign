@@ -20,7 +20,11 @@ from collections import defaultdict
 import requests
 from google.cloud import secretmanager
 
-from scaling_engine import build_scaling_plan
+try:
+    from scaling_engine import build_scaling_plan
+except ImportError:
+    def build_scaling_plan(*args, **kwargs):
+        raise RuntimeError("build_scaling_plan is unavailable in scaling_engine.py")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -347,6 +351,7 @@ def _rebuild_dashboard_cache():
         list_resp.raise_for_status()
         raw = list_resp.json()
         campaigns = raw.get("campaigns", []) if isinstance(raw, dict) else raw
+        campaigns = [c for c in campaigns if str(c.get("state") or "").upper() == "ENABLED"]
 
         perf_by_id: Dict[str, Dict] = {}
         if _perf_cache.get("data"):
