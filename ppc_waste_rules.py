@@ -7,15 +7,15 @@ CSV rows.
 Goals:
 - Catch obvious wrong-intent searches before they burn 20 clicks.
 - Separate true winners from broad expensive terms.
-- Keep broad root terms like "compost" out of automatic negatives, but flag them
-  for bid reduction.
+- Keep broad root terms like "compost" out of automatic negatives and automatic
+  winner promotion; flag them for bid reduction or review instead.
+- Protect core buyer-intent product phrases from automatic negatives.
 - Support NEGATIVE_EXACT and NEGATIVE_PHRASE when applying negatives.
 """
 from __future__ import annotations
 
 import os
 import re
-from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -76,9 +76,41 @@ COMPETITOR_OR_BRAND_PHRASES = tuple(
     )
 )
 
-# Root terms that can sell but should not be automatically negated just because
-# ACOS is high. They should be bid-down/restructured instead.
-BROAD_ROOT_TERMS = {"compost", "soil", "fertilizer", "lawn fertilizer", "garden soil"}
+# Root terms can sell, but they are too broad to auto-promote as exact winners or
+# auto-negate. They should be managed with bid reduction, product-specific manual
+# campaigns, or human review.
+BROAD_ROOT_TERMS = {"compost", "soil", "fertilizer", "lawn fertilizer", "garden soil", "potting soil"}
+
+# These are core buyer phrases for Nature's Way Soil products. If they perform
+# badly, lower bids or review them manually; do not automatically add them as
+# negative keywords because that can shut off the main demand for a product.
+PROTECTED_BUYER_PHRASES = tuple(
+    phrase.lower()
+    for phrase in (
+        "dog urine",
+        "dog pee",
+        "urine neutralizer",
+        "lawn neutralizer",
+        "grass neutralizer",
+        "dog urine neutralizer",
+        "dog pee grass",
+        "dog urine grass",
+        "liquid bone meal",
+        "bone meal",
+        "liquid kelp",
+        "kelp fertilizer",
+        "humic acid",
+        "fulvic acid",
+        "liquid biochar",
+        "biochar",
+        "pasture fertilizer",
+        "hay fertilizer",
+        "lawn recovery",
+        "soil recovery",
+        "fruit tree fertilizer",
+        "bloom fertilizer",
+    )
+)
 
 
 def normalize_term(value: Any) -> str:
@@ -141,9 +173,9 @@ def _base_result(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Classify search-term rows into winners, negatives, bid-downs, and hold.
 
-    Existing optimizer code only consumes ``winners`` and ``negatives``. ``bid_down``
-    is included for dashboard/preview output so James can see where spend is being
-    wasted even when we should not automatically add a negative keyword.
+    Existing optimizer code consumes ``winners`` and ``negatives``. ``bid_down`` is
+    included for dashboard/preview output so James can see spend leaks without
+    automatically blocking important buyer terms.
     """
     winners: List[Dict[str, Any]] = []
     negatives: List[Dict[str, Any]] = []
@@ -164,6 +196,7 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
 
         wrong_intent = _contains_any(term, WRONG_INTENT_PHRASES)
         competitor = _contains_any(term, COMPETITOR_OR_BRAND_PHRASES)
+        protected_buyer_phrase = _contains_any(term, PROTECTED_BUYER_PHRASES)
 
         if wrong_intent or competitor:
             negatives.append({
@@ -172,6 +205,24 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
                 "matched_phrase": wrong_intent or competitor,
                 "negative_match_type": "NEGATIVE_PHRASE",
             })
+            continue
+
+        # Broad roots and core buyer phrases should not be auto-negated or
+        # auto-promoted. If expensive, flag for bid reduction; otherwise hold.
+        if term in BROAD_ROOT_TERMS or protected_buyer_phrase:
+            if cost >= BID_DOWN_MIN_SPEND or (sales > 0 and acos is not None and acos >= BID_DOWN_ACOS):
+                bid_down.append({
+                    **result,
+                    "reason": "protected_core_or_broad_term_review_bid_down",
+                    "matched_phrase": protected_buyer_phrase,
+                    "recommended_bid_multiplier": 0.50 if (acos or 0) >= 0.75 or orders == 0 else 0.65,
+                })
+            else:
+                hold.append({
+                    **result,
+                    "reason": "protected_core_or_broad_term_hold",
+                    "matched_phrase": protected_buyer_phrase,
+                })
             continue
 
         if (
@@ -183,19 +234,8 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
             winners.append({**result, "reason": "winner"})
             continue
 
-        # Broad root terms often need bid reduction, not a hard negative.
-        if term in BROAD_ROOT_TERMS:
-            if sales > 0 and acos is not None and acos >= BID_DOWN_ACOS and cost >= BID_DOWN_MIN_SPEND:
-                bid_down.append({
-                    **result,
-                    "reason": "broad_root_high_acos_lower_bid",
-                    "recommended_bid_multiplier": 0.50 if acos >= 0.75 else 0.65,
-                })
-            else:
-                hold.append({**result, "reason": "broad_root_hold"})
-            continue
-
-        # No-order spend leak: negative sooner than the old 20-click rule.
+        # No-order spend leak: negative sooner than the old 20-click rule, but
+        # only after protected buyer terms have been removed from auto-negatives.
         if orders == 0 and (clicks >= NEGATIVE_MIN_CLICKS or cost >= NEGATIVE_MIN_SPEND_NO_SALE):
             negatives.append({
                 **result,
@@ -205,7 +245,6 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
             continue
 
         # If it technically sold but lost money badly, stop exact term leakage.
-        # Example from your compost report: "compost soil" around 107% ACOS.
         if sales > 0 and acos is not None and acos >= HIGH_ACOS_NEGATIVE and cost >= HIGH_ACOS_MIN_SPEND and orders <= 1:
             negatives.append({
                 **result,
