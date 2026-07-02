@@ -57,6 +57,8 @@ BATCH_KEYS = {
     "/sp/campaignNegativeKeywords": "campaignNegativeKeywords",
 }
 STOPWORDS = {"the", "and", "for", "with", "from", "your", "you", "our", "this", "that", "also", "very", "just", "any", "all", "each", "both", "into", "more"}
+PENDING_REPORT_FILE = Path(os.getenv("PENDING_REPORT_FILE", "/tmp/pending_report.json"))
+OPTIMIZER_HISTORY_FILE = Path(os.getenv("OPTIMIZER_HISTORY_FILE", "/tmp/optimizer_history.json"))
 
 
 def _env(*names: str, default: str = "") -> str:
@@ -217,6 +219,107 @@ def negative_keyword_rows(keywords: Iterable[str], campaign_id: Any) -> List[Dic
     return [{"campaignId": str(campaign_id), "keywordText": normalize_text(keyword), "matchType": "NEGATIVE_EXACT", "state": "ENABLED"} for keyword in keywords if normalize_text(keyword)]
 
 
+def _num(row: Dict[str, Any], keys: Iterable[str], default: float = 0.0) -> float:
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            try:
+                return float(str(row[key]).replace("$", "").replace(",", "").strip())
+            except Exception:
+                continue
+    return default
+
+
+def _text(row: Dict[str, Any], keys: Iterable[str], default: str = "") -> str:
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            return str(row[key]).strip()
+    return default
+
+
+def classify_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Default search-term classifier. server.py patches this with stronger rules."""
+    winners: List[Dict[str, Any]] = []
+    negatives: List[Dict[str, Any]] = []
+    hold: List[Dict[str, Any]] = []
+    for row in rows:
+        term = normalize_text(_text(row, ["Customer Search Term", "searchTerm", "Search Term", "search term"]))
+        if not term:
+            continue
+        clicks = int(_num(row, ["Clicks", "clicks"], 0))
+        cost = _num(row, ["Spend", "Cost", "cost", "spend"], 0.0)
+        sales = _num(row, ["7 Day Total Sales", "14 Day Total Sales", "sales7d", "sales14d", "sales"], 0.0)
+        orders = int(_num(row, ["7 Day Total Orders (#)", "14 Day Total Orders (#)", "orders", "purchases7d", "purchases14d"], 0))
+        acos = cost / sales if sales > 0 else None
+        result = {
+            "term": term,
+            "campaign_id": int(_num(row, ["Campaign Id", "campaignId", "campaign_id"], 0)),
+            "ad_group_id": int(_num(row, ["Ad Group Id", "adGroupId", "ad_group_id"], 0)),
+            "clicks": clicks,
+            "orders": orders,
+            "cost": round(cost, 2),
+            "sales": round(sales, 2),
+            "acos": round(acos, 4) if acos is not None else None,
+        }
+        if orders >= 2 and clicks >= 8 and sales > 0 and (acos is None or acos <= 0.35):
+            winners.append({**result, "reason": "winner"})
+        elif clicks >= 20 and orders == 0:
+            negatives.append({**result, "reason": "negative", "negative_match_type": "NEGATIVE_EXACT"})
+        else:
+            hold.append({**result, "reason": "hold"})
+    return {"winners": winners, "negatives": negatives, "bid_down": [], "hold": hold}
+
+
+def apply_negatives_step(client: Any, classified: Dict[str, Any]) -> List[Dict[str, Any]]:
+    negatives_applied: List[Dict[str, Any]] = []
+    campaigns = sorted({int(item.get("campaign_id") or 0) for item in classified.get("negatives", []) if item.get("campaign_id")})
+    for campaign_id in campaigns:
+        terms = [item.get("matched_phrase") or item.get("term") for item in classified.get("negatives", []) if int(item.get("campaign_id") or 0) == campaign_id]
+        terms = [normalize_text(term) for term in terms if normalize_text(term)]
+        if not terms:
+            continue
+        rows = negative_keyword_rows(dict.fromkeys(terms).keys(), campaign_id)
+        client.create_negative_keywords(rows)
+        negatives_applied.append({"campaign_id": campaign_id, "count": len(rows), "terms_sample": terms[:10]})
+    return negatives_applied
+
+
+def _today_iso() -> str:
+    return dt.date.today().isoformat()
+
+
+def _days_ago_iso(days: int) -> str:
+    return (dt.date.today() - dt.timedelta(days=days)).isoformat()
+
+
+def _load_pending_report() -> Dict[str, Any]:
+    try:
+        if PENDING_REPORT_FILE.exists():
+            return json.loads(PENDING_REPORT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"report_id": None, "settings": {}, "ts": 0.0}
+
+
+def _save_pending_report(entry: Dict[str, Any]) -> None:
+    PENDING_REPORT_FILE.write_text(json.dumps(entry, indent=2, default=str), encoding="utf-8")
+
+
+def _load_optimizer_history() -> List[Dict[str, Any]]:
+    try:
+        if OPTIMIZER_HISTORY_FILE.exists():
+            data = json.loads(OPTIMIZER_HISTORY_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _save_optimizer_history(entry: Dict[str, Any]) -> None:
+    history = _load_optimizer_history()
+    history.append(entry)
+    OPTIMIZER_HISTORY_FILE.write_text(json.dumps(history[-50:], indent=2, default=str), encoding="utf-8")
+
+
 class AmazonAdsClient:
     def __init__(self):
         self.client_id = _env("AMAZON_ADS_CLIENT_ID", "AMAZON_CLIENT_ID")
@@ -361,6 +464,76 @@ def run_optimizer(search_terms_path: Optional[str] = None, dry_run: bool = True)
     return {"success": True, "dry_run": dry_run, "output_file": str(output_file), **plans}
 
 
+def _build_search_term_report_body(lookback_days: int) -> Dict[str, Any]:
+    return {
+        "startDate": _days_ago_iso(lookback_days),
+        "endDate": _today_iso(),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["searchTerm"],
+            "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
+            "reportTypeId": "spSearchTerm",
+            "timeUnit": "SUMMARY",
+            "format": "GZIP_JSON",
+        },
+    }
+
+
+def _request_pending_optimization_report(payload: Dict[str, Any], *, apply_negatives: bool, apply_winners: bool) -> Dict[str, Any]:
+    lookback_days = int(payload.get("lookback_days", 14))
+    winner_bid = float(payload.get("winner_bid", 0.90))
+    client = AmazonAdsClient()
+    report_body = _build_search_term_report_body(lookback_days)
+    report_id = client.request_report(report_body)
+    entry = {
+        "report_id": report_id,
+        "ts": time.time(),
+        "settings": {
+            "apply_negatives": apply_negatives,
+            "apply_winners": apply_winners,
+            "winner_bid": winner_bid,
+            "lookback_days": lookback_days,
+            "start_date": report_body["startDate"],
+            "end_date": report_body["endDate"],
+        },
+    }
+    _save_pending_report(entry)
+    return {
+        "success": True,
+        "report_id": report_id,
+        "message": "Report requested. Apply it after Amazon finishes generating it, usually 30-60 minutes.",
+        "date_range": {"start": report_body["startDate"], "end": report_body["endDate"]},
+        "settings": entry["settings"],
+    }
+
+
+def _apply_winner_keywords(client: AmazonAdsClient, classified: Dict[str, Any], winner_bid: float) -> List[Dict[str, Any]]:
+    winners_applied: List[Dict[str, Any]] = []
+    by_adgroup: Dict[int, Dict[str, Any]] = {}
+    for item in classified.get("winners", []):
+        ad_group_id = int(item.get("ad_group_id") or 0)
+        campaign_id = int(item.get("campaign_id") or 0)
+        term = normalize_text(item.get("term"))
+        if not ad_group_id or not campaign_id or not term:
+            continue
+        by_adgroup.setdefault(ad_group_id, {"campaign_id": campaign_id, "terms": []})["terms"].append(term)
+
+    for ad_group_id, data in by_adgroup.items():
+        terms = list(dict.fromkeys(data["terms"]))
+        rows = keyword_rows(terms, data["campaign_id"], ad_group_id, winner_bid)
+        if not rows:
+            continue
+        client.create_keywords(rows)
+        winners_applied.append({
+            "ad_group_id": ad_group_id,
+            "campaign_id": data["campaign_id"],
+            "terms_count": len(terms),
+            "keyword_rows_created": len(rows),
+            "terms_sample": terms[:10],
+        })
+    return winners_applied
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "service": "campaign-optimizer"}
@@ -403,9 +576,104 @@ def api_dashboard_data(authorization: Optional[str] = Header(default=None), x_da
 def api_run_optimizer(payload: Dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
     verify_internal_token(authorization, x_daily_optimizer_token)
     try:
+        # Default to the live daily optimization flow so the dashboard button and
+        # old scheduler both create the pending Amazon report used by apply-optimization.
+        if not payload.get("search_terms_path") and payload.get("mode", "daily") != "offline_plan":
+            return JSONResponse(_request_pending_optimization_report(payload, apply_negatives=True, apply_winners=True))
         return JSONResponse(run_optimizer(payload.get("search_terms_path"), dry_run=bool(payload.get("dry_run", True))))
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/run-daily-optimization")
+def api_run_daily_optimization(payload: Dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        return JSONResponse(_request_pending_optimization_report(payload, apply_negatives=bool(payload.get("apply_negatives_live", True)), apply_winners=bool(payload.get("apply_winners_live", True))))
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/apply-negatives")
+def api_apply_negatives(payload: Dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        return JSONResponse(_request_pending_optimization_report(payload, apply_negatives=True, apply_winners=False))
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/apply-winners")
+def api_apply_winners(payload: Dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        return JSONResponse(_request_pending_optimization_report(payload, apply_negatives=False, apply_winners=True))
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/apply-optimization")
+def api_apply_optimization(payload: Dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        pending = _load_pending_report()
+        report_id = pending.get("report_id") or payload.get("report_id")
+        if not report_id:
+            return JSONResponse({"error": True, "message": "No pending report found. Run optimization first."}, status_code=404)
+
+        client = AmazonAdsClient()
+        status_resp = client.get(f"/reporting/reports/{report_id}", accept="application/json")
+        status = str(status_resp.get("status") or "").upper()
+
+        if status in {"PENDING", "PROCESSING", "IN_PROGRESS"}:
+            return JSONResponse({"success": False, "status": status, "message": f"Report not ready yet ({status})."}, status_code=202)
+        if status in {"FAILURE", "FAILED", "CANCELLED"}:
+            _save_pending_report({"report_id": None, "settings": {}, "ts": 0.0})
+            return JSONResponse({"error": True, "status": status, "message": f"Amazon report failed: {status}"}, status_code=500)
+        if status not in {"SUCCESS", "COMPLETED"}:
+            return JSONResponse({"success": False, "status": status, "message": f"Report status: {status or 'UNKNOWN'}"}, status_code=202)
+
+        download_url = status_resp.get("url") or status_resp.get("location")
+        if not download_url:
+            return JSONResponse({"error": True, "message": "Report completed but no download URL was returned."}, status_code=500)
+
+        rows = parse_report_json_bytes(client.download_binary(str(download_url)))
+        classified = classify_terms(rows)
+        settings = pending.get("settings") or {}
+        apply_negatives = bool(settings.get("apply_negatives", True))
+        apply_winners = bool(settings.get("apply_winners", True))
+        winner_bid = float(settings.get("winner_bid", payload.get("winner_bid", 0.90)))
+
+        negatives_applied = apply_negatives_step(client, classified) if apply_negatives else []
+        winners_applied = _apply_winner_keywords(client, classified, winner_bid) if apply_winners else []
+
+        run_entry = {
+            "timestamp": dt.datetime.utcnow().isoformat(),
+            "report_id": report_id,
+            "rows_analyzed": len(rows),
+            "winners_found": len(classified.get("winners", [])),
+            "negatives_found": len(classified.get("negatives", [])),
+            "bid_down_found": len(classified.get("bid_down", [])),
+            "winners_applied": len(winners_applied),
+            "negatives_applied": len(negatives_applied),
+        }
+        _save_optimizer_history(run_entry)
+        _save_pending_report({"report_id": None, "settings": {}, "ts": 0.0})
+
+        return JSONResponse({
+            "success": True,
+            **run_entry,
+            "negatives_applied_detail": negatives_applied,
+            "winners_applied_detail": winners_applied,
+        })
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/optimizer-history")
+def api_optimizer_history(authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    return JSONResponse({"history": _load_optimizer_history(), "pending_report": _load_pending_report()})
 
 
 if __name__ == "__main__":
