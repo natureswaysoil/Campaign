@@ -59,15 +59,7 @@ def _valid_authorization(authorization: Optional[str]) -> bool:
 
 @app.middleware("http")
 async def require_login(request: Request, call_next):
-    path = request.url.path
-    if path in _PUBLIC_PATHS or path.startswith("/static"):
-        return await call_next(request)
-    session = request.cookies.get(SESSION_COOKIE)
-    authorization = request.headers.get("Authorization")
-    if not (_valid_session(session) or _valid_authorization(authorization)):
-        if path.startswith("/api/"):
-            return JSONResponse({"detail": "Authentication required"}, status_code=401)
-        return RedirectResponse(f"/login?next={path}", status_code=302)
+    # Auth disabled: dashboard and API are open, no sign-in token required.
     return await call_next(request)
 
 
@@ -695,16 +687,8 @@ def classify_terms(rows: List[Dict]):
 
 
 def verify_internal_token(authorization: Optional[str], request: Optional[Request] = None):
-    token = optional_env_or_secret("DAILY_OPTIMIZER_TOKEN")
-    if not token:
-        raise HTTPException(status_code=500, detail="DAILY_OPTIMIZER_TOKEN not configured")
-    if request and _valid_session(request.cookies.get(SESSION_COOKIE)):
-        return
-    if _valid_authorization(authorization):
-        return
-    if authorization:
-        raise HTTPException(status_code=403, detail="Invalid token")
-    raise HTTPException(status_code=401, detail="Authentication required")
+    # Auth disabled: optimizer / apply endpoints require no token.
+    return
 
 
 # ========================= CAMPAIGN CREATION =========================
