@@ -857,7 +857,7 @@ def create_live_campaign_for_product(
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     try:
-        return templates.TemplateResponse("dashboard.html", {"request": request, "server_token": ""})
+        return templates.TemplateResponse(request, "dashboard.html", {"server_token": ""})
     except Exception as e:
         logger.error(f"Template loading failed: {type(e).__name__} - {e}")
         return HTMLResponse(f"""
