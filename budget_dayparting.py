@@ -3,19 +3,21 @@
 Purpose:
 - Spend less before the strongest buying window so daily budgets are not burned
   too early.
+- Reserve roughly 65% of daily ad budget for prime time by keeping pre-prime bid
+  pressure near 35% of normal.
 - Use Amazon suggested bid ranges, but do not blindly take the high end all day.
 - Keep exact/phrase/broad bids inside a safe floor/ceiling.
 
 Default Eastern schedule:
-- PROTECT: 12:00am-11:59am  -> very conservative bids
-- PRIME:   12:00pm-8:59pm   -> strongest bids
+- PROTECT: 12:00am-9:59am   -> very conservative bids, about 35% pressure
+- PRIME:   10:00am-8:59pm   -> strongest bids
 - TAPER:   9:00pm-11:59pm   -> conservative bids again
 
 Environment overrides:
-- PRIME_TIME_START=12
+- PRIME_TIME_START=10
 - PRIME_TIME_END=20
-- PROTECT_BID_MULTIPLIER=0.45
-- TAPER_BID_MULTIPLIER=0.60
+- PROTECT_BID_MULTIPLIER=0.35
+- TAPER_BID_MULTIPLIER=0.45
 - PRIME_BID_POSITION=0.85
 - NORMAL_BID_POSITION=0.55
 """
@@ -26,10 +28,15 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 
-PRIME_TIME_START = int(os.getenv("PRIME_TIME_START", "12"))
+PRIME_TIME_START = int(os.getenv("PRIME_TIME_START", "10"))
 PRIME_TIME_END = int(os.getenv("PRIME_TIME_END", "20"))
-PROTECT_BID_MULTIPLIER = float(os.getenv("PROTECT_BID_MULTIPLIER", "0.45"))
-TAPER_BID_MULTIPLIER = float(os.getenv("TAPER_BID_MULTIPLIER", "0.60"))
+
+# To reserve about 65% of the daily budget for prime time, the pre-prime window
+# should not run at normal bids. This does not literally create a second Amazon
+# budget bucket; it protects the budget by reducing bid pressure before prime.
+PROTECT_BID_MULTIPLIER = float(os.getenv("PROTECT_BID_MULTIPLIER", "0.35"))
+TAPER_BID_MULTIPLIER = float(os.getenv("TAPER_BID_MULTIPLIER", "0.45"))
+
 PRIME_BID_POSITION = float(os.getenv("PRIME_BID_POSITION", "0.85"))
 NORMAL_BID_POSITION = float(os.getenv("NORMAL_BID_POSITION", "0.55"))
 MIN_BID = float(os.getenv("MIN_DAYPART_BID", "0.10"))
@@ -64,17 +71,21 @@ def budget_protection_status(hour: Optional[int] = None) -> Dict[str, Any]:
     if mode == "PRIME":
         note = "Prime buying window: bids can compete harder."
         multiplier = 1.0
+        reserve_target = 0.65
     elif mode == "PROTECT":
-        note = "Budget protection: bids are held down before prime time."
+        note = "Budget protection: pre-prime bids are held near 35% to preserve about 65% of budget for prime time."
         multiplier = PROTECT_BID_MULTIPLIER
+        reserve_target = 0.65
     else:
         note = "Evening taper: bids are reduced after prime time."
         multiplier = TAPER_BID_MULTIPLIER
+        reserve_target = 0.0
     return {
         "bid_mode": mode,
         "hour_eastern": h,
         "prime_time_label": f"{PRIME_TIME_START}:00-{PRIME_TIME_END}:59 ET",
         "budget_protection_multiplier": multiplier,
+        "prime_budget_reserve_target": reserve_target,
         "note": note,
     }
 
