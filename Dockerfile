@@ -20,10 +20,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 EXPOSE 8080
 
-# Cloud Run should start the wrapper in server.py.  server.py imports the
-# FastAPI app from optimize_campaigns.py and adds the dashboard overrides and
-# live PPC routes.  app.py is an older alternate entrypoint.
-CMD ["gunicorn", "server:app", \
+# Cloud Run starts server_with_bids.py.  It imports server.py, so all dashboard,
+# optimizer, and campaign-launch routes stay active, then adds the live
+# /api/retune-existing-bids route for dayparting bid control.
+CMD ["gunicorn", "server_with_bids:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", \
      "--bind", "0.0.0.0:8080", \
