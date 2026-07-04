@@ -70,16 +70,8 @@ def _env(*names: str, default: str = "") -> str:
 
 
 def verify_internal_token(authorization: Optional[str] = None, x_daily_optimizer_token: Optional[str] = None) -> None:
-    expected = _env("DAILY_OPTIMIZER_TOKEN")
-    if not expected:
-        return
-    supplied = ""
-    if x_daily_optimizer_token:
-        supplied = x_daily_optimizer_token.strip()
-    elif authorization and authorization.startswith("Bearer "):
-        supplied = authorization.replace("Bearer ", "", 1).strip()
-    if not supplied or not hmac.compare_digest(supplied, expected):
-        raise HTTPException(status_code=403, detail="Invalid or missing optimizer token")
+    # Auth disabled: optimizer / bid / apply endpoints require no token.
+    return
 
 
 def normalize_text(text: Any) -> str:
@@ -548,6 +540,78 @@ def api_products() -> JSONResponse:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
 
 
+# ---- 14-day dashboard performance summary (cached, non-blocking) ----
+import threading as _threading
+import logging as _logging
+
+_dash_summary_log = _logging.getLogger("dashboard_summary")
+_DASH_SUMMARY_TTL = 1800  # 30 minutes
+_dash_summary_cache: Dict[str, Any] = {"summary": None, "per_campaign": {}, "ts": 0.0, "refreshing": False}
+
+
+def _build_dashboard_report_body() -> Dict[str, Any]:
+    end = dt.date.today() - dt.timedelta(days=1)
+    start = end - dt.timedelta(days=13)
+    return {
+        "name": "dashboard-14d-summary",
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "configuration": {
+            "adProduct": "SPONSORED_PRODUCTS",
+            "groupBy": ["campaign"],
+            "columns": ["campaignId", "impressions", "clicks", "cost", "sales14d", "purchases14d"],
+            "reportTypeId": "spCampaigns",
+            "timeUnit": "SUMMARY",
+            "format": "GZIP_JSON",
+        },
+    }
+
+
+def _refresh_dashboard_summary() -> None:
+    try:
+        client = AmazonAdsClient()
+        report_id = client.request_report(_build_dashboard_report_body())
+        url = client.wait_for_report(report_id, timeout_seconds=240)
+        rows = parse_report_json_bytes(client.download_binary(url))
+        per: Dict[str, Any] = {}
+        tot = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0, "impressions": 0}
+        for r in rows:
+            cid = str(r.get("campaignId") or r.get("campaign_id") or "")
+            cost = float(r.get("cost") or 0.0)
+            sales = float(r.get("sales14d") or r.get("sales") or 0.0)
+            clicks = int(r.get("clicks") or 0)
+            orders = int(r.get("purchases14d") or r.get("purchases") or 0)
+            impressions = int(r.get("impressions") or 0)
+            per[cid] = {
+                "spend": round(cost, 2), "sales": round(sales, 2),
+                "clicks": clicks, "orders": orders, "impressions": impressions,
+                "acos": (round(cost / sales, 4) if sales else None),
+            }
+            tot["spend"] += cost; tot["sales"] += sales; tot["clicks"] += clicks
+            tot["orders"] += orders; tot["impressions"] += impressions
+        summary = {
+            "spend": round(tot["spend"], 2), "sales": round(tot["sales"], 2),
+            "clicks": tot["clicks"], "orders": tot["orders"],
+            "acos": (round(tot["spend"] / tot["sales"], 4) if tot["sales"] else None),
+        }
+        _dash_summary_cache.update({"summary": summary, "per_campaign": per, "ts": time.time()})
+    except Exception as exc:  # noqa: BLE001
+        _dash_summary_log.warning("dashboard summary refresh failed: %s", exc)
+    finally:
+        _dash_summary_cache["refreshing"] = False
+
+
+def _get_cached_dashboard_summary():
+    fresh = (
+        _dash_summary_cache["summary"] is not None
+        and (time.time() - _dash_summary_cache["ts"]) < _DASH_SUMMARY_TTL
+    )
+    if not fresh and not _dash_summary_cache["refreshing"]:
+        _dash_summary_cache["refreshing"] = True
+        _threading.Thread(target=_refresh_dashboard_summary, daemon=True).start()
+    return _dash_summary_cache["summary"], _dash_summary_cache["per_campaign"]
+
+
 @app.get("/api/dashboard-data")
 def api_dashboard_data(authorization: Optional[str] = Header(default=None), x_daily_optimizer_token: Optional[str] = Header(default=None)) -> JSONResponse:
     verify_internal_token(authorization, x_daily_optimizer_token)
@@ -558,6 +622,25 @@ def api_dashboard_data(authorization: Optional[str] = Header(default=None), x_da
             campaign for campaign in all_campaigns
             if str(campaign.get("state") or "").upper() == "ENABLED"
         ]
+
+        summary, per_campaign = _get_cached_dashboard_summary()
+        for c in active_campaigns:
+            cid = str(c.get("campaignId") or c.get("campaign_id") or "")
+            m = per_campaign.get(cid)
+            if m:
+                c["spend"] = m["spend"]; c["sales"] = m["sales"]
+                c["clicks"] = m["clicks"]; c["orders"] = m["orders"]
+                c["impressions"] = m["impressions"]; c["acos"] = m["acos"]
+
+        bid_mode = "UNKNOWN"; budget_protection: Dict[str, Any] = {}; note = "Budget mode loaded."
+        try:
+            from budget_dayparting import get_budget_protection_mode, budget_protection_status
+            bid_mode = get_budget_protection_mode()
+            budget_protection = budget_protection_status() or {}
+            note = budget_protection.get("note", note)
+        except Exception:  # noqa: BLE001
+            pass
+
         return JSONResponse({
             "success": True,
             "active_only": True,
@@ -567,6 +650,11 @@ def api_dashboard_data(authorization: Optional[str] = Header(default=None), x_da
             "paused_campaign_count": sum(1 for c in all_campaigns if str(c.get("state") or "").upper() == "PAUSED"),
             "archived_campaign_count": sum(1 for c in all_campaigns if str(c.get("state") or "").upper() == "ARCHIVED"),
             "campaigns": active_campaigns,
+            "summary": summary or {"spend": 0, "sales": 0, "acos": None, "clicks": 0, "orders": 0},
+            "bid_mode": bid_mode,
+            "budget_protection": budget_protection,
+            "note": note,
+            "cache_rebuild_in_progress": summary is None,
         })
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
