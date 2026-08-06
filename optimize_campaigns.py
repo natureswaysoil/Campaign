@@ -638,12 +638,40 @@ def _build_dashboard_report_body() -> Dict[str, Any]:
     }
 
 
+def _load_dashboard_rows_from_bigquery() -> Optional[List[Dict[str, Any]]]:
+    """Read daily synced metrics; return None so Amazon remains a fallback."""
+    try:
+        from google.cloud import bigquery
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "amazon-ppc-bid-optimizer")
+        table = os.getenv("CAMPAIGN_PERFORMANCE_TABLE", f"{project}.amazon_ppc.sp_campaign_performance")
+        query = f"""
+            SELECT CAST(campaign_id AS STRING) AS campaign_id,
+                   SUM(COALESCE(cost, 0)) AS cost,
+                   SUM(COALESCE(sales, 0)) AS sales,
+                   SUM(COALESCE(clicks, 0)) AS clicks,
+                   SUM(COALESCE(purchases, 0)) AS purchases,
+                   SUM(COALESCE(impressions, 0)) AS impressions
+            FROM `{table}`
+            WHERE date BETWEEN DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 14 DAY)
+                           AND DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 1 DAY)
+            GROUP BY campaign_id
+        """
+        rows = [dict(row.items()) for row in bigquery.Client(project=project).query(query).result()]
+        if rows:
+            return rows
+        _dash_summary_log.warning("BigQuery dashboard summary returned no rows")
+    except Exception as exc:
+        _dash_summary_log.warning("BigQuery dashboard summary failed: %s", exc)
+    return None
+
 def _refresh_dashboard_summary() -> None:
     try:
-        client = AmazonAdsClient()
-        report_id = client.request_report(_build_dashboard_report_body())
-        url = client.wait_for_report(report_id, timeout_seconds=1200)
-        rows = parse_report_json_bytes(client.download_binary(url))
+        rows = _load_dashboard_rows_from_bigquery()
+        if rows is None:
+            client = AmazonAdsClient()
+            report_id = client.request_report(_build_dashboard_report_body())
+            url = client.wait_for_report(report_id, timeout_seconds=1200)
+            rows = parse_report_json_bytes(client.download_binary(url))
         per: Dict[str, Any] = {}
         tot = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0, "impressions": 0}
         for r in rows:

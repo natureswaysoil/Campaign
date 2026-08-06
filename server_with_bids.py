@@ -82,6 +82,20 @@ def _target_bid_from_baseline(base_bid: float, mode: str) -> float:
     return _clamp_bid(base_bid * PRIME_MULTIPLIER)
 
 
+def _amazon_update_outcome(response: Dict[str, Any], submitted: int) -> tuple[int, int]:
+    """Return per-item success/error counts from Amazon Ads v3 batch responses."""
+    if submitted <= 0:
+        return 0, 0
+    body = response.get("adGroups", response) if isinstance(response, dict) else {}
+    if not isinstance(body, dict):
+        return 0, submitted
+    successes = body.get("success")
+    errors = body.get("error") or body.get("errors")
+    success_count = len(successes) if isinstance(successes, list) else None
+    error_count = len(errors) if isinstance(errors, list) else 0
+    if success_count is None:
+        success_count = max(0, submitted - error_count) if errors is not None else 0
+    return min(submitted, success_count), min(submitted, error_count)
 @app.post("/api/retune-existing-bids")
 def api_retune_existing_bids(
     payload: Dict[str, Any] = Body(default={}),
@@ -199,6 +213,7 @@ def api_retune_existing_bids(
                 accept="application/vnd.spadgroup.v3+json",
             )
 
+        applied_count, update_error_count = _amazon_update_outcome(api_response, len(updates)) if apply_live else (0, 0)
         return JSONResponse({
             "success": True,
             "dry_run": not apply_live,
@@ -206,7 +221,8 @@ def api_retune_existing_bids(
             "budget_protection": status,
             "ad_groups_seen": len(ad_groups),
             "updates_needed": len(updates),
-            "updates_applied": len(updates) if apply_live else 0,
+            "updates_applied": applied_count,
+            "update_errors": update_error_count,
             "acos_circuit_breakers": sum(1 for row in preview if row.get("acosCircuitBreaker")),
             "acos_ceiling": ACOS_CEILING,
             "acos_min_spend": ACOS_MIN_SPEND,
