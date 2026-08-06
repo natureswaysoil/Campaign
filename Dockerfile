@@ -23,7 +23,7 @@ EXPOSE 8080
 # Cloud Run starts server_with_bids.py.  It imports server.py, so all dashboard,
 # optimizer, and campaign-launch routes stay active, then adds the live
 # /api/retune-existing-bids route for dayparting bid control.
-CMD ["gunicorn", "server_with_bids:app", \
+CMD ["gunicorn", "final_server:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", \
      "--bind", "0.0.0.0:8080", \

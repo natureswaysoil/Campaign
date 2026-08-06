@@ -265,7 +265,7 @@ def _optional_dashboard_auth(authorization: Optional[str], x_daily_optimizer_tok
         supplied = x_daily_optimizer_token.strip()
     elif authorization and authorization.startswith("Bearer "):
         supplied = authorization.replace("Bearer ", "", 1).strip()
-    if supplied and not hmac.compare_digest(supplied, token):
+    if not supplied or not hmac.compare_digest(supplied, token):
         return JSONResponse({"error": True, "message": "Invalid token"}, status_code=403)
     return None
 
@@ -334,7 +334,7 @@ def _search_term_rows(client: AmazonAdsClient, lookback_days: int) -> Tuple[List
             "format": "GZIP_JSON",
         },
     })
-    report_url = client.wait_for_report(report_id)
+    report_url = client.wait_for_report(report_id, timeout_seconds=1200)
     return parse_report_json_bytes(client.download_binary(report_url)), report_id, start_date, end_date
 
 
@@ -360,6 +360,7 @@ def api_create_campaign_with_duplicate_protection(
         safe_title = _safe_title(product)
         existing = _find_existing_launch_campaigns(client, safe_title)
         force_relaunch = bool(payload.get("force_relaunch", False))
+        apply_live = bool(payload.get("apply_live", True))
         if existing and not force_relaunch:
             return JSONResponse({
                 "success": True,
@@ -374,6 +375,18 @@ def api_create_campaign_with_duplicate_protection(
                     }
                     for campaign_type, campaign in existing.items()
                 },
+            })
+
+        if not apply_live:
+            return JSONResponse({
+                "success": True,
+                "dry_run": True,
+                "apply_live": False,
+                "duplicate_launch_prevented": False,
+                "message": "Launch preview passed validation; no Amazon campaigns were created.",
+                "product": product.get("title"),
+                "sku": product.get("sku"),
+                "asin": product.get("asin"),
             })
 
         return base.api_create_recommended_campaigns(payload, authorization, x_daily_optimizer_token)

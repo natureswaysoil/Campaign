@@ -163,7 +163,7 @@ def _optional_dashboard_auth(authorization: Optional[str], x_daily_optimizer_tok
         supplied = x_daily_optimizer_token.strip()
     elif authorization and authorization.startswith("Bearer "):
         supplied = authorization.replace("Bearer ", "", 1).strip()
-    if supplied and not hmac.compare_digest(supplied, token):
+    if not supplied or not hmac.compare_digest(supplied, token):
         return JSONResponse({"error": True, "message": "Invalid token"}, status_code=403)
     return None
 
