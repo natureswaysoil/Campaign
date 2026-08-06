@@ -70,9 +70,14 @@ def _env(*names: str, default: str = "") -> str:
 
 
 def verify_internal_token(authorization: Optional[str] = None, x_daily_optimizer_token: Optional[str] = None) -> None:
-    # Auth disabled: optimizer / bid / apply endpoints require no token.
-    return
-
+    expected = _env("DAILY_OPTIMIZER_TOKEN")
+    if not expected:
+        return
+    supplied = (x_daily_optimizer_token or "").strip()
+    if not supplied and authorization and authorization.startswith("Bearer "):
+        supplied = authorization.replace("Bearer ", "", 1).strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Invalid or missing optimizer token")
 
 def normalize_text(text: Any) -> str:
     text = str(text or "").lower()
@@ -348,8 +353,15 @@ class AmazonAdsClient:
         if body is not None:
             kwargs["json"] = body
         response = self.session.request(method, f"{self.base_url}{endpoint}", **kwargs)
-        if response.status_code in {425, 429}:
-            time.sleep(2)
+        for delay in (2, 5, 10, 20, 40):
+            if response.status_code not in {425, 429}:
+                break
+            retry_after = response.headers.get("Retry-After")
+            try:
+                wait_seconds = max(delay, min(float(retry_after), 60.0)) if retry_after else delay
+            except (TypeError, ValueError):
+                wait_seconds = delay
+            time.sleep(wait_seconds)
             response = self.session.request(method, f"{self.base_url}{endpoint}", **kwargs)
         response.raise_for_status()
         return response.json() if response.content else {}
@@ -405,8 +417,67 @@ class AmazonAdsClient:
         return response.content
 
     def get_bid_recommendation(self, campaign_id: str, ad_group_id: str, keyword: str, match_type: str = "PHRASE") -> Dict[str, float]:
+        return self.get_ad_group_bid_recommendation(ad_group_id, campaign_id)
+
+    @staticmethod
+    def _normalize_bid_recommendation(data: Any) -> Dict[str, float]:
+        candidates: List[Dict[str, Any]] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                candidates.append(value)
+                for key in ("suggestedBid", "bidRecommendation", "recommendation", "bidRecommendations"):
+                    nested = value.get(key)
+                    if isinstance(nested, (dict, list)):
+                        collect(nested)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(data)
+        for item in candidates:
+            low = _money(item.get("rangeStart", item.get("low", item.get("suggestedBidLow"))), 0.0)
+            high = _money(item.get("rangeEnd", item.get("high", item.get("suggestedBidHigh"))), 0.0)
+            suggested = _money(item.get("suggested", item.get("suggestedBid")), 0.0)
+            if low > 0 and high > 0:
+                return {"low": low, "high": high, "suggested": suggested or ((low + high) / 2)}
         return {}
 
+    def get_ad_group_bid_recommendation(self, ad_group_id: str, campaign_id: str) -> Dict[str, float]:
+        content_type = "application/vnd.spthemebasedbidrecommendation.v5+json"
+        payload = {
+            "recommendationType": "BIDS_FOR_EXISTING_AD_GROUP",
+            "campaignId": str(campaign_id),
+            "adGroupId": str(ad_group_id),
+            "targetingExpressions": [
+                {"type": expression_type}
+                for expression_type in ("CLOSE_MATCH", "LOOSE_MATCH", "SUBSTITUTES", "COMPLEMENTS")
+            ],
+        }
+        data = self.post(
+            "/sp/targets/bid/recommendations",
+            payload,
+            content_type=content_type,
+            accept=content_type,
+        )
+        lows: List[float] = []
+        suggested: List[float] = []
+        highs: List[float] = []
+        for theme in data.get("bidRecommendations", []):
+            for item in theme.get("bidRecommendationsForTargetingExpressions", []):
+                values = [_money(row.get("suggestedBid"), 0.0) for row in item.get("bidValues", [])]
+                values = [value for value in values if value > 0]
+                if values:
+                    lows.append(values[0])
+                    suggested.append(values[len(values) // 2])
+                    highs.append(values[-1])
+        if not suggested:
+            return self._normalize_bid_recommendation(data)
+        return {
+            "low": sum(lows) / len(lows),
+            "suggested": sum(suggested) / len(suggested),
+            "high": sum(highs) / len(highs),
+        }
 
 def _extract_id(resp: Dict[str, Any], batch_key: str, item_key: str, id_key: str) -> str:
     inner = resp.get(batch_key, {}) if isinstance(resp, dict) else {}
@@ -571,7 +642,7 @@ def _refresh_dashboard_summary() -> None:
     try:
         client = AmazonAdsClient()
         report_id = client.request_report(_build_dashboard_report_body())
-        url = client.wait_for_report(report_id, timeout_seconds=240)
+        url = client.wait_for_report(report_id, timeout_seconds=1200)
         rows = parse_report_json_bytes(client.download_binary(url))
         per: Dict[str, Any] = {}
         tot = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0, "impressions": 0}
