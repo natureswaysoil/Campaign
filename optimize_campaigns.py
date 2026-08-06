@@ -664,10 +664,12 @@ def _load_dashboard_rows_from_bigquery() -> Optional[List[Dict[str, Any]]]:
         _dash_summary_log.warning("BigQuery dashboard summary failed: %s", exc)
     return None
 
-def _refresh_dashboard_summary() -> None:
+def _refresh_dashboard_summary(allow_amazon_fallback: bool = True) -> None:
     try:
         rows = _load_dashboard_rows_from_bigquery()
         if rows is None:
+            if not allow_amazon_fallback:
+                return
             client = AmazonAdsClient()
             report_id = client.request_report(_build_dashboard_report_body())
             url = client.wait_for_report(report_id, timeout_seconds=1200)
@@ -705,6 +707,12 @@ def _get_cached_dashboard_summary():
         _dash_summary_cache["summary"] is not None
         and (time.time() - _dash_summary_cache["ts"]) < _DASH_SUMMARY_TTL
     )
+    if not fresh and _dash_summary_cache["summary"] is None:
+        # Cloud Run may throttle background CPU after a response. The warehouse
+        # read is bounded and fast, so complete it during the cold-start request.
+        _dash_summary_cache["refreshing"] = True
+        _refresh_dashboard_summary(allow_amazon_fallback=False)
+        fresh = _dash_summary_cache["summary"] is not None
     if not fresh and not _dash_summary_cache["refreshing"]:
         _dash_summary_cache["refreshing"] = True
         _threading.Thread(target=_refresh_dashboard_summary, daemon=True).start()
