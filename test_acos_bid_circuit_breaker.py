@@ -50,3 +50,10 @@ def test_live_retune_fails_closed_without_acos_cache():
     assert response.status_code == 503
     assert payload["retryable"] is True
     client.put.assert_not_called()
+def test_amazon_update_outcome_counts_partial_failures():
+    response = {"adGroups": {"success": [{"adGroupId": "1"}], "error": [{"adGroupId": "2"}]}}
+    assert server_with_bids._amazon_update_outcome(response, 2) == (1, 1)
+
+
+def test_amazon_update_outcome_does_not_assume_ambiguous_response_succeeded():
+    assert server_with_bids._amazon_update_outcome({}, 3) == (0, 0)
