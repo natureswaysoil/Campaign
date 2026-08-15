@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -73,12 +74,71 @@ def is_real_product_row(row: Dict[str, Any]) -> bool:
 def clean_product_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [row for row in rows if is_real_product_row(row)]
 
-def load_products_from_sheet(url: str = PRODUCTS_CSV_URL) -> List[Dict[str, str]]:
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    reader = csv.DictReader(io.StringIO(response.text))
-    rows = [{str(k).strip(): (v or "").strip() for k, v in row.items()} for row in reader]
-    return clean_product_rows(rows)
+def _google_sheet_csv_urls(url: str) -> List[str]:
+    """Return the configured URL plus Google's alternate CSV endpoint."""
+    urls = [url]
+    match = re.search(r"/spreadsheets/d/([^/]+)", url)
+    if match:
+        alternate = (
+            f"https://docs.google.com/spreadsheets/d/{match.group(1)}"
+            "/gviz/tq?tqx=out:csv"
+        )
+        if alternate != url:
+            urls.append(alternate)
+    return urls
+
+
+def load_products_from_sheet(
+    url: str = PRODUCTS_CSV_URL,
+    attempts: int | None = None,
+    timeout: tuple[float, float] | None = None,
+) -> List[Dict[str, str]]:
+    """Load products reliably despite transient Google Sheets timeouts."""
+    attempts = attempts or max(1, int(os.getenv("PRODUCTS_CSV_ATTEMPTS", "3")))
+    timeout = timeout or (
+        float(os.getenv("PRODUCTS_CSV_CONNECT_TIMEOUT", "10")),
+        float(os.getenv("PRODUCTS_CSV_READ_TIMEOUT", "60")),
+    )
+    errors: List[str] = []
+
+    for candidate_url in _google_sheet_csv_urls(url):
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.get(candidate_url, timeout=timeout)
+                response.raise_for_status()
+                reader = csv.DictReader(io.StringIO(response.text.lstrip("\ufeff")))
+                rows = clean_product_rows(
+                    [
+                        {str(k).strip(): (v or "").strip() for k, v in row.items()}
+                        for row in reader
+                    ]
+                )
+                if not rows:
+                    raise ValueError("Google Sheets returned no valid product rows")
+                if attempt > 1 or candidate_url != url:
+                    print(
+                        f"Product sheet loaded after retry/fallback "
+                        f"({len(rows)} products)."
+                    )
+                return rows
+            except (requests.RequestException, ValueError) as exc:
+                errors.append(
+                    f"{candidate_url} attempt {attempt}/{attempts}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                if attempt < attempts:
+                    delay = min(2 ** (attempt - 1), 8)
+                    print(
+                        f"Product sheet request failed; retrying in {delay}s "
+                        f"({attempt}/{attempts}): {exc}"
+                    )
+                    time.sleep(delay)
+
+    detail = "; ".join(errors[-4:])
+    raise RuntimeError(
+        "Unable to load product data from Google Sheets after "
+        f"{len(_google_sheet_csv_urls(url)) * attempts} attempts. {detail}"
+    )
 
 def product_name(row: Dict[str, Any]) -> str:
     return first(row, "Product_Name", "Product Name", "Title", "SKU", "ASIN", default="Product")
