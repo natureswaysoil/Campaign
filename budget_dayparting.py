@@ -87,7 +87,11 @@ def budget_protection_status(hour: Optional[int] = None) -> Dict[str, Any]:
     return {
         "bid_mode": mode,
         "hour_eastern": h,
-        "prime_time_label": "Prime hours ET: " + ", ".join(f"{hour}:00" for hour in schedule["prime_hours"]),`n        "schedule_source": schedule["source"],`n        "schedule_lookback_days": schedule["lookback_days"],`n        "schedule_clicks": schedule["clicks"],`n        "schedule_orders": schedule["orders"],
+        "prime_time_label": "Prime hours ET: " + ", ".join(f"{hour}:00" for hour in schedule["prime_hours"]),
+        "schedule_source": schedule["source"],
+        "schedule_lookback_days": schedule["lookback_days"],
+        "schedule_clicks": schedule["clicks"],
+        "schedule_orders": schedule["orders"],
         "budget_protection_multiplier": multiplier,
         "prime_budget_reserve_target": reserve_target,
         "note": note,
