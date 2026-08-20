@@ -27,6 +27,8 @@ import datetime
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from hourly_dayparting import load_schedule
+
 
 PRIME_TIME_START = int(os.getenv("PRIME_TIME_START", "10"))
 PRIME_TIME_END = int(os.getenv("PRIME_TIME_END", "20"))
@@ -58,15 +60,17 @@ def current_hour_eastern() -> int:
 
 def get_budget_protection_mode(hour: Optional[int] = None) -> str:
     h = current_hour_eastern() if hour is None else int(hour)
-    if PRIME_TIME_START <= h <= PRIME_TIME_END:
+    prime_hours = load_schedule(PRIME_TIME_START, PRIME_TIME_END)["prime_hours"]
+    if h in prime_hours:
         return "PRIME"
-    if h < PRIME_TIME_START:
+    if h < min(prime_hours):
         return "PROTECT"
     return "TAPER"
 
 
 def budget_protection_status(hour: Optional[int] = None) -> Dict[str, Any]:
     h = current_hour_eastern() if hour is None else int(hour)
+    schedule = load_schedule(PRIME_TIME_START, PRIME_TIME_END)
     mode = get_budget_protection_mode(h)
     if mode == "PRIME":
         note = "Prime buying window: bids can compete harder."
@@ -83,7 +87,7 @@ def budget_protection_status(hour: Optional[int] = None) -> Dict[str, Any]:
     return {
         "bid_mode": mode,
         "hour_eastern": h,
-        "prime_time_label": f"{PRIME_TIME_START}:00-{PRIME_TIME_END}:59 ET",
+        "prime_time_label": "Prime hours ET: " + ", ".join(f"{hour}:00" for hour in schedule["prime_hours"]),`n        "schedule_source": schedule["source"],`n        "schedule_lookback_days": schedule["lookback_days"],`n        "schedule_clicks": schedule["clicks"],`n        "schedule_orders": schedule["orders"],
         "budget_protection_multiplier": multiplier,
         "prime_budget_reserve_target": reserve_target,
         "note": note,
