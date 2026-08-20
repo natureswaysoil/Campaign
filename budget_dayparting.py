@@ -10,12 +10,12 @@ Purpose:
 
 Default Eastern schedule:
 - PROTECT: 12:00am-9:59am   -> very conservative bids, about 35% pressure
-- PRIME:   10:00am-8:59pm   -> strongest bids
-- TAPER:   9:00pm-11:59pm   -> conservative bids again
+- PRIME:   10:00am-10:59pm   -> strongest bids
+- TAPER:   11:00pm-11:59pm   -> conservative bids again
 
 Environment overrides:
 - PRIME_TIME_START=10
-- PRIME_TIME_END=20
+- PRIME_TIME_END=22
 - PROTECT_BID_MULTIPLIER=0.35
 - TAPER_BID_MULTIPLIER=0.45
 - PRIME_BID_POSITION=0.85
@@ -31,7 +31,7 @@ from hourly_dayparting import load_schedule
 
 
 PRIME_TIME_START = int(os.getenv("PRIME_TIME_START", "10"))
-PRIME_TIME_END = int(os.getenv("PRIME_TIME_END", "20"))
+PRIME_TIME_END = int(os.getenv("PRIME_TIME_END", "22"))
 
 # To reserve about 65% of the daily budget for prime time, the pre-prime window
 # should not run at normal bids. This does not literally create a second Amazon
