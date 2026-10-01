@@ -169,8 +169,14 @@ DASHBOARD_PATCH_JS = r"""
     if (!pid) return;
     var budget = +(byId('lBudget') && byId('lBudget').value);
     var bid = +(byId('lBid') && byId('lBid').value);
+    var discoveryPct = +(byId('lDiscoveryPct') && byId('lDiscoveryPct').value);
+    var maxExact = +(byId('lMaxExact') && byId('lMaxExact').value);
     if (!isFinite(budget) || budget < 1) return notify('❌ Daily budget must be at least $1.00', true);
     if (!isFinite(bid) || bid < 0.02) return notify('❌ Starting bid must be at least $0.02', true);
+    if (!isFinite(discoveryPct)) discoveryPct = 30;
+    if (!isFinite(maxExact)) maxExact = 40;
+    discoveryPct = Math.max(10, Math.min(50, discoveryPct));
+    maxExact = Math.max(5, Math.min(80, Math.round(maxExact)));
 
     var btn = byId('launchBtn');
     if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Launching AUTO + EXACT...'; }
@@ -179,8 +185,8 @@ DASHBOARD_PATCH_JS = r"""
       apply_live: true,
       daily_budget: Number(budget.toFixed(2)),
       starting_bid: Number(bid.toFixed(2)),
-      discovery_budget_pct: 0.30,
-      max_exact_keywords: 40
+      discovery_budget_pct: Number((discoveryPct / 100).toFixed(2)),
+      max_exact_keywords: maxExact
     }).then(function(data){
       if (data.duplicate_launch_prevented) {
         notify('✅ Duplicate prevented — existing AUTO DISCOVERY / MANUAL EXACT campaigns found.');
@@ -284,7 +290,8 @@ def _find_existing_launch_campaigns(client: AmazonAdsClient, safe_title: str) ->
     prefix = f"{safe_title} | "
     for campaign in client.list_campaigns():
         name = str(campaign.get("name") or "")
-        if str(campaign.get("state", "")).upper() != "ENABLED" or not name.startswith(prefix):
+        state = str(campaign.get("state", "")).upper()
+        if state not in {"ENABLED", "PAUSED"} or not name.startswith(prefix):
             continue
         if "| AUTO DISCOVERY |" in name and "AUTO_DISCOVERY" not in found:
             found["AUTO_DISCOVERY"] = campaign
@@ -346,11 +353,11 @@ def api_create_campaign_with_duplicate_protection(
         existing = _find_existing_launch_campaigns(client, safe_title)
         force_relaunch = bool(payload.get("force_relaunch", False))
         apply_live = live_requested(payload)
-        if existing and not force_relaunch:
+        if len(existing) == 2 and not force_relaunch:
             return JSONResponse({
                 "success": True,
                 "duplicate_launch_prevented": True,
-                "message": "Matching launch campaigns already exist. No new campaigns were created. Use force_relaunch=true only when you intentionally want duplicates.",
+                "message": "Matching AUTO DISCOVERY and MANUAL EXACT campaigns already exist. No new campaigns were created.",
                 "product": product.get("title"),
                 "existing_campaigns": {
                     campaign_type: {
@@ -368,13 +375,22 @@ def api_create_campaign_with_duplicate_protection(
                 "dry_run": True,
                 "apply_live": False,
                 "duplicate_launch_prevented": False,
+                "partial_launch_detected": bool(existing),
                 "message": "Launch preview passed validation; no Amazon campaigns were created.",
                 "product": product.get("title"),
                 "sku": product.get("sku"),
                 "asin": product.get("asin"),
             })
 
-        return base.api_create_recommended_campaigns(payload, authorization, x_daily_optimizer_token)
+        launch_payload = dict(payload)
+        if existing and not force_relaunch:
+            launch_payload["_resume_campaigns"] = {
+                campaign_type: str(campaign.get("campaignId") or "")
+                for campaign_type, campaign in existing.items()
+            }
+        return base.api_create_recommended_campaigns(
+            launch_payload, authorization, x_daily_optimizer_token
+        )
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
 
