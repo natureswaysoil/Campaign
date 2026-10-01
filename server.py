@@ -213,6 +213,28 @@ def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: s
     return outcome
 
 
+def _ensure_product_ad(
+    client: AmazonAdsClient,
+    campaign_id: str,
+    ad_group_id: str,
+    sku: str,
+    asin: str,
+) -> bool:
+    existing_product_ads = [
+        ad for ad in client.list_product_ads(campaign_id)
+        if str(ad.get("state") or "").upper() != "ARCHIVED"
+        and str(ad.get("adGroupId") or "") == str(ad_group_id)
+        and (
+            (sku and str(ad.get("sku") or "") == sku)
+            or (asin and str(ad.get("asin") or "") == asin)
+        )
+    ]
+    if existing_product_ads:
+        return False
+    _create_product_ad(client, campaign_id, ad_group_id, sku, asin)
+    return True
+
+
 def _set_campaign_state_verified(client: AmazonAdsClient, campaign_id: str, state: str) -> Dict[str, Any]:
     response = client.put(
         "/sp/campaigns",
@@ -294,8 +316,25 @@ def _seed_negative_rows(campaign_id: str, limit: int = 35) -> List[Dict[str, Any
 def _apply_launch_seed_negatives(client: AmazonAdsClient, campaign_ids: List[str]) -> Dict[str, Any]:
     applied: List[Dict[str, Any]] = []
     for campaign_id in campaign_ids:
-        rows = _seed_negative_rows(campaign_id)
+        existing_terms = {
+            _normalize_keyword(row.get("keywordText"))
+            for row in client.list_campaign_negative_keywords(campaign_id)
+            if str(row.get("state") or "").upper() != "ARCHIVED"
+        }
+        rows = [
+            row for row in _seed_negative_rows(campaign_id)
+            if _normalize_keyword(row.get("keywordText")) not in existing_terms
+        ]
         if not rows:
+            applied.append({
+                "campaign_id": campaign_id,
+                "count": 0,
+                "terms_sample": [],
+                "amazon_result": {
+                    "submitted": 0, "accepted": 0, "failed": 0,
+                    "errors": [], "unconfirmed": 0, "success": True,
+                },
+            })
             continue
         response = client.create_negative_keywords(rows)
         outcome = batch_outcome(response, "campaignNegativeKeywords", len(rows))
@@ -480,6 +519,9 @@ def api_create_recommended_campaigns(
                 discovery_ad_group_id = _create_ad_group(
                     client, discovery_campaign_id, "Auto Discovery", discovery_bid
                 )
+            _ensure_product_ad(
+                client, discovery_campaign_id, discovery_ad_group_id, sku, asin
+            )
         else:
             discovery_campaign_id = _create_campaign(
                 client,
@@ -501,6 +543,9 @@ def api_create_recommended_campaigns(
             exact_ad_group_id = str(existing_groups[0].get("adGroupId") or "") if existing_groups else ""
             if not exact_ad_group_id:
                 exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
+            _ensure_product_ad(
+                client, exact_campaign_id, exact_ad_group_id, sku, asin
+            )
         else:
             exact_campaign_id = _create_campaign(
                 client,
