@@ -163,3 +163,36 @@ Store each of these in **both** GitHub Secrets (for validation) and **GCP Secret
 | `AMAZON_ADS_PROFILE_ID` | Amazon Ads profile ID |
 | `AMAZON_ADS_REGION` | Region code: `na`, `eu`, or `fe` (defaults to `na` if unset) |
 
+
+## Production safety controls
+
+The Docker entrypoint is `final_server:app`. Every `/api/` route requires
+`DAILY_OPTIMIZER_TOKEN` via `X-Daily-Optimizer-Token` or `Authorization: Bearer …`.
+Missing server configuration returns 503; missing/incorrect credentials return
+403. `/health` and the dashboard HTML remain public; dashboard data requires the
+**Set Token** value.
+
+Mutation requests must explicitly send the JSON boolean `"apply_live": true`.
+Omitting it means preview; `"dry_run": true` always overrides live intent.
+String flags such as `"apply_live": "false"` return 422. Dashboard live-action
+buttons send the explicit flag. Custom callers must update their request bodies,
+including pause/resume requests.
+
+Report creation and `/api/apply-optimization` each require `apply_live: true` to
+apply changes. Preview reports and reports created before this safety update
+cannot be promoted to live: create a new live-intent report first. Previewing an
+existing report does not consume it. Existing scheduler JSON files for retuning
+and harvesting already contain explicit live flags; separately deployed scheduler
+jobs must be checked for the same payload and token header before rollout.
+
+Retuning blocks live writes when the performance cache is older than 30 minutes
+or unavailable. Campaigns absent from a fresh cache cannot receive increases.
+For campaigns exceeding the ACOS/spend thresholds, protected bids never exceed
+their current bid. Preview retuning does not write baseline files.
+
+The GitHub deployment requires the production safety test workflow to pass.
+Run the same suite locally with a dummy token (no Amazon credentials required):
+
+```bash
+DAILY_OPTIMIZER_TOKEN=secret-token python -m pytest -q test_production_safety.py test_acos_bid_circuit_breaker.py test_amazon_bid_recommendations.py test_ppc_agent.py test_production_routes.py
+```
