@@ -196,3 +196,21 @@ Run the same suite locally with a dummy token (no Amazon credentials required):
 ```bash
 DAILY_OPTIMIZER_TOKEN=secret-token python -m pytest -q test_production_safety.py test_acos_bid_circuit_breaker.py test_amazon_bid_recommendations.py test_ppc_agent.py test_production_routes.py
 ```
+
+### Scheduler compatibility and remaining automation gaps
+
+`setup-scheduler.sh`, `trigger-optimizer.sh`, and the daily optimization example
+now explicitly request live-intent reports. These scripts have not been executed
+against Google Cloud. Updating source files does not update deployed jobs.
+
+The supplied scheduler setup creates only a daily report-request job. It does not
+schedule `/api/apply-optimization`, bid retuning at daypart transitions, or the
+separate `/api/harvest-all-discovery` endpoint. Those require separately configured
+jobs or orchestration. The generic report winner path inserts into the source ad
+group; the discovery harvest endpoint is the path that maps AUTO DISCOVERY to
+MANUAL EXACT. Do not treat successful report creation as successful application.
+
+The present retune implementation updates ad-group defaults only, not explicit
+keyword/target bids. Protected buyer phrases are excluded from winner harvesting
+by the existing waste rules. These pre-existing functional gaps remain outside
+the safety patch and require follow-up before claiming complete automation.
