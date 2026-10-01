@@ -463,29 +463,62 @@ def api_create_recommended_campaigns(
             return JSONResponse({"success": True, "dry_run": True, "apply_live": False,
                                  "product": product["title"], "total_daily_budget": total_budget})
 
+        resume_campaigns = payload.get("_resume_campaigns") or {}
+
         # 1) Amazon-recommended discovery: automatic targeting campaign.
-        discovery_campaign_id = _create_campaign(
-            client,
-            f"{safe_title} | AUTO DISCOVERY | {start_date}",
-            "AUTO",
-            discovery_budget,
-            start_date,
-        )
-        discovery_ad_group_id = _create_ad_group(client, discovery_campaign_id, "Auto Discovery", discovery_bid)
-        _create_product_ad(client, discovery_campaign_id, discovery_ad_group_id, sku, asin)
+        discovery_campaign_id = str(resume_campaigns.get("AUTO_DISCOVERY") or "")
+        discovery_reused = bool(discovery_campaign_id)
+        if discovery_reused:
+            existing_groups = client.list_ad_groups(discovery_campaign_id)
+            discovery_ad_group_id = str(existing_groups[0].get("adGroupId") or "") if existing_groups else ""
+            if not discovery_ad_group_id:
+                discovery_ad_group_id = _create_ad_group(
+                    client, discovery_campaign_id, "Auto Discovery", discovery_bid
+                )
+        else:
+            discovery_campaign_id = _create_campaign(
+                client,
+                f"{safe_title} | AUTO DISCOVERY | {start_date}",
+                "AUTO",
+                discovery_budget,
+                start_date,
+            )
+            discovery_ad_group_id = _create_ad_group(
+                client, discovery_campaign_id, "Auto Discovery", discovery_bid
+            )
+            _create_product_ad(client, discovery_campaign_id, discovery_ad_group_id, sku, asin)
 
         # 2) Controlled harvesting campaign: exact-only manual campaign.
-        exact_campaign_id = _create_campaign(
-            client,
-            f"{safe_title} | MANUAL EXACT | {start_date}",
-            "MANUAL",
-            exact_budget,
-            start_date,
-        )
-        exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
-        _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
+        exact_campaign_id = str(resume_campaigns.get("MANUAL_EXACT") or "")
+        exact_reused = bool(exact_campaign_id)
+        if exact_reused:
+            existing_groups = client.list_ad_groups(exact_campaign_id)
+            exact_ad_group_id = str(existing_groups[0].get("adGroupId") or "") if existing_groups else ""
+            if not exact_ad_group_id:
+                exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
+        else:
+            exact_campaign_id = _create_campaign(
+                client,
+                f"{safe_title} | MANUAL EXACT | {start_date}",
+                "MANUAL",
+                exact_budget,
+                start_date,
+            )
+            exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
+            _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
 
-        exact_rows = _exact_keyword_rows(exact_keywords, exact_campaign_id, exact_ad_group_id, exact_bid)
+        existing_exact_terms = {
+            _normalize_keyword(keyword.get("keywordText"))
+            for keyword in client.list_keywords(exact_campaign_id)
+            if str(keyword.get("matchType") or "").upper() == "EXACT"
+            and str(keyword.get("state") or "").upper() != "ARCHIVED"
+        } if exact_reused else set()
+        exact_rows = _exact_keyword_rows(
+            [keyword for keyword in exact_keywords if keyword not in existing_exact_terms],
+            exact_campaign_id,
+            exact_ad_group_id,
+            exact_bid,
+        )
         exact_keywords_created = 0
         if exact_rows:
             outcome = create_keywords_verified(client, exact_rows)
@@ -507,6 +540,7 @@ def api_create_recommended_campaigns(
         return JSONResponse({
             "success": True,
             "structure": "recommended_auto_discovery_plus_manual_exact",
+            "resumed_partial_launch": bool(resume_campaigns),
             "product": product["title"],
             "sku": sku,
             "asin": asin,
