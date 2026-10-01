@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, Header, HTTPException
 from safety import live_requested
-from amazon_results import create_keywords_verified
+from amazon_results import batch_outcome, create_keywords_verified
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import optimize_campaigns as optimizer_core
@@ -169,7 +169,7 @@ def _create_campaign(client: AmazonAdsClient, name: str, targeting_type: str, da
         "campaigns": [{
             "name": name,
             "targetingType": targeting_type,
-            "state": "ENABLED",
+            "state": "PAUSED",
             "budget": {"budget": round(daily_budget, 2), "budgetType": "DAILY"},
             "startDate": start_date,
         }]
@@ -195,15 +195,35 @@ def _create_ad_group(client: AmazonAdsClient, campaign_id: str, name: str, defau
     return ad_group_id
 
 
-def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: str, sku: str, asin: str) -> None:
+def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: str, sku: str, asin: str) -> Dict[str, Any]:
     product_ad = {"campaignId": str(campaign_id), "adGroupId": str(ad_group_id), "state": "ENABLED"}
     if sku:
         product_ad["sku"] = sku
     if asin:
         product_ad["asin"] = asin
-    client.post("/sp/productAds", {"productAds": [product_ad]},
-                content_type="application/vnd.spproductad.v3+json",
-                accept="application/vnd.spproductad.v3+json")
+    response = client.post(
+        "/sp/productAds",
+        {"productAds": [product_ad]},
+        content_type="application/vnd.spproductad.v3+json",
+        accept="application/vnd.spproductad.v3+json",
+    )
+    outcome = batch_outcome(response, "productAds", 1)
+    if not outcome["success"]:
+        raise RuntimeError(f"Product ad creation was not acknowledged by Amazon: {outcome}")
+    return outcome
+
+
+def _set_campaign_state_verified(client: AmazonAdsClient, campaign_id: str, state: str) -> Dict[str, Any]:
+    response = client.put(
+        "/sp/campaigns",
+        {"campaigns": [{"campaignId": str(campaign_id), "state": state}]},
+        content_type="application/vnd.spcampaign.v3+json",
+        accept="application/vnd.spcampaign.v3+json",
+    )
+    outcome = batch_outcome(response, "campaigns", 1)
+    if not outcome["success"]:
+        raise RuntimeError(f"Campaign state update was not acknowledged by Amazon: {outcome}")
+    return outcome
 
 
 def _normalize_keyword(keyword: str) -> str:
@@ -231,6 +251,12 @@ def _select_exact_keywords(keywords: List[str], max_keywords: int) -> List[str]:
         if len(selected) >= max_keywords:
             break
     return selected
+
+
+def _protected_launch_bids(protected_bid: float) -> Tuple[float, float]:
+    discovery_bid = round(max(0.10, min(protected_bid, protected_bid * 0.70)), 2)
+    exact_bid = round(max(0.10, protected_bid), 2)
+    return discovery_bid, exact_bid
 
 
 def _exact_keyword_rows(keywords: List[str], campaign_id: str, ad_group_id: str, bid: float) -> List[Dict[str, Any]]:
@@ -271,11 +297,17 @@ def _apply_launch_seed_negatives(client: AmazonAdsClient, campaign_ids: List[str
         rows = _seed_negative_rows(campaign_id)
         if not rows:
             continue
-        client.create_negative_keywords(rows)
+        response = client.create_negative_keywords(rows)
+        outcome = batch_outcome(response, "campaignNegativeKeywords", len(rows))
+        if not outcome["success"]:
+            raise RuntimeError(
+                f"Seed negative creation was not fully acknowledged for campaign {campaign_id}: {outcome}"
+            )
         applied.append({
             "campaign_id": campaign_id,
-            "count": len(rows),
+            "count": outcome["accepted"],
             "terms_sample": [row["keywordText"] for row in rows[:10]],
+            "amazon_result": outcome,
         })
     return {
         "campaigns_seeded": len(applied),
@@ -423,8 +455,8 @@ def api_create_recommended_campaigns(
 
         # Protect discovery bids more aggressively. Exact gets the higher-quality budget.
         _, _, protected_bid = choose_budget_protected_bid({}, base_bid)
-        discovery_bid = round(max(0.10, protected_bid * 0.70), 2)
-        exact_bid = round(max(0.10, protected_bid * 1.15), 2)
+        # protected_bid is already the safety ceiling. Never multiply above it.
+        discovery_bid, exact_bid = _protected_launch_bids(protected_bid)
 
         raw_keywords = generate_keywords_for_product(product_row)
         exact_keywords = _select_exact_keywords(raw_keywords, max_exact_keywords)
@@ -436,29 +468,62 @@ def api_create_recommended_campaigns(
             return JSONResponse({"success": True, "dry_run": True, "apply_live": False,
                                  "product": product["title"], "total_daily_budget": total_budget})
 
+        resume_campaigns = payload.get("_resume_campaigns") or {}
+
         # 1) Amazon-recommended discovery: automatic targeting campaign.
-        discovery_campaign_id = _create_campaign(
-            client,
-            f"{safe_title} | AUTO DISCOVERY | {start_date}",
-            "AUTO",
-            discovery_budget,
-            start_date,
-        )
-        discovery_ad_group_id = _create_ad_group(client, discovery_campaign_id, "Auto Discovery", discovery_bid)
-        _create_product_ad(client, discovery_campaign_id, discovery_ad_group_id, sku, asin)
+        discovery_campaign_id = str(resume_campaigns.get("AUTO_DISCOVERY") or "")
+        discovery_reused = bool(discovery_campaign_id)
+        if discovery_reused:
+            existing_groups = client.list_ad_groups(discovery_campaign_id)
+            discovery_ad_group_id = str(existing_groups[0].get("adGroupId") or "") if existing_groups else ""
+            if not discovery_ad_group_id:
+                discovery_ad_group_id = _create_ad_group(
+                    client, discovery_campaign_id, "Auto Discovery", discovery_bid
+                )
+        else:
+            discovery_campaign_id = _create_campaign(
+                client,
+                f"{safe_title} | AUTO DISCOVERY | {start_date}",
+                "AUTO",
+                discovery_budget,
+                start_date,
+            )
+            discovery_ad_group_id = _create_ad_group(
+                client, discovery_campaign_id, "Auto Discovery", discovery_bid
+            )
+            _create_product_ad(client, discovery_campaign_id, discovery_ad_group_id, sku, asin)
 
         # 2) Controlled harvesting campaign: exact-only manual campaign.
-        exact_campaign_id = _create_campaign(
-            client,
-            f"{safe_title} | MANUAL EXACT | {start_date}",
-            "MANUAL",
-            exact_budget,
-            start_date,
-        )
-        exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
-        _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
+        exact_campaign_id = str(resume_campaigns.get("MANUAL_EXACT") or "")
+        exact_reused = bool(exact_campaign_id)
+        if exact_reused:
+            existing_groups = client.list_ad_groups(exact_campaign_id)
+            exact_ad_group_id = str(existing_groups[0].get("adGroupId") or "") if existing_groups else ""
+            if not exact_ad_group_id:
+                exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
+        else:
+            exact_campaign_id = _create_campaign(
+                client,
+                f"{safe_title} | MANUAL EXACT | {start_date}",
+                "MANUAL",
+                exact_budget,
+                start_date,
+            )
+            exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
+            _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
 
-        exact_rows = _exact_keyword_rows(exact_keywords, exact_campaign_id, exact_ad_group_id, exact_bid)
+        existing_exact_terms = {
+            _normalize_keyword(keyword.get("keywordText"))
+            for keyword in client.list_keywords(exact_campaign_id)
+            if str(keyword.get("matchType") or "").upper() == "EXACT"
+            and str(keyword.get("state") or "").upper() != "ARCHIVED"
+        } if exact_reused else set()
+        exact_rows = _exact_keyword_rows(
+            [keyword for keyword in exact_keywords if keyword not in existing_exact_terms],
+            exact_campaign_id,
+            exact_ad_group_id,
+            exact_bid,
+        )
         exact_keywords_created = 0
         if exact_rows:
             outcome = create_keywords_verified(client, exact_rows)
@@ -472,9 +537,15 @@ def api_create_recommended_campaigns(
         # Seed both campaigns with obvious wrong-intent negatives from day one.
         launch_negatives = _apply_launch_seed_negatives(client, [discovery_campaign_id, exact_campaign_id])
 
+        # Campaigns are created PAUSED so no spend can begin until every launch
+        # component has been acknowledged by Amazon.
+        _set_campaign_state_verified(client, discovery_campaign_id, "ENABLED")
+        _set_campaign_state_verified(client, exact_campaign_id, "ENABLED")
+
         return JSONResponse({
             "success": True,
             "structure": "recommended_auto_discovery_plus_manual_exact",
+            "resumed_partial_launch": bool(resume_campaigns),
             "product": product["title"],
             "sku": sku,
             "asin": asin,

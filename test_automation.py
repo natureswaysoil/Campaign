@@ -15,6 +15,7 @@ import scheduled_harvest
 import scheduled_bids
 import final_server
 import extended_server
+import server as launch_server
 
 
 class MemoryState:
@@ -213,3 +214,116 @@ def test_lock_rejects_overlap_and_releases_after_exception(monkeypatch):
         with store.locked():
             pytest.fail('Concurrent writer acquired lock')
     store.lock.delete.assert_not_called()
+
+
+
+def test_launch_campaign_is_created_paused():
+    amazon = MagicMock()
+    amazon.post.return_value = {
+        'campaigns': {'success': [{'campaign': {'campaignId': 'c1'}}]}
+    }
+    campaign_id = launch_server._create_campaign(
+        amazon, 'Example | AUTO DISCOVERY | 2026-10-01', 'AUTO', 10.0, '2026-10-01'
+    )
+    assert campaign_id == 'c1'
+    payload = amazon.post.call_args.args[1]
+    assert payload['campaigns'][0]['state'] == 'PAUSED'
+
+
+def test_product_ad_rejection_fails_launch_closed():
+    amazon = MagicMock()
+    amazon.post.return_value = {
+        'productAds': {'success': [], 'error': [{'index': 0, 'code': 'REJECTED'}]}
+    }
+    with pytest.raises(RuntimeError, match='Product ad creation was not acknowledged'):
+        launch_server._create_product_ad(amazon, 'c1', 'a1', 'sku1', 'asin1')
+
+
+def test_seed_negative_rejection_fails_launch_closed():
+    amazon = MagicMock()
+    amazon.create_negative_keywords.return_value = {
+        'campaignNegativeKeywords': {
+            'success': [],
+            'error': [{'index': 0, 'code': 'REJECTED'}],
+        }
+    }
+    with pytest.raises(RuntimeError, match='Seed negative creation was not fully acknowledged'):
+        launch_server._apply_launch_seed_negatives(amazon, ['c1'])
+
+
+def test_launch_bid_never_exceeds_protected_ceiling():
+    discovery_bid, exact_bid = launch_server._protected_launch_bids(2.50)
+    assert discovery_bid <= 2.50
+    assert exact_bid == 2.50
+
+
+def test_partial_launch_is_resumed_instead_of_blocked():
+    amazon = MagicMock()
+    existing = {
+        'AUTO_DISCOVERY': {
+            'campaignId': 'auto-1',
+            'name': 'Example | AUTO DISCOVERY | 2026-10-01',
+            'state': 'ENABLED',
+        }
+    }
+    captured = {}
+
+    def fake_launch(payload, authorization, token):
+        captured.update(payload)
+        return JSONResponse({'success': True, 'resumed_partial_launch': True})
+
+    with (
+        patch.object(extended_server, '_optional_dashboard_auth', return_value=None),
+        patch.object(extended_server, '_product_from_key',
+                     return_value=({'title': 'Example', 'sku': 'sku1', 'asin': 'asin1'}, {})),
+        patch.object(extended_server, 'AmazonAdsClient', return_value=amazon),
+        patch.object(extended_server, '_find_existing_launch_campaigns', return_value=existing),
+        patch.object(extended_server.base, 'api_create_recommended_campaigns',
+                     side_effect=fake_launch),
+    ):
+        response = extended_server.api_create_campaign_with_duplicate_protection(
+            {'product_id': 'p1', 'apply_live': True}, 'Bearer test', 'test'
+        )
+
+    assert response.status_code == 200
+    assert captured['_resume_campaigns'] == {'AUTO_DISCOVERY': 'auto-1'}
+
+
+def test_paused_pair_is_resumed_not_treated_as_complete_duplicate():
+    amazon = MagicMock()
+    existing = {
+        'AUTO_DISCOVERY': {'campaignId': 'auto-1', 'state': 'PAUSED'},
+        'MANUAL_EXACT': {'campaignId': 'exact-1', 'state': 'PAUSED'},
+    }
+    captured = {}
+
+    def fake_launch(payload, authorization, token):
+        captured.update(payload)
+        return JSONResponse({'success': True})
+
+    with (
+        patch.object(extended_server, '_optional_dashboard_auth', return_value=None),
+        patch.object(extended_server, '_product_from_key',
+                     return_value=({'title': 'Example', 'sku': 'sku1', 'asin': 'asin1'}, {})),
+        patch.object(extended_server, 'AmazonAdsClient', return_value=amazon),
+        patch.object(extended_server, '_find_existing_launch_campaigns', return_value=existing),
+        patch.object(extended_server.base, 'api_create_recommended_campaigns',
+                     side_effect=fake_launch),
+    ):
+        response = extended_server.api_create_campaign_with_duplicate_protection(
+            {'product_id': 'p1', 'apply_live': True}, 'Bearer test', 'test'
+        )
+
+    assert response.status_code == 200
+    assert captured['_resume_campaigns'] == {
+        'AUTO_DISCOVERY': 'auto-1',
+        'MANUAL_EXACT': 'exact-1',
+    }
+
+
+def test_extended_dashboard_uses_selected_launch_settings():
+    patch_js = extended_server.DASHBOARD_PATCH_JS
+    assert "byId('lDiscoveryPct')" in patch_js
+    assert "byId('lMaxExact')" in patch_js
+    assert 'discovery_budget_pct: 0.30' not in patch_js
+    assert 'max_exact_keywords: 40' not in patch_js
