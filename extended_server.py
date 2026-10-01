@@ -353,7 +353,12 @@ def api_create_campaign_with_duplicate_protection(
         existing = _find_existing_launch_campaigns(client, safe_title)
         force_relaunch = bool(payload.get("force_relaunch", False))
         apply_live = live_requested(payload)
-        if len(existing) == 2 and not force_relaunch:
+        complete_pair = (
+            len(existing) == 2
+            and all(str(campaign.get("state") or "").upper() == "ENABLED"
+                    for campaign in existing.values())
+        )
+        if complete_pair and not force_relaunch:
             return JSONResponse({
                 "success": True,
                 "duplicate_launch_prevented": True,
