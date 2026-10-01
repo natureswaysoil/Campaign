@@ -1,5 +1,6 @@
 """One bounded scheduler tick: request, poll, or apply a durable daily report."""
 import json
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from fastapi.responses import JSONResponse
@@ -29,7 +30,7 @@ def harvest_tick(payload, apply_rows):
                 body['startDate'] = (today - timedelta(days=14)).isoformat()
                 body['endDate'] = (today - timedelta(days=1)).isoformat()
                 report_id = client.request_report(body)
-                state['pending'] = {'report_id': report_id, 'day': today.isoformat(),
+                state['pending'] = {'report_id': report_id, 'day': today.isoformat(), 'requested_at': time.time(),
                                     'start': body['startDate'], 'end': body['endDate']}
                 store.save(state)
                 return JSONResponse({'success': True, 'status': 'requested', 'report_id': report_id}, status_code=202)
@@ -51,6 +52,7 @@ def harvest_tick(payload, apply_rows):
                                   pending['report_id'], pending['start'], pending['end'])
             result = json.loads(response.body)
             state['last_result'] = result
+            state['last_run_at'] = time.time()
             # On partial failure keep the report. Next tick re-lists existing
             # keywords, skips acknowledged inserts, and retries missing terms.
             if response.status_code < 400 and result.get('success'):

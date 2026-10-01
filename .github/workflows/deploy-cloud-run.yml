@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      configure_scheduler:
+        description: 'Run privileged one-time scheduler provisioning'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -127,6 +132,7 @@ jobs:
 
 
       - name: Configure and verify automatic PPC schedules
+        if: github.event_name == 'workflow_dispatch' && inputs.configure_scheduler
         env:
           PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
         run: |

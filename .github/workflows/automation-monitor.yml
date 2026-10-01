@@ -1,0 +1,40 @@
+name: PPC Automation Monitor
+on:
+  schedule:
+    - cron: '20 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/automation-monitor.yml'
+      - 'scripts/monitor_automation.py'
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Choose existing authentication
+        env:
+          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          WIF_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+        run: |
+          if [[ -n "$WIF_PROVIDER" && -n "$WIF_ACCOUNT" ]]; then
+            echo 'AUTH_METHOD=wif' >> "$GITHUB_ENV"
+          else
+            echo 'AUTH_METHOD=sa_key' >> "$GITHUB_ENV"
+          fi
+      - uses: google-github-actions/auth@v2
+        if: env.AUTH_METHOD == 'wif'
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+      - uses: google-github-actions/auth@v2
+        if: env.AUTH_METHOD == 'sa_key'
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Read saved automation outcomes
+        run: python scripts/monitor_automation.py
