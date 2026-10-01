@@ -12,6 +12,7 @@ if [[ -z "$RUNTIME_SA" ]]; then
   exit 1
 fi
 TOKEN=$(gcloud secrets versions access latest --secret=DAILY_OPTIMIZER_TOKEN --project "$PROJECT_ID")
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then echo "::add-mask::${TOKEN}"; fi
 [[ -n "$TOKEN" ]] || { echo 'Optimizer token is empty' >&2; exit 1; }
 if ! gcloud storage buckets describe "gs://${STATE_BUCKET}" --project "$PROJECT_ID" >/dev/null 2>&1; then
   gcloud storage buckets create "gs://${STATE_BUCKET}" --location "$REGION" --uniform-bucket-level-access --project "$PROJECT_ID"
