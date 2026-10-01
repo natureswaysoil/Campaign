@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, Header, HTTPException
 from safety import live_requested
-from amazon_results import create_keywords_verified
+from amazon_results import batch_outcome, create_keywords_verified
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import optimize_campaigns as optimizer_core
@@ -169,7 +169,7 @@ def _create_campaign(client: AmazonAdsClient, name: str, targeting_type: str, da
         "campaigns": [{
             "name": name,
             "targetingType": targeting_type,
-            "state": "ENABLED",
+            "state": "PAUSED",
             "budget": {"budget": round(daily_budget, 2), "budgetType": "DAILY"},
             "startDate": start_date,
         }]
@@ -195,15 +195,35 @@ def _create_ad_group(client: AmazonAdsClient, campaign_id: str, name: str, defau
     return ad_group_id
 
 
-def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: str, sku: str, asin: str) -> None:
+def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: str, sku: str, asin: str) -> Dict[str, Any]:
     product_ad = {"campaignId": str(campaign_id), "adGroupId": str(ad_group_id), "state": "ENABLED"}
     if sku:
         product_ad["sku"] = sku
     if asin:
         product_ad["asin"] = asin
-    client.post("/sp/productAds", {"productAds": [product_ad]},
-                content_type="application/vnd.spproductad.v3+json",
-                accept="application/vnd.spproductad.v3+json")
+    response = client.post(
+        "/sp/productAds",
+        {"productAds": [product_ad]},
+        content_type="application/vnd.spproductad.v3+json",
+        accept="application/vnd.spproductad.v3+json",
+    )
+    outcome = batch_outcome(response, "productAds", 1)
+    if not outcome["success"]:
+        raise RuntimeError(f"Product ad creation was not acknowledged by Amazon: {outcome}")
+    return outcome
+
+
+def _set_campaign_state_verified(client: AmazonAdsClient, campaign_id: str, state: str) -> Dict[str, Any]:
+    response = client.put(
+        "/sp/campaigns",
+        {"campaigns": [{"campaignId": str(campaign_id), "state": state}]},
+        content_type="application/vnd.spcampaign.v3+json",
+        accept="application/vnd.spcampaign.v3+json",
+    )
+    outcome = batch_outcome(response, "campaigns", 1)
+    if not outcome["success"]:
+        raise RuntimeError(f"Campaign state update was not acknowledged by Amazon: {outcome}")
+    return outcome
 
 
 def _normalize_keyword(keyword: str) -> str:
@@ -271,11 +291,17 @@ def _apply_launch_seed_negatives(client: AmazonAdsClient, campaign_ids: List[str
         rows = _seed_negative_rows(campaign_id)
         if not rows:
             continue
-        client.create_negative_keywords(rows)
+        response = client.create_negative_keywords(rows)
+        outcome = batch_outcome(response, "campaignNegativeKeywords", len(rows))
+        if not outcome["success"]:
+            raise RuntimeError(
+                f"Seed negative creation was not fully acknowledged for campaign {campaign_id}: {outcome}"
+            )
         applied.append({
             "campaign_id": campaign_id,
-            "count": len(rows),
+            "count": outcome["accepted"],
             "terms_sample": [row["keywordText"] for row in rows[:10]],
+            "amazon_result": outcome,
         })
     return {
         "campaigns_seeded": len(applied),
@@ -423,8 +449,9 @@ def api_create_recommended_campaigns(
 
         # Protect discovery bids more aggressively. Exact gets the higher-quality budget.
         _, _, protected_bid = choose_budget_protected_bid({}, base_bid)
-        discovery_bid = round(max(0.10, protected_bid * 0.70), 2)
-        exact_bid = round(max(0.10, protected_bid * 1.15), 2)
+        discovery_bid = round(max(0.10, min(protected_bid, protected_bid * 0.70)), 2)
+        # protected_bid is already the safety ceiling. Never multiply above it.
+        exact_bid = round(max(0.10, protected_bid), 2)
 
         raw_keywords = generate_keywords_for_product(product_row)
         exact_keywords = _select_exact_keywords(raw_keywords, max_exact_keywords)
@@ -471,6 +498,11 @@ def api_create_recommended_campaigns(
 
         # Seed both campaigns with obvious wrong-intent negatives from day one.
         launch_negatives = _apply_launch_seed_negatives(client, [discovery_campaign_id, exact_campaign_id])
+
+        # Campaigns are created PAUSED so no spend can begin until every launch
+        # component has been acknowledged by Amazon.
+        _set_campaign_state_verified(client, discovery_campaign_id, "ENABLED")
+        _set_campaign_state_verified(client, exact_campaign_id, "ENABLED")
 
         return JSONResponse({
             "success": True,
