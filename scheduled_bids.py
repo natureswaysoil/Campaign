@@ -1,5 +1,6 @@
 """Persist performance reports across Cloud Run instances before dayparting."""
 import time
+import json
 from datetime import timedelta
 from fastapi.responses import JSONResponse
 from automation_store import GCSState, StateBusy
@@ -42,6 +43,7 @@ def retune_tick(payload, retune):
                     body['startDate'] = (today - timedelta(days=14)).isoformat()
                     body['endDate'] = (today - timedelta(days=1)).isoformat()
                     state['report_id'] = client.request_report(body)
+                    state['requested_at'] = time.time()
                     store.save(state)
                     return JSONResponse({'success': True, 'status': 'metrics_requested'}, status_code=202)
                 report = client.get('/reporting/reports/' + state['report_id'], accept='application/json')
@@ -61,7 +63,11 @@ def retune_tick(payload, retune):
                 store.save(state)
             core._dash_summary_cache.update(summary=state['summary'], per_campaign=state['per_campaign'],
                                              ts=state['ts'], refreshing=False)
-            return retune(payload)
+            response = retune(payload)
+            state['last_result'] = json.loads(response.body)
+            state['last_run_at'] = time.time()
+            store.save(state)
+            return response
     except StateBusy as exc:
         return JSONResponse({'success': False, 'message': str(exc)}, status_code=409)
     except Exception as exc:
