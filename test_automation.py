@@ -327,3 +327,56 @@ def test_extended_dashboard_uses_selected_launch_settings():
     assert "byId('lMaxExact')" in patch_js
     assert 'discovery_budget_pct: 0.30' not in patch_js
     assert 'max_exact_keywords: 40' not in patch_js
+
+
+
+def test_recovery_recreates_missing_product_ad():
+    amazon = MagicMock()
+    amazon.list_product_ads.return_value = []
+    amazon.post.return_value = {
+        'productAds': {'success': [{'productAd': {'adId': 'pa1'}}]}
+    }
+    created = launch_server._ensure_product_ad(
+        amazon, 'c1', 'a1', 'sku1', 'asin1'
+    )
+    assert created is True
+    amazon.post.assert_called_once()
+
+
+def test_recovery_keeps_existing_product_ad_without_duplicate_write():
+    amazon = MagicMock()
+    amazon.list_product_ads.return_value = [{
+        'adGroupId': 'a1',
+        'sku': 'sku1',
+        'asin': 'asin1',
+        'state': 'ENABLED',
+    }]
+    created = launch_server._ensure_product_ad(
+        amazon, 'c1', 'a1', 'sku1', 'asin1'
+    )
+    assert created is False
+    amazon.post.assert_not_called()
+
+
+def test_seed_negative_retry_skips_terms_already_present():
+    amazon = MagicMock()
+    seeded = launch_server._seed_negative_rows('c1')
+    assert seeded
+    amazon.list_campaign_negative_keywords.return_value = [
+        {'keywordText': row['keywordText'], 'state': 'ENABLED'} for row in seeded
+    ]
+    result = launch_server._apply_launch_seed_negatives(amazon, ['c1'])
+    assert result['negative_rows_created'] == 0
+    amazon.create_negative_keywords.assert_not_called()
+
+
+def test_product_ad_and_negative_list_helpers_use_campaign_filters():
+    amazon = AmazonAdsClient.__new__(AmazonAdsClient)
+    amazon.post = MagicMock(side_effect=[
+        {'productAds': []},
+        {'campaignNegativeKeywords': []},
+    ])
+    assert amazon.list_product_ads('c1') == []
+    assert amazon.post.call_args_list[0].args[1]['campaignIdFilter'] == {'include': ['c1']}
+    assert amazon.list_campaign_negative_keywords('c2') == []
+    assert amazon.post.call_args_list[1].args[1]['campaignIdFilter'] == {'include': ['c2']}
