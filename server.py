@@ -253,6 +253,12 @@ def _select_exact_keywords(keywords: List[str], max_keywords: int) -> List[str]:
     return selected
 
 
+def _protected_launch_bids(protected_bid: float) -> Tuple[float, float]:
+    discovery_bid = round(max(0.10, min(protected_bid, protected_bid * 0.70)), 2)
+    exact_bid = round(max(0.10, protected_bid), 2)
+    return discovery_bid, exact_bid
+
+
 def _exact_keyword_rows(keywords: List[str], campaign_id: str, ad_group_id: str, bid: float) -> List[Dict[str, Any]]:
     return [{
         "campaignId": str(campaign_id),
@@ -449,9 +455,8 @@ def api_create_recommended_campaigns(
 
         # Protect discovery bids more aggressively. Exact gets the higher-quality budget.
         _, _, protected_bid = choose_budget_protected_bid({}, base_bid)
-        discovery_bid = round(max(0.10, min(protected_bid, protected_bid * 0.70)), 2)
         # protected_bid is already the safety ceiling. Never multiply above it.
-        exact_bid = round(max(0.10, protected_bid), 2)
+        discovery_bid, exact_bid = _protected_launch_bids(protected_bid)
 
         raw_keywords = generate_keywords_for_product(product_row)
         exact_keywords = _select_exact_keywords(raw_keywords, max_exact_keywords)
