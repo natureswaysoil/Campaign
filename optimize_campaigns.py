@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import requests
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from safety import live_requested, validate_flags
+from amazon_results import create_keywords_verified
 from fastapi.responses import JSONResponse
 
 try:
@@ -395,13 +396,34 @@ class AmazonAdsClient:
     def get(self, endpoint: str, content_type: Optional[str] = None, accept: Optional[str] = None) -> Dict[str, Any]:
         return self.request("GET", endpoint, None, content_type, accept)
 
+    def list_all(self, endpoint: str, key: str, filters=None):
+        payload = {"maxResults": 100, **(filters or {})}
+        rows, seen = [], set()
+        while True:
+            data = self.post(endpoint, payload)
+            if not isinstance(data, dict) or not isinstance(data.get(key), list):
+                raise RuntimeError(f"Invalid Amazon list response: {key}")
+            rows.extend(data[key])
+            token = data.get("nextToken")
+            if not token:
+                return rows
+            if token in seen:
+                raise RuntimeError("Amazon pagination token repeated")
+            seen.add(token)
+            payload["nextToken"] = token
+
     def list_campaigns(self) -> List[Dict[str, Any]]:
-        data = self.post("/sp/campaigns/list", {"maxResults": 100}, content_type=SP_CONTENT_TYPES["/sp/campaigns/list"], accept=SP_CONTENT_TYPES["/sp/campaigns/list"])
-        return data.get("campaigns", []) if isinstance(data, dict) else []
+        return self.list_all("/sp/campaigns/list", "campaigns")
 
     def list_keywords(self, campaign_id: str) -> List[Dict[str, Any]]:
-        data = self.post("/sp/keywords/list", {"maxResults": 100, "filters": {"campaignIdFilter": {"include": [str(campaign_id)]}}}, content_type=SP_CONTENT_TYPES["/sp/keywords/list"], accept=SP_CONTENT_TYPES["/sp/keywords/list"])
-        return data.get("keywords", []) if isinstance(data, dict) else []
+        return self.list_all("/sp/keywords/list", "keywords",
+                             {"campaignIdFilter": {"include": [str(campaign_id)]}})
+
+    def list_ad_groups(self, campaign_id=None):
+        filters = {"stateFilter": {"include": ["ENABLED"]}}
+        if campaign_id is not None:
+            filters["campaignIdFilter"] = {"include": [str(campaign_id)]}
+        return self.list_all("/sp/adGroups/list", "adGroups", filters)
 
     def create_keywords(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         return self.post("/sp/keywords", {"keywords": rows}, content_type=SP_CONTENT_TYPES["/sp/keywords"], accept=SP_CONTENT_TYPES["/sp/keywords"])
@@ -611,7 +633,9 @@ def _apply_winner_keywords(client: AmazonAdsClient, classified: Dict[str, Any], 
         rows = keyword_rows(terms, data["campaign_id"], ad_group_id, winner_bid)
         if not rows:
             continue
-        client.create_keywords(rows)
+        outcome = create_keywords_verified(client, rows)
+        if not outcome["success"]:
+            raise RuntimeError(f"Keyword insertion incomplete: {outcome}")
         winners_applied.append({
             "ad_group_id": ad_group_id,
             "campaign_id": data["campaign_id"],

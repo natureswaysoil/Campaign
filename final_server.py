@@ -4,6 +4,7 @@ Imports the extended server and adds the missing campaign pause/resume endpoint
 used by the dashboard Pause and Resume buttons.
 """
 from safety import live_requested
+from amazon_results import create_keywords_verified
 from typing import Any, Dict, Optional
 
 from fastapi import Body, Header
@@ -70,6 +71,13 @@ def api_harvest_all_discovery(
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=504)
 
+    return harvest_report_rows(payload, client, rows, report_id, start_date, end_date)
+
+
+def harvest_report_rows(payload, client, rows, report_id, start_date, end_date):
+    apply_live = live_requested(payload)
+    max_terms = max(1, min(100, int(payload.get("max_terms_per_product", 10))))
+    max_products = max(1, min(100, int(payload.get("max_products", 100))))
     results = []
     seen = set()
     for raw_product in load_products():
@@ -102,6 +110,7 @@ def api_harvest_all_discovery(
                     extended_server.base._normalize_keyword(keyword.get("keywordText"))
                     for keyword in client.list_keywords(exact_id)
                     if str(keyword.get("matchType") or "").upper() == "EXACT"
+                    and str(keyword.get("state", "")).upper() != "ARCHIVED"
                 }
                 selected = []
                 for item in winners:
@@ -115,13 +124,13 @@ def api_harvest_all_discovery(
                 _, _, protected_bid = extended_server.choose_budget_protected_bid({}, fallback_bid)
                 exact_bid = round(max(0.10, protected_bid * 1.15), 2)
                 keyword_rows = extended_server.base._exact_keyword_rows(selected, exact_id, exact_ad_group_id, exact_bid)
-                created = 0
-                if apply_live and keyword_rows:
-                    client.create_keywords(keyword_rows)
-                    created = len(keyword_rows)
+                outcome = create_keywords_verified(client, keyword_rows) if apply_live else {
+                    "accepted": 0, "failed": 0, "success": True, "errors": []}
+                created = outcome["accepted"]
                 results.append({
                     "product_id": key,
-                    "success": True,
+                    "success": outcome["success"],
+                    "keyword_result": outcome,
                     "discovery_campaign_id": discovery_id,
                     "exact_campaign_id": exact_id,
                     "rows_analyzed": sum(1 for row in rows if str(row.get("campaignId") or "") == discovery_id),
@@ -132,8 +141,10 @@ def api_harvest_all_discovery(
                 })
         if len(results) >= max_products:
             break
+    failures = sum(item.get("keyword_result", {}).get("failed", 0) for item in results)
     return JSONResponse({
-        "success": True,
+        "success": failures == 0,
+        "keyword_errors": failures,
         "apply_live": apply_live,
         "report_id": report_id,
         "date_range": {"start": start_date, "end": end_date},
@@ -143,7 +154,7 @@ def api_harvest_all_discovery(
         "terms_selected": sum(int(item.get("terms_selected") or 0) for item in results),
         "keywords_created": sum(int(item.get("keywords_created") or 0) for item in results),
         "results": results,
-    })
+    }, status_code=502 if failures else 200)
 @app.post("/api/refresh-dashboard-cache")
 def api_refresh_dashboard_cache(
     authorization: Optional[str] = Header(default=None),
@@ -234,3 +245,22 @@ def api_run_ppc_agent(
         "launch_campaign": lambda body: extended_server.api_create_campaign_with_duplicate_protection(body, authorization, x_daily_optimizer_token),
     }
     return JSONResponse(AmazonPpcAgent(tools).run(payload))
+
+
+@app.post("/api/automation/harvest-tick")
+def api_automation_harvest_tick(payload: Dict[str, Any] = Body(default={}),
+        authorization: Optional[str] = Header(default=None),
+        x_daily_optimizer_token: Optional[str] = Header(default=None)):
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    from scheduled_harvest import harvest_tick
+    return harvest_tick(payload, harvest_report_rows)
+
+
+@app.post("/api/automation/retune-tick")
+def api_automation_retune_tick(payload: Dict[str, Any] = Body(default={}),
+        authorization: Optional[str] = Header(default=None),
+        x_daily_optimizer_token: Optional[str] = Header(default=None)):
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    from scheduled_bids import retune_tick
+    return retune_tick(payload, lambda body: server_with_bids.api_retune_existing_bids(
+        body, authorization, x_daily_optimizer_token))

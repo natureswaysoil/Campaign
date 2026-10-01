@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, Header, HTTPException
 from safety import live_requested
+from amazon_results import create_keywords_verified
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import optimize_campaigns as optimizer_core
@@ -460,8 +461,13 @@ def api_create_recommended_campaigns(
         exact_rows = _exact_keyword_rows(exact_keywords, exact_campaign_id, exact_ad_group_id, exact_bid)
         exact_keywords_created = 0
         if exact_rows:
-            client.create_keywords(exact_rows)
-            exact_keywords_created = len(exact_rows)
+            outcome = create_keywords_verified(client, exact_rows)
+            if not outcome["success"]:
+                return JSONResponse({"success": False, "error": True,
+                    "message": "Campaigns created but keyword insertion was incomplete",
+                    "discovery_campaign_id": discovery_campaign_id,
+                    "exact_campaign_id": exact_campaign_id, "keyword_result": outcome}, status_code=502)
+            exact_keywords_created = outcome["accepted"]
 
         # Seed both campaigns with obvious wrong-intent negatives from day one.
         launch_negatives = _apply_launch_seed_negatives(client, [discovery_campaign_id, exact_campaign_id])
