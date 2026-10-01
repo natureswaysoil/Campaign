@@ -19,7 +19,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import Body, Header
+from fastapi import Body, Header, HTTPException
+from safety import live_requested
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import optimize_campaigns as optimizer_core
@@ -154,17 +155,11 @@ def _extract_id(resp: Dict[str, Any], batch_key: str, item_key: str, id_key: str
 
 
 def _optional_dashboard_auth(authorization: Optional[str], x_daily_optimizer_token: Optional[str]) -> Optional[JSONResponse]:
-    """Match the old launch route: enforce token only when a token is configured."""
-    token = os.getenv("DAILY_OPTIMIZER_TOKEN", "")
-    if not token:
-        return None
-    supplied = None
-    if x_daily_optimizer_token:
-        supplied = x_daily_optimizer_token.strip()
-    elif authorization and authorization.startswith("Bearer "):
-        supplied = authorization.replace("Bearer ", "", 1).strip()
-    if not supplied or not hmac.compare_digest(supplied, token):
-        return JSONResponse({"error": True, "message": "Invalid token"}, status_code=403)
+    """Use the shared fail-closed authentication policy."""
+    try:
+        verify_internal_token(authorization, x_daily_optimizer_token)
+    except HTTPException as exc:
+        return JSONResponse({"error": True, "message": exc.detail}, status_code=exc.status_code)
     return None
 
 
@@ -435,6 +430,10 @@ def api_create_recommended_campaigns(
         client = AmazonAdsClient()
         start_date = datetime.date.today().isoformat()
         safe_title = _sanitize_name(str(product.get("title") or "Product"))[:70]
+
+        if not live_requested(payload):
+            return JSONResponse({"success": True, "dry_run": True, "apply_live": False,
+                                 "product": product["title"], "total_daily_budget": total_budget})
 
         # 1) Amazon-recommended discovery: automatic targeting campaign.
         discovery_campaign_id = _create_campaign(

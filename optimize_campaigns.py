@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Request
+from safety import live_requested, validate_flags
 from fastapi.responses import JSONResponse
 
 try:
@@ -72,12 +73,31 @@ def _env(*names: str, default: str = "") -> str:
 def verify_internal_token(authorization: Optional[str] = None, x_daily_optimizer_token: Optional[str] = None) -> None:
     expected = _env("DAILY_OPTIMIZER_TOKEN")
     if not expected:
-        return
+        raise HTTPException(status_code=503, detail="Optimizer authentication is not configured")
     supplied = (x_daily_optimizer_token or "").strip()
     if not supplied and authorization and authorization.startswith("Bearer "):
         supplied = authorization.replace("Bearer ", "", 1).strip()
     if not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=403, detail="Invalid or missing optimizer token")
+
+@app.middleware("http")
+async def protect_api(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        try:
+            verify_internal_token(request.headers.get("authorization"), request.headers.get("x-daily-optimizer-token"))
+            if request.method == "POST":
+                body = await request.body()
+                if body:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        raise HTTPException(status_code=422, detail="Expected a JSON object")
+                    validate_flags(payload)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"detail": "Invalid JSON"}, status_code=422)
+    return await call_next(request)
+
 
 def normalize_text(text: Any) -> str:
     text = str(text or "").lower()
@@ -543,6 +563,9 @@ def _build_search_term_report_body(lookback_days: int) -> Dict[str, Any]:
 
 
 def _request_pending_optimization_report(payload: Dict[str, Any], *, apply_negatives: bool, apply_winners: bool) -> Dict[str, Any]:
+    apply_live = live_requested(payload)
+    apply_negatives = apply_live and apply_negatives
+    apply_winners = apply_live and apply_winners
     lookback_days = int(payload.get("lookback_days", 14))
     winner_bid = float(payload.get("winner_bid", 0.90))
     client = AmazonAdsClient()
@@ -552,6 +575,7 @@ def _request_pending_optimization_report(payload: Dict[str, Any], *, apply_negat
         "report_id": report_id,
         "ts": time.time(),
         "settings": {
+            "apply_live": apply_live,
             "apply_negatives": apply_negatives,
             "apply_winners": apply_winners,
             "winner_bid": winner_bid,
@@ -564,7 +588,8 @@ def _request_pending_optimization_report(payload: Dict[str, Any], *, apply_negat
     return {
         "success": True,
         "report_id": report_id,
-        "message": "Report requested. Apply it after Amazon finishes generating it, usually 30-60 minutes.",
+        "dry_run": not apply_live,
+        "message": "Report requested. Review or apply it after Amazon finishes generating it.",
         "date_range": {"start": report_body["startDate"], "end": report_body["endDate"]},
         "settings": entry["settings"],
     }
@@ -835,8 +860,9 @@ def api_apply_optimization(payload: Dict[str, Any] = Body(default={}), authoriza
         rows = parse_report_json_bytes(client.download_binary(str(download_url)))
         classified = classify_terms(rows)
         settings = pending.get("settings") or {}
-        apply_negatives = bool(settings.get("apply_negatives", True))
-        apply_winners = bool(settings.get("apply_winners", True))
+        apply_live = live_requested(payload) and settings.get("apply_live") is True
+        apply_negatives = apply_live and settings.get("apply_negatives") is True
+        apply_winners = apply_live and settings.get("apply_winners") is True
         winner_bid = float(settings.get("winner_bid", payload.get("winner_bid", 0.90)))
 
         negatives_applied = apply_negatives_step(client, classified) if apply_negatives else []
@@ -852,11 +878,13 @@ def api_apply_optimization(payload: Dict[str, Any] = Body(default={}), authoriza
             "winners_applied": len(winners_applied),
             "negatives_applied": len(negatives_applied),
         }
-        _save_optimizer_history(run_entry)
-        _save_pending_report({"report_id": None, "settings": {}, "ts": 0.0})
+        if apply_live:
+            _save_optimizer_history(run_entry)
+            _save_pending_report({"report_id": None, "settings": {}, "ts": 0.0})
 
         return JSONResponse({
             "success": True,
+            "dry_run": not apply_live,
             **run_entry,
             "negatives_applied_detail": negatives_applied,
             "winners_applied_detail": winners_applied,

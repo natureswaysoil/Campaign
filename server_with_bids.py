@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from safety import live_requested
 from typing import Any, Dict, Optional
 
 from fastapi import Body, Header
@@ -41,12 +43,15 @@ def _acos_protected_bid(
     daypart_bid: float,
     suggested_bid: float,
     metrics: Dict[str, Any],
+    current_bid: Optional[float] = None,
 ) -> tuple[float, bool, Optional[str]]:
     """Cap inefficient campaigns below Amazon's suggestion; never raise them."""
     spend = float(metrics.get("spend") or 0.0)
     sales = float(metrics.get("sales") or 0.0)
     if spend < ACOS_MIN_SPEND:
         return daypart_bid, False, None
+    if current_bid is not None and (sales <= 0 or spend / sales > ACOS_CEILING):
+        daypart_bid = min(daypart_bid, current_bid)
     if sales <= 0:
         return min(daypart_bid, _clamp_bid(suggested_bid * ACOS_ZERO_SALES_MULTIPLIER)), True, "zero_sales"
     acos = spend / sales
@@ -112,7 +117,7 @@ def api_retune_existing_bids(
     scheduler runs do not keep compounding bids lower and lower.
     """
     verify_internal_token(authorization, x_daily_optimizer_token)
-    apply_live = bool(payload.get("apply_live", True))
+    apply_live = live_requested(payload)
     reset_baseline = bool(payload.get("reset_baseline", False))
     max_results = int(payload.get("max_results", 100))
     max_results = max(1, min(max_results, 100))
@@ -133,10 +138,12 @@ def api_retune_existing_bids(
 
         _, campaign_metrics = server.optimizer_core._get_cached_dashboard_summary()
         campaign_metrics = campaign_metrics or {}
-        if apply_live and not campaign_metrics:
+        cache = server.optimizer_core._dash_summary_cache
+        metrics_fresh = (0 <= time.time() - cache.get("ts", 0) < server.optimizer_core._DASH_SUMMARY_TTL)
+        if apply_live and (not campaign_metrics or not metrics_fresh):
             return JSONResponse({
                 "error": True,
-                "message": "Live retuning blocked: ACOS campaign metrics cache is unavailable.",
+                "message": "Live retuning blocked: ACOS campaign metrics cache is unavailable or stale.",
                 "retryable": True,
             }, status_code=503)
 
@@ -174,8 +181,11 @@ def api_retune_existing_bids(
             campaign_id = str(ad_group.get("campaignId") or "")
             metrics = campaign_metrics.get(campaign_id, {})
             new_bid, circuit_breaker_active, adjustment_reason = _acos_protected_bid(
-                daypart_bid, suggested_bid, metrics
+                daypart_bid, suggested_bid, metrics, current_bid=current_bid
             ) if suggested_bid else (daypart_bid, False, None)
+            if not metrics or not metrics_fresh:
+                new_bid = min(new_bid, current_bid)
+                adjustment_reason = "missing_or_stale_metrics_no_increase"
             spend = float(metrics.get("spend") or 0.0)
             sales = float(metrics.get("sales") or 0.0)
             acos = (spend / sales) if sales > 0 else None
@@ -202,7 +212,8 @@ def api_retune_existing_bids(
                     update_row["campaignId"] = campaign_id
                 updates.append(update_row)
 
-        _save_baseline_bids(baseline)
+        if apply_live:
+            _save_baseline_bids(baseline)
 
         api_response: Dict[str, Any] = {}
         if apply_live and updates:

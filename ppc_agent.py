@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from safety import live_requested
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from fastapi.responses import JSONResponse
@@ -23,7 +24,7 @@ class AmazonPpcAgent:
 
     def run(self, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         config = dict(request or {})
-        apply_live = bool(config.get("apply_live", False))
+        apply_live = live_requested(config)
         requested: Iterable[str] = config.get("actions") or (
             "refresh_dashboard", "audit_acos", "retune_bids"
         )

@@ -10,7 +10,8 @@ import hmac
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import Body, Header
+from fastapi import Body, Header, HTTPException
+from safety import live_requested
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import server as base
@@ -174,6 +175,7 @@ DASHBOARD_PATCH_JS = r"""
     if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Launching AUTO + EXACT...'; }
     apiJson('/api/create-campaign-from-product', {
       product_id: pid,
+      apply_live: true,
       daily_budget: Number(budget.toFixed(2)),
       starting_bid: Number(bid.toFixed(2)),
       discovery_budget_pct: 0.30,
@@ -257,16 +259,10 @@ def dashboard_with_extended_controls():
 
 
 def _optional_dashboard_auth(authorization: Optional[str], x_daily_optimizer_token: Optional[str]) -> Optional[JSONResponse]:
-    token = os.getenv("DAILY_OPTIMIZER_TOKEN", "")
-    if not token:
-        return None
-    supplied = None
-    if x_daily_optimizer_token:
-        supplied = x_daily_optimizer_token.strip()
-    elif authorization and authorization.startswith("Bearer "):
-        supplied = authorization.replace("Bearer ", "", 1).strip()
-    if not supplied or not hmac.compare_digest(supplied, token):
-        return JSONResponse({"error": True, "message": "Invalid token"}, status_code=403)
+    try:
+        verify_internal_token(authorization, x_daily_optimizer_token)
+    except HTTPException as exc:
+        return JSONResponse({"error": True, "message": exc.detail}, status_code=exc.status_code)
     return None
 
 
@@ -360,7 +356,7 @@ def api_create_campaign_with_duplicate_protection(
         safe_title = _safe_title(product)
         existing = _find_existing_launch_campaigns(client, safe_title)
         force_relaunch = bool(payload.get("force_relaunch", False))
-        apply_live = bool(payload.get("apply_live", True))
+        apply_live = live_requested(payload)
         if existing and not force_relaunch:
             return JSONResponse({
                 "success": True,
@@ -412,7 +408,7 @@ def api_harvest_discovery_winners(
 
         lookback_days = max(1, min(60, int(payload.get("lookback_days", 14))))
         max_terms = max(1, min(100, int(payload.get("max_terms", 25))))
-        apply_live = bool(payload.get("apply_live", True))
+        apply_live = live_requested(payload)
         fallback_bid = float(payload.get("winner_bid", product.get("suggested_bid") or DEFAULT_FALLBACK_BID))
         _, _, protected_bid = choose_budget_protected_bid({}, fallback_bid)
         exact_bid = round(max(0.10, protected_bid * 1.15), 2)

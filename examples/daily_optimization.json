@@ -1,4 +1,5 @@
 {
+  "apply_live": true,
   "apply_negatives_live": true,
   "apply_winners_live": true,
   "winner_bid": 0.9

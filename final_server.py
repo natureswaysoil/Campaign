@@ -3,6 +3,7 @@
 Imports the extended server and adds the missing campaign pause/resume endpoint
 used by the dashboard Pause and Resume buttons.
 """
+from safety import live_requested
 from typing import Any, Dict, Optional
 
 from fastapi import Body, Header
@@ -32,6 +33,9 @@ def api_update_campaign_state(
         if state not in {"ENABLED", "PAUSED"}:
             return JSONResponse({"error": True, "message": "state must be ENABLED or PAUSED"}, status_code=400)
 
+        if not live_requested(payload):
+            return JSONResponse({"success": True, "dry_run": True,
+                                 "campaign_id": campaign_id, "state": state})
         client = AmazonAdsClient()
         result = client.put(
             "/sp/campaigns",
@@ -56,7 +60,7 @@ def api_harvest_all_discovery(
 ) -> JSONResponse:
     """Harvest all product campaign pairs from one shared Amazon search-term report."""
     verify_internal_token(authorization, x_daily_optimizer_token)
-    apply_live = bool(payload.get("apply_live", False))
+    apply_live = live_requested(payload)
     lookback_days = max(1, min(60, int(payload.get("lookback_days", 14))))
     max_terms = max(1, min(100, int(payload.get("max_terms_per_product", 10))))
     max_products = max(1, min(100, int(payload.get("max_products", 25))))
@@ -167,7 +171,7 @@ def api_acos_circuit_breaker_v2(
 ) -> JSONResponse:
     """Audit 14-day campaign ACOS; live mutation stays disabled in this stack."""
     verify_internal_token(authorization, x_daily_optimizer_token)
-    apply_live = bool(payload.get("apply_live", False))
+    apply_live = live_requested(payload)
     if apply_live:
         return JSONResponse({
             "error": True,

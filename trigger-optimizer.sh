@@ -22,7 +22,7 @@ curl -X POST "${SERVICE_URL}/api/run-daily-optimization" \
   -H "Authorization: Bearer ${OIDC_TOKEN}" \
   -H "X-Daily-Optimizer-Token: ${DAILY_OPTIMIZER_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"apply_campaign_pauses_live":true,"apply_negatives_live":true,"apply_winners_live":true,"pause_no_sales_campaigns":true,"min_clicks_for_no_sales_pause":10,"lookback_days":14,"pause_acos_threshold":0.40,"prime_high_bid_multiplier":1.25,"off_prime_bid_multiplier":0.35}'
+  -d '{"apply_live":true,"apply_campaign_pauses_live":true,"apply_negatives_live":true,"apply_winners_live":true,"pause_no_sales_campaigns":true,"min_clicks_for_no_sales_pause":10,"lookback_days":14,"pause_acos_threshold":0.40,"prime_high_bid_multiplier":1.25,"off_prime_bid_multiplier":0.35}'
 
 echo ""
 echo "✓ Triggered! Check logs in ~5 minutes:"
