@@ -213,6 +213,28 @@ def _create_product_ad(client: AmazonAdsClient, campaign_id: str, ad_group_id: s
     return outcome
 
 
+def _ensure_product_ad(
+    client: AmazonAdsClient,
+    campaign_id: str,
+    ad_group_id: str,
+    sku: str,
+    asin: str,
+) -> bool:
+    existing_product_ads = [
+        ad for ad in client.list_product_ads(campaign_id)
+        if str(ad.get("state") or "").upper() != "ARCHIVED"
+        and str(ad.get("adGroupId") or "") == str(ad_group_id)
+        and (
+            (sku and str(ad.get("sku") or "") == sku)
+            or (asin and str(ad.get("asin") or "") == asin)
+        )
+    ]
+    if existing_product_ads:
+        return False
+    _create_product_ad(client, campaign_id, ad_group_id, sku, asin)
+    return True
+
+
 def _set_campaign_state_verified(client: AmazonAdsClient, campaign_id: str, state: str) -> Dict[str, Any]:
     response = client.put(
         "/sp/campaigns",
@@ -497,17 +519,9 @@ def api_create_recommended_campaigns(
                 discovery_ad_group_id = _create_ad_group(
                     client, discovery_campaign_id, "Auto Discovery", discovery_bid
                 )
-            existing_product_ads = [
-                ad for ad in client.list_product_ads(discovery_campaign_id)
-                if str(ad.get("state") or "").upper() != "ARCHIVED"
-                and str(ad.get("adGroupId") or "") == discovery_ad_group_id
-                and (
-                    (sku and str(ad.get("sku") or "") == sku)
-                    or (asin and str(ad.get("asin") or "") == asin)
-                )
-            ]
-            if not existing_product_ads:
-                _create_product_ad(client, discovery_campaign_id, discovery_ad_group_id, sku, asin)
+            _ensure_product_ad(
+                client, discovery_campaign_id, discovery_ad_group_id, sku, asin
+            )
         else:
             discovery_campaign_id = _create_campaign(
                 client,
@@ -529,17 +543,9 @@ def api_create_recommended_campaigns(
             exact_ad_group_id = str(existing_groups[0].get("adGroupId") or "") if existing_groups else ""
             if not exact_ad_group_id:
                 exact_ad_group_id = _create_ad_group(client, exact_campaign_id, "Exact Winners", exact_bid)
-            existing_product_ads = [
-                ad for ad in client.list_product_ads(exact_campaign_id)
-                if str(ad.get("state") or "").upper() != "ARCHIVED"
-                and str(ad.get("adGroupId") or "") == exact_ad_group_id
-                and (
-                    (sku and str(ad.get("sku") or "") == sku)
-                    or (asin and str(ad.get("asin") or "") == asin)
-                )
-            ]
-            if not existing_product_ads:
-                _create_product_ad(client, exact_campaign_id, exact_ad_group_id, sku, asin)
+            _ensure_product_ad(
+                client, exact_campaign_id, exact_ad_group_id, sku, asin
+            )
         else:
             exact_campaign_id = _create_campaign(
                 client,
