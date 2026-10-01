@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, Header, HTTPException
 from safety import live_requested
+from amazon_results import create_keywords_verified
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import server as base
@@ -283,7 +284,7 @@ def _find_existing_launch_campaigns(client: AmazonAdsClient, safe_title: str) ->
     prefix = f"{safe_title} | "
     for campaign in client.list_campaigns():
         name = str(campaign.get("name") or "")
-        if not name.startswith(prefix):
+        if str(campaign.get("state", "")).upper() != "ENABLED" or not name.startswith(prefix):
             continue
         if "| AUTO DISCOVERY |" in name and "AUTO_DISCOVERY" not in found:
             found["AUTO_DISCOVERY"] = campaign
@@ -293,19 +294,7 @@ def _find_existing_launch_campaigns(client: AmazonAdsClient, safe_title: str) ->
 
 
 def _list_ad_groups(client: AmazonAdsClient, campaign_id: str) -> List[Dict[str, Any]]:
-    data = client.post(
-        "/sp/adGroups/list",
-        {
-            "maxResults": 100,
-            "filters": {
-                "campaignIdFilter": {"include": [str(campaign_id)]},
-                "stateFilter": {"include": ["ENABLED"]},
-            },
-        },
-        content_type="application/vnd.spadgroup.v3+json",
-        accept="application/vnd.spadgroup.v3+json",
-    )
-    return data.get("adGroups", []) if isinstance(data, dict) else []
+    return client.list_ad_groups(campaign_id)
 
 
 def _first_ad_group_id(client: AmazonAdsClient, campaign_id: str) -> Optional[str]:
@@ -443,6 +432,7 @@ def api_harvest_discovery_winners(
             base._normalize_keyword(keyword.get("keywordText"))
             for keyword in client.list_keywords(exact_campaign_id)
             if str(keyword.get("matchType") or "").upper() == "EXACT"
+            and str(keyword.get("state", "")).upper() != "ARCHIVED"
         }
         selected_terms: List[str] = []
         skipped_existing: List[str] = []
@@ -459,13 +449,13 @@ def api_harvest_discovery_winners(
                 break
 
         keyword_rows = base._exact_keyword_rows(selected_terms, exact_campaign_id, exact_ad_group_id, exact_bid)
-        created = 0
-        if apply_live and keyword_rows:
-            client.create_keywords(keyword_rows)
-            created = len(keyword_rows)
+        outcome = create_keywords_verified(client, keyword_rows) if apply_live else {
+            "accepted": 0, "failed": 0, "success": True, "errors": []}
+        created = outcome["accepted"]
 
         return JSONResponse({
-            "success": True,
+            "success": outcome["success"],
+            "keyword_result": outcome,
             "apply_live": apply_live,
             "product": product.get("title"),
             "report_id": report_id,
@@ -482,6 +472,6 @@ def api_harvest_discovery_winners(
             "terms_harvested": selected_terms,
             "skipped_existing_sample": skipped_existing[:25],
             "summary": summarize_classification(classified),
-        })
+        }, status_code=502 if outcome["failed"] else 200)
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)

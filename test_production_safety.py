@@ -105,7 +105,9 @@ def test_bad_campaign_never_raises_current_bid(metrics):
 @pytest.mark.parametrize('age,has_metrics,live', [(0, True, True), (0, False, True), (3600, True, True), (0, True, False)])
 def test_retune_safety_at_http_boundary(age, has_metrics, live):
     amazon = MagicMock()
-    amazon.post.return_value = {'adGroups': [{'adGroupId': 'a1', 'campaignId': 'c1', 'defaultBid': .20}]}
+    amazon.list_ad_groups.return_value = [{'adGroupId': 'a1', 'campaignId': 'c1', 'defaultBid': .20}]
+    amazon.list_campaigns.return_value = [{'campaignId': 'c1', 'state': 'ENABLED'}]
+    amazon.list_keywords.return_value = []
     amazon.get_ad_group_bid_recommendation.return_value = {'suggested': 2.0}
     amazon.put.return_value = {'adGroups': {'success': [{'adGroupId': 'a1'}]}}
     metrics = {'c1' if has_metrics else 'other': {'spend': 80, 'sales': 40}}

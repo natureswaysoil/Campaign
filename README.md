@@ -214,3 +214,9 @@ The present retune implementation updates ad-group defaults only, not explicit
 keyword/target bids. Protected buyer phrases are excluded from winner harvesting
 by the existing waste rules. These pre-existing functional gaps remain outside
 the safety patch and require follow-up before claiming complete automation.
+
+## Complete scheduled bidding and harvesting
+
+See [AUTOMATION_V2.md](AUTOMATION_V2.md) for the new durable report/apply jobs,
+keyword-level dayparting, verified keyword inserts, activation, and recovery.
+This supersedes the earlier remaining-automation-gaps notes for these paths.

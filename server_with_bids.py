@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from safety import live_requested
+from keyword_dayparting import retune_keywords
+from amazon_results import batch_outcome
 from typing import Any, Dict, Optional
 
 from fastapi import Body, Header
@@ -127,13 +129,10 @@ def api_retune_existing_bids(
         status = budget_protection_status()
         mode = get_budget_protection_mode()
 
-        response = client.post(
-            "/sp/adGroups/list",
-            {"maxResults": max_results, "filters": {"stateFilter": {"include": ["ENABLED"]}}},
-            content_type="application/vnd.spadgroup.v3+json",
-            accept="application/vnd.spadgroup.v3+json",
-        )
-        ad_groups = response.get("adGroups", []) if isinstance(response, dict) else []
+        active_campaigns = {str(c["campaignId"]) for c in client.list_campaigns()
+                            if str(c.get("state", "")).upper() == "ENABLED"}
+        ad_groups = [g for g in client.list_ad_groups()
+                     if str(g.get("campaignId")) in active_campaigns]
         baseline = {} if reset_baseline else _load_baseline_bids()
 
         _, campaign_metrics = server.optimizer_core._get_cached_dashboard_summary()
@@ -215,18 +214,21 @@ def api_retune_existing_bids(
         if apply_live:
             _save_baseline_bids(baseline)
 
+        keyword_result = retune_keywords(client, ad_groups, campaign_metrics if metrics_fresh else {},
+                                        mode, apply_live, _target_bid_from_baseline, _acos_protected_bid)
         api_response: Dict[str, Any] = {}
-        if apply_live and updates:
-            api_response = client.put(
-                "/sp/adGroups",
-                {"adGroups": updates},
-                content_type="application/vnd.spadgroup.v3+json",
-                accept="application/vnd.spadgroup.v3+json",
-            )
-
-        applied_count, update_error_count = _amazon_update_outcome(api_response, len(updates)) if apply_live else (0, 0)
+        applied_count = update_error_count = 0
+        if apply_live:
+            for offset in range(0, len(updates), 100):
+                chunk = updates[offset:offset + 100]
+                api_response = client.put("/sp/adGroups", {"adGroups": chunk})
+                outcome = batch_outcome(api_response, "adGroups", len(chunk))
+                applied_count += outcome["accepted"]
+                update_error_count += outcome["failed"]
+        failed = update_error_count + keyword_result["update_errors"]
         return JSONResponse({
-            "success": True,
+            "success": not failed,
+            "keyword_dayparting": keyword_result,
             "dry_run": not apply_live,
             "mode": mode,
             "budget_protection": status,
@@ -243,6 +245,6 @@ def api_retune_existing_bids(
             "reset_baseline": reset_baseline,
             "preview": preview[:25],
             "amazon_response": api_response,
-        })
+        }, status_code=502 if failed else 200)
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)

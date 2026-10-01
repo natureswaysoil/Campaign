@@ -207,8 +207,18 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
             })
             continue
 
-        # Broad roots and core buyer phrases should not be auto-negated or
-        # auto-promoted. If expensive, flag for bid reduction; otherwise hold.
+        if (
+            term not in BROAD_ROOT_TERMS
+            and orders >= WINNER_MIN_ORDERS
+            and clicks >= WINNER_MIN_CLICKS
+            and sales > 0
+            and (acos is None or acos <= WINNER_MAX_ACOS)
+        ):
+            winners.append({**result, "reason": "winner"})
+            continue
+
+        # Unproven core phrases remain protected from negatives; broad roots
+        # remain excluded from automatic promotion.
         if term in BROAD_ROOT_TERMS or protected_buyer_phrase:
             if cost >= BID_DOWN_MIN_SPEND or (sales > 0 and acos is not None and acos >= BID_DOWN_ACOS):
                 bid_down.append({
@@ -225,14 +235,6 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
                 })
             continue
 
-        if (
-            orders >= WINNER_MIN_ORDERS
-            and clicks >= WINNER_MIN_CLICKS
-            and sales > 0
-            and (acos is None or acos <= WINNER_MAX_ACOS)
-        ):
-            winners.append({**result, "reason": "winner"})
-            continue
 
         # No-order spend leak: negative sooner than the old 20-click rule, but
         # only after protected buyer terms have been removed from auto-negatives.
