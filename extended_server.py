@@ -172,9 +172,12 @@ DASHBOARD_PATCH_JS = r"""
     bar.appendChild(btn);
   }
 
+  var opportunityReturnFocus = null;
   function closeOpportunityQueue(){
     var overlay = byId('opportunityQueueOverlay');
-    if (overlay) overlay.remove();
+    if (overlay) { if (typeof overlay.close === 'function') overlay.close(); overlay.remove(); }
+    if (opportunityReturnFocus && typeof opportunityReturnFocus.focus === 'function') opportunityReturnFocus.focus();
+    opportunityReturnFocus = null;
   }
 
   function opportunityMetric(label, value){
@@ -187,8 +190,10 @@ DASHBOARD_PATCH_JS = r"""
 
   function renderOpportunityQueue(data){
     closeOpportunityQueue();
-    var overlay = document.createElement('div');
+    opportunityReturnFocus = document.activeElement;
+    var overlay = document.createElement('dialog');
     overlay.id = 'opportunityQueueOverlay';
+    overlay.setAttribute('aria-labelledby', 'opportunityQueueTitle');
     overlay.style.position = 'fixed';
     overlay.style.inset = '0';
     overlay.style.background = 'rgba(0,0,0,.62)';
@@ -210,6 +215,7 @@ DASHBOARD_PATCH_JS = r"""
     head.style.justifyContent = 'space-between';
     head.style.alignItems = 'center';
     var title = document.createElement('h2');
+    title.id = 'opportunityQueueTitle';
     title.textContent = 'Amazon Opportunity Approval Queue';
     title.style.margin = '0';
     head.appendChild(title);
@@ -283,7 +289,10 @@ DASHBOARD_PATCH_JS = r"""
     });
 
     overlay.onclick = function(e){ if (e.target === overlay) closeOpportunityQueue(); };
+    overlay.addEventListener('cancel', function(e){ e.preventDefault(); closeOpportunityQueue(); });
     document.body.appendChild(overlay);
+    overlay.showModal();
+    close.focus();
   }
 
   function addOpportunityButton(){
