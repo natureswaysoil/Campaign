@@ -254,7 +254,12 @@ def api_automation_harvest_tick(payload: Dict[str, Any] = Body(default={}),
         x_daily_optimizer_token: Optional[str] = Header(default=None)):
     verify_internal_token(authorization, x_daily_optimizer_token)
     from scheduled_harvest import harvest_tick
-    return harvest_tick(payload, harvest_report_rows)
+    # Reuse the already-provisioned harvest scheduler to drive opportunity
+    # monitoring too. Each workflow has separate durable state, so neither can
+    # duplicate the other's report or launches.
+    harvest_response = harvest_tick(payload, harvest_report_rows)
+    opportunity_monitor.opportunity_tick(payload)
+    return harvest_response
 
 
 @app.post("/api/automation/retune-tick")
