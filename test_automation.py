@@ -539,10 +539,13 @@ def test_scheduler_configuration_includes_opportunity_job():
 
 def test_existing_harvest_scheduler_also_drives_opportunity_monitor():
     harvest_response = JSONResponse({'success': True, 'status': 'requested'}, status_code=202)
+    opportunity_response = JSONResponse({'success': True, 'status': 'requested'}, status_code=202)
+    growth_response = JSONResponse({'success': True, 'status': 'waiting_for_fresh_metrics'}, status_code=202)
     with (
         patch.object(final_server, 'verify_internal_token'),
         patch('scheduled_harvest.harvest_tick', return_value=harvest_response) as harvest,
-        patch.object(final_server.opportunity_monitor, 'opportunity_tick') as opportunity,
+        patch.object(final_server.opportunity_monitor, 'opportunity_tick', return_value=opportunity_response) as opportunity,
+        patch.object(final_server.sales_growth_engine, 'growth_tick', return_value=growth_response) as growth,
     ):
         response = final_server.api_automation_harvest_tick(
             {'apply_live': True}, 'Bearer test', 'test'
@@ -550,6 +553,25 @@ def test_existing_harvest_scheduler_also_drives_opportunity_monitor():
     assert response.status_code == 202
     harvest.assert_called_once()
     opportunity.assert_called_once_with({'apply_live': True})
+    growth.assert_called_once_with({'apply_live': True})
+
+
+def test_harvest_scheduler_surfaces_growth_failure():
+    ok = JSONResponse({'success': True, 'status': 'already_completed'})
+    failed = JSONResponse({'success': False, 'message': 'growth failed'}, status_code=503)
+    with (
+        patch.object(final_server, 'verify_internal_token'),
+        patch('scheduled_harvest.harvest_tick', return_value=ok),
+        patch.object(final_server.opportunity_monitor, 'opportunity_tick', return_value=ok),
+        patch.object(final_server.sales_growth_engine, 'growth_tick', return_value=failed),
+    ):
+        response = final_server.api_automation_harvest_tick(
+            {'apply_live': True}, 'Bearer test', 'test'
+        )
+    assert response.status_code == 503
+    body = json.loads(response.body)
+    assert body['success'] is False
+    assert body['failures'][0]['workflow'] == 'growth'
 
 
 
