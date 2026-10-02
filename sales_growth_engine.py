@@ -46,7 +46,9 @@ def _optional_money(value: Any) -> Optional[float]:
     if value in (None, ""):
         return None
     try:
-        return float(str(value).replace("$", "").replace(",", "").strip())
+        return float(
+            str(value).replace("$", "").replace(",", "").replace("%", "").strip()
+        )
     except Exception:
         return None
 
