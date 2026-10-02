@@ -239,13 +239,6 @@ def launch_opportunity(
     existing = _existing_opportunity_campaign(
         client, item["product_title"], item["target_type"], item["target"]
     )
-    if existing:
-        return {
-            "success": True,
-            "duplicate_prevented": True,
-            "campaign_id": str(existing.get("campaignId") or ""),
-            "campaign_name": existing.get("name"),
-        }
 
     _, _, protected_bid = choose_budget_protected_bid(
         {}, float(item.get("suggested_bid") or DEFAULT_FALLBACK_BID)
@@ -256,31 +249,80 @@ def launch_opportunity(
         item["product_title"], item["target_type"], item["target"]
     )
 
-    campaign_id = launch_server._create_campaign(
-        client, campaign_name, "MANUAL", max(2.0, float(daily_budget)), start_date
-    )
-    ad_group_id = launch_server._create_ad_group(
-        client, campaign_id, "Opportunity Test", bid
-    )
-    launch_server._create_product_ad(
-        client, campaign_id, ad_group_id, item.get("sku") or "", item.get("asin") or ""
-    )
+    if existing:
+        campaign_id = str(existing.get("campaignId") or "")
+        groups = client.list_ad_groups(campaign_id)
+        ad_group_id = str(groups[0].get("adGroupId") or "") if groups else ""
+        if not ad_group_id:
+            ad_group_id = launch_server._create_ad_group(
+                client, campaign_id, "Opportunity Test", bid
+            )
+        launch_server._ensure_product_ad(
+            client, campaign_id, ad_group_id, item.get("sku") or "", item.get("asin") or ""
+        )
+    else:
+        campaign_id = launch_server._create_campaign(
+            client, campaign_name, "MANUAL", max(2.0, float(daily_budget)), start_date
+        )
+        ad_group_id = launch_server._create_ad_group(
+            client, campaign_id, "Opportunity Test", bid
+        )
+        launch_server._create_product_ad(
+            client, campaign_id, ad_group_id, item.get("sku") or "", item.get("asin") or ""
+        )
 
     if item["target_type"] == "ASIN":
-        row = _target_row(item["target"], campaign_id, ad_group_id, bid)
-        response = client.create_targets([row])
-        target_result = batch_outcome(response, "targetingClauses", 1)
-        if not target_result["success"]:
-            raise RuntimeError(f"Opportunity ASIN target was not acknowledged by Amazon: {target_result}")
+        wanted = str(item["target"]).upper()
+        present = False
+        if existing:
+            for target in client.list_targets(campaign_id):
+                if str(target.get("state") or "").upper() == "ARCHIVED":
+                    continue
+                for expression in target.get("expression") or []:
+                    if (
+                        str(expression.get("type") or "").upper() == "ASIN_SAME_AS"
+                        and str(expression.get("value") or "").upper() == wanted
+                    ):
+                        present = True
+                        break
+                if present:
+                    break
+        if present:
+            target_result = {
+                "submitted": 0, "accepted": 0, "failed": 0,
+                "errors": [], "unconfirmed": 0, "success": True,
+            }
+        else:
+            row = _target_row(item["target"], campaign_id, ad_group_id, bid)
+            response = client.create_targets([row])
+            target_result = batch_outcome(response, "targetingClauses", 1)
+            if not target_result["success"]:
+                raise RuntimeError(f"Opportunity ASIN target was not acknowledged by Amazon: {target_result}")
     else:
-        row = launch_server._exact_keyword_rows(
-            [item["target"]], campaign_id, ad_group_id, bid
-        )
-        target_result = create_keywords_verified(client, row)
-        if not target_result["success"]:
-            raise RuntimeError(f"Opportunity exact keyword was not acknowledged by Amazon: {target_result}")
+        wanted = launch_server._normalize_keyword(item["target"])
+        present = False
+        if existing:
+            present = any(
+                launch_server._normalize_keyword(keyword.get("keywordText")) == wanted
+                and str(keyword.get("matchType") or "").upper() == "EXACT"
+                and str(keyword.get("state") or "").upper() != "ARCHIVED"
+                for keyword in client.list_keywords(campaign_id)
+            )
+        if present:
+            target_result = {
+                "submitted": 0, "accepted": 0, "failed": 0,
+                "errors": [], "unconfirmed": 0, "success": True,
+            }
+        else:
+            row = launch_server._exact_keyword_rows(
+                [item["target"]], campaign_id, ad_group_id, bid
+            )
+            target_result = create_keywords_verified(client, row)
+            if not target_result["success"]:
+                raise RuntimeError(f"Opportunity exact keyword was not acknowledged by Amazon: {target_result}")
 
-    launch_server._set_campaign_state_verified(client, campaign_id, "ENABLED")
+    if not existing or str(existing.get("state") or "").upper() != "ENABLED":
+        launch_server._set_campaign_state_verified(client, campaign_id, "ENABLED")
     return {
         "success": True,
         "campaign_id": campaign_id,
@@ -316,20 +358,30 @@ def process_opportunities(
 
     launched = state.setdefault("launched", {})
     approvals = state.setdefault("approvals", {})
+    rejected = state.setdefault("rejected", {})
     ignored = 0
     auto_results = []
     auto_count = 0
 
     for item in evaluated:
         key = item["key"]
-        if key in launched:
+        if key in launched or key in rejected:
             continue
         if item["decision"] == "AUTO_LAUNCH":
             if auto_count >= MAX_AUTO_LAUNCHES_PER_DAY:
                 approvals[key] = {**item, "reason": "daily_auto_launch_limit"}
                 continue
             if live:
-                result = launch_opportunity(client, item)
+                try:
+                    result = launch_opportunity(client, item)
+                except Exception as exc:
+                    approvals[key] = {
+                        **item,
+                        "reason": "auto_launch_failed",
+                        "launch_error": str(exc),
+                        "queued_at": time.time(),
+                    }
+                    continue
                 if not result.get("success"):
                     approvals[key] = {**item, "reason": "auto_launch_failed", "launch_result": result}
                     continue
@@ -347,6 +399,7 @@ def process_opportunities(
         elif item["decision"] == "APPROVAL":
             approvals[key] = {**item, "queued_at": approvals.get(key, {}).get("queued_at", time.time())}
         else:
+            approvals.pop(key, None)
             ignored += 1
 
     return {
