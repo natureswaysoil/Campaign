@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from safety import live_requested
+from automation_store import GCSState
 from keyword_dayparting import retune_keywords
 from amazon_results import batch_outcome
 from typing import Any, Dict, Optional
@@ -89,6 +90,17 @@ def _target_bid_from_baseline(base_bid: float, mode: str) -> float:
     return _clamp_bid(base_bid * PRIME_MULTIPLIER)
 
 
+def _sales_accelerator_bid_multipliers() -> Dict[str, float]:
+    try:
+        state = GCSState("sales-accelerator").read()
+        return {
+            str(cid): float(multiplier)
+            for cid, multiplier in (state.get("bid_multipliers") or {}).items()
+        }
+    except Exception:
+        return {}
+
+
 def _amazon_update_outcome(response: Dict[str, Any], submitted: int) -> tuple[int, int]:
     """Return per-item success/error counts from Amazon Ads v3 batch responses."""
     if submitted <= 0:
@@ -148,6 +160,7 @@ def api_retune_existing_bids(
 
         recommendations: Dict[str, Dict[str, Any]] = {}
         recommendation_errors = 0
+        sales_multipliers = _sales_accelerator_bid_multipliers()
 
         def fetch_recommendation(ad_group: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
             ad_group_id = str(ad_group.get("adGroupId") or "")
@@ -178,6 +191,8 @@ def api_retune_existing_bids(
             bid_source = "amazon_suggested_bid" if suggested_bid else "baseline_fallback"
             daypart_bid = _target_bid_from_baseline(base_bid, mode)
             campaign_id = str(ad_group.get("campaignId") or "")
+            sales_multiplier = float(sales_multipliers.get(campaign_id, 1.0))
+            daypart_bid = _clamp_bid(daypart_bid * sales_multiplier)
             metrics = campaign_metrics.get(campaign_id, {})
             new_bid, circuit_breaker_active, adjustment_reason = _acos_protected_bid(
                 daypart_bid, suggested_bid, metrics, current_bid=current_bid
@@ -198,6 +213,7 @@ def api_retune_existing_bids(
                 "daypartBid": daypart_bid,
                 "newBid": new_bid,
                 "mode": mode,
+                "salesMultiplier": sales_multiplier,
                 "spend": round(spend, 2),
                 "sales": round(sales, 2),
                 "acos": round(acos, 4) if acos is not None else None,
@@ -214,8 +230,16 @@ def api_retune_existing_bids(
         if apply_live:
             _save_baseline_bids(baseline)
 
-        keyword_result = retune_keywords(client, ad_groups, campaign_metrics if metrics_fresh else {},
-                                        mode, apply_live, _target_bid_from_baseline, _acos_protected_bid)
+        keyword_result = retune_keywords(
+            client,
+            ad_groups,
+            campaign_metrics if metrics_fresh else {},
+            mode,
+            apply_live,
+            _target_bid_from_baseline,
+            _acos_protected_bid,
+            campaign_multipliers=sales_multipliers,
+        )
         api_response: Dict[str, Any] = {}
         applied_count = update_error_count = 0
         if apply_live:
@@ -242,6 +266,7 @@ def api_retune_existing_bids(
             "baseline_count": len(baseline),
             "metrics_available": bool(campaign_metrics),
             "recommendation_errors": recommendation_errors,
+            "sales_accelerator_multipliers": sales_multipliers,
             "reset_baseline": reset_baseline,
             "preview": preview[:25],
             "amazon_response": api_response,
