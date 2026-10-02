@@ -42,6 +42,15 @@ def _money(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _optional_money(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace("$", "").replace(",", "").strip())
+    except Exception:
+        return None
+
+
 def _first(row: Dict[str, Any], *keys: str) -> str:
     lower = {str(k).lower(): v for k, v in row.items()}
     for key in keys:
@@ -54,16 +63,32 @@ def _first(row: Dict[str, Any], *keys: str) -> str:
 
 
 def product_economics(raw: Dict[str, Any]) -> Dict[str, Any]:
-    price = _money(_first(raw, "Price", "Amazon_Price", "Amazon Price", "Sale Price", "Selling Price"), 0.0)
-    cogs = _money(_first(raw, "COGS", "Product_Cost", "Product Cost", "Cost_of_Goods", "Cost of Goods"), 0.0)
-    amazon_fees = _money(_first(raw, "Amazon_Fees", "Amazon Fees", "FBA_Fees", "FBA Fees"), 0.0)
-    shipping = _money(_first(raw, "Shipping_Cost", "Shipping Cost", "Fulfillment_Cost", "Fulfillment Cost"), 0.0)
-    explicit_margin = _money(_first(raw, "Gross_Margin", "Gross Margin", "Product_Margin", "Product Margin"), -1.0)
+    price_raw = _first(raw, "Price", "Amazon_Price", "Amazon Price", "Sale Price", "Selling Price")
+    cogs_raw = _first(raw, "COGS", "Product_Cost", "Product Cost", "Cost_of_Goods", "Cost of Goods")
+    fees_raw = _first(raw, "Amazon_Fees", "Amazon Fees", "FBA_Fees", "FBA Fees")
+    shipping_raw = _first(raw, "Shipping_Cost", "Shipping Cost", "Fulfillment_Cost", "Fulfillment Cost")
+    margin_raw = _first(raw, "Gross_Margin", "Gross Margin", "Product_Margin", "Product Margin")
+
+    price_value = _optional_money(price_raw)
+    cogs_value = _optional_money(cogs_raw)
+    fees_value = _optional_money(fees_raw)
+    shipping_value = _optional_money(shipping_raw)
+    explicit_margin_value = _optional_money(margin_raw)
+
+    price = price_value or 0.0
+    cogs = cogs_value or 0.0
+    amazon_fees = fees_value or 0.0
+    shipping = shipping_value or 0.0
+    explicit_margin = explicit_margin_value if explicit_margin_value is not None else -1.0
     if explicit_margin > 1:
         explicit_margin /= 100.0
 
+    complete_costs = all(
+        value is not None
+        for value in (price_value, cogs_value, fees_value, shipping_value)
+    )
     known_costs = cogs + amazon_fees + shipping
-    if price > 0 and known_costs > 0:
+    if complete_costs and price > 0:
         gross_margin = max(0.0, min(0.95, (price - known_costs) / price))
         source = "product_costs"
     elif explicit_margin >= 0:
@@ -204,20 +229,32 @@ def _set_budget_verified(client: AmazonAdsClient, campaign: Dict[str, Any], new_
     }
 
 
-def evaluate_products(client: AmazonAdsClient) -> List[Dict[str, Any]]:
+class GrowthMetricsNotReady(RuntimeError):
+    pass
+
+
+def evaluate_products(client: AmazonAdsClient, require_fresh: bool = False) -> List[Dict[str, Any]]:
     core = extended_server.base.optimizer_core
     _, per_campaign = core._get_cached_dashboard_summary()
     per_campaign = per_campaign or {}
+    cache = core._dash_summary_cache
+    metrics_fresh = (
+        bool(per_campaign)
+        and 0 <= time.time() - float(cache.get("ts") or 0) < core._DASH_SUMMARY_TTL
+    )
+    if require_fresh and not metrics_fresh:
+        raise GrowthMetricsNotReady("fresh campaign metrics are not available yet")
     all_campaigns = client.list_campaigns()
 
     results: List[Dict[str, Any]] = []
     for raw in load_products():
         product = normalized_product(raw)
         title = extended_server._safe_title(product)
+        prefix = title + " |"
         related = [
             c for c in all_campaigns
             if str(c.get("state") or "").upper() != "ARCHIVED"
-            and title.lower() in str(c.get("name") or "").lower()
+            and str(c.get("name") or "").startswith(prefix)
         ]
         metrics = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0, "impressions": 0}
         for campaign in related:
@@ -239,12 +276,20 @@ def evaluate_products(client: AmazonAdsClient) -> List[Dict[str, Any]]:
     return results
 
 
-def run_growth(client: AmazonAdsClient, state: Dict[str, Any], live: bool) -> Dict[str, Any]:
-    evaluated = evaluate_products(client)
+def run_growth(
+    client: AmazonAdsClient,
+    state: Dict[str, Any],
+    live: bool,
+    persist_state=None,
+) -> Dict[str, Any]:
+    evaluated = evaluate_products(client, require_fresh=live)
     recommendations = state.setdefault("recommendations", {})
     scaled = state.setdefault("scaled", {})
     scale_results: List[Dict[str, Any]] = []
-    auto_count = 0
+    today = eastern_day().isoformat()
+    daily_counts = state.setdefault("daily_scale_counts", {})
+    reservations = state.setdefault("scale_reservations", {})
+    auto_count = int(daily_counts.get(today) or 0)
 
     for item in evaluated:
         key = str(item.get("product_id") or item.get("sku") or item.get("asin") or item.get("title"))
@@ -252,6 +297,11 @@ def run_growth(client: AmazonAdsClient, state: Dict[str, Any], live: bool) -> Di
 
         if decision != "SCALE":
             recommendations[key] = {**item, "queued_at": recommendations.get(key, {}).get("queued_at", time.time())}
+            continue
+
+        reservation_key = f"{today}:{key}"
+        if reservation_key in reservations:
+            recommendations[key] = {**item, "reason": "scale_reserved_or_completed_today"}
             continue
 
         if auto_count >= MAX_AUTO_SCALES_PER_DAY:
@@ -282,12 +332,33 @@ def run_growth(client: AmazonAdsClient, state: Dict[str, Any], live: bool) -> Di
             scale_results.append({"product_id": key, "preview": True, "old_budget": old_budget, "new_budget": new_budget})
             continue
 
+        reservations[reservation_key] = {
+            "product_id": key,
+            "campaign_id": str(campaign.get("campaignId") or ""),
+            "old_budget": round(old_budget, 2),
+            "new_budget": new_budget,
+            "reserved_at": time.time(),
+        }
+        auto_count += 1
+        daily_counts[today] = auto_count
+        if persist_state:
+            persist_state(state)
+
         try:
             change = _set_budget_verified(client, campaign, new_budget)
         except Exception as exc:
-            recommendations[key] = {**item, "reason": "auto_scale_failed", "scale_error": str(exc)}
+            recommendations[key] = {
+                **item,
+                "reason": "auto_scale_failed_or_unverified",
+                "scale_error": str(exc),
+                "reservation": reservations[reservation_key],
+            }
+            if persist_state:
+                persist_state(state)
             continue
 
+        reservations[reservation_key]["status"] = "verified"
+        reservations[reservation_key]["verified_at"] = time.time()
         scaled[key] = {
             "product": item,
             "change": change,
@@ -296,7 +367,8 @@ def run_growth(client: AmazonAdsClient, state: Dict[str, Any], live: bool) -> Di
         }
         recommendations.pop(key, None)
         scale_results.append({"product_id": key, **change})
-        auto_count += 1
+        if persist_state:
+            persist_state(state)
 
     return {
         "success": True,
@@ -305,6 +377,7 @@ def run_growth(client: AmazonAdsClient, state: Dict[str, Any], live: bool) -> Di
         "counts": {decision: sum(1 for x in evaluated if x["decision"] == decision)
                    for decision in ("SCALE", "HOLD", "FIX_LISTING", "PROMOTE", "RESTOCK")},
         "auto_scales": scale_results,
+        "auto_scales_today": auto_count,
         "recommendations": list(recommendations.values()),
         "products": [{k: v for k, v in x.items() if k != "campaigns"} for x in evaluated],
         "rules": {
@@ -338,12 +411,20 @@ def growth_tick(payload: Dict[str, Any]) -> JSONResponse:
                     "status": "already_completed",
                     "last_result": state.get("last_result"),
                 })
-            result = run_growth(AmazonAdsClient(), state, live=True)
+            result = run_growth(
+                AmazonAdsClient(), state, live=True, persist_state=store.save
+            )
             state["last_result"] = result
             state["last_run_at"] = time.time()
             state["completed_day"] = today
             store.save(state)
             return JSONResponse(result)
+    except GrowthMetricsNotReady as exc:
+        return JSONResponse({
+            "success": True,
+            "status": "waiting_for_fresh_metrics",
+            "message": str(exc),
+        }, status_code=202)
     except StateBusy as exc:
         return JSONResponse({"success": False, "message": str(exc)}, status_code=409)
     except Exception as exc:
