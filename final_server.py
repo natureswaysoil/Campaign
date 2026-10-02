@@ -4,7 +4,7 @@ Imports the extended server and adds the missing campaign pause/resume endpoint
 used by the dashboard Pause and Resume buttons.
 """
 from safety import live_requested
-from amazon_results import create_keywords_verified
+from amazon_results import batch_outcome, create_keywords_verified
 from typing import Any, Dict, Optional
 
 from fastapi import Body, Header
