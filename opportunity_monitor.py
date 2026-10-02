@@ -424,6 +424,7 @@ def process_opportunities(
     client: AmazonAdsClient,
     state: Dict[str, Any],
     live: bool,
+    persist_state: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     discovery_map = build_discovery_map(client)
     evaluated = [
@@ -457,9 +458,17 @@ def process_opportunities(
                 approvals[key] = {**item, "reason": "daily_auto_launch_limit"}
                 continue
             if live:
+                auto_count += 1
+                daily_counts[today_key] = auto_count
+                if persist_state:
+                    persist_state(state)
                 try:
                     result = launch_opportunity(client, item)
                 except Exception as exc:
+                    auto_count = max(0, auto_count - 1)
+                    daily_counts[today_key] = auto_count
+                    if persist_state:
+                        persist_state(state)
                     approvals[key] = {
                         **item,
                         "reason": "auto_launch_failed",
@@ -579,7 +588,7 @@ def opportunity_tick(payload: Dict[str, Any]) -> JSONResponse:
             if not url:
                 raise RuntimeError("Completed opportunity report has no download URL")
             rows = parse_report_json_bytes(client.download_binary(url))
-            result = process_opportunities(rows, client, state, live=True)
+            result = process_opportunities(rows, client, state, live=True, persist_state=store.save)
             state["last_result"] = result
             state["last_run_at"] = time.time()
             state["completed_day"] = pending["day"]
