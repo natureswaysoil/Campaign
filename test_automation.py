@@ -534,3 +534,19 @@ def test_scheduler_configuration_includes_opportunity_job():
     text = Path('setup-scheduler.sh').read_text()
     assert 'ppc-opportunity-tick' in text
     assert 'route=opportunity-tick' in text
+
+
+
+def test_existing_harvest_scheduler_also_drives_opportunity_monitor():
+    harvest_response = JSONResponse({'success': True, 'status': 'requested'}, status_code=202)
+    with (
+        patch.object(final_server, 'verify_internal_token'),
+        patch('scheduled_harvest.harvest_tick', return_value=harvest_response) as harvest,
+        patch.object(final_server.opportunity_monitor, 'opportunity_tick') as opportunity,
+    ):
+        response = final_server.api_automation_harvest_tick(
+            {'apply_live': True}, 'Bearer test', 'test'
+        )
+    assert response.status_code == 202
+    harvest.assert_called_once()
+    opportunity.assert_called_once_with({'apply_live': True})
