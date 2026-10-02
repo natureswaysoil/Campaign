@@ -495,7 +495,7 @@ def test_opportunity_launch_recovers_paused_campaign_and_missing_target():
     amazon = MagicMock()
     amazon.list_campaigns.return_value = [{
         'campaignId': 'c1',
-        'name': 'Liquid Kelp | OPPORTUNITY ASIN | B012345678',
+        'name': opportunity_monitor._campaign_name('Liquid Kelp', 'p1', 'ASIN', 'B012345678'),
         'state': 'PAUSED',
     }]
     amazon.list_ad_groups.return_value = [{'adGroupId': 'g1'}]
@@ -550,3 +550,158 @@ def test_existing_harvest_scheduler_also_drives_opportunity_monitor():
     assert response.status_code == 202
     harvest.assert_called_once()
     opportunity.assert_called_once_with({'apply_live': True})
+
+
+
+def test_non_b0_asin_is_classified_as_asin():
+    rows = [{
+        'campaignId': 'c1',
+        'searchTerm': '123456789X',
+        'clicks': 5,
+        'purchases7d': 1,
+        'cost': 5,
+        'sales7d': 30,
+    }]
+    discovery = {'c1': {
+        'product_id': 'p1', 'title': 'Example', 'sku': 'sku1',
+        'asin': 'B0NATURE01', 'suggested_bid': .75,
+    }}
+    result = opportunity_monitor.aggregate_opportunities(rows, discovery)
+    assert result[0]['target_type'] == 'ASIN'
+
+
+def test_ten_letter_keyword_is_not_misclassified_as_asin():
+    rows = [{
+        'campaignId': 'c1',
+        'searchTerm': 'fertilizer',
+        'clicks': 5,
+        'purchases7d': 1,
+        'cost': 5,
+        'sales7d': 30,
+    }]
+    discovery = {'c1': {
+        'product_id': 'p1', 'title': 'Example', 'sku': 'sku1',
+        'asin': 'B0NATURE01', 'suggested_bid': .75,
+    }}
+    result = opportunity_monitor.aggregate_opportunities(rows, discovery)
+    assert result[0]['target_type'] == 'KEYWORD'
+
+
+def test_enabled_discovery_campaign_wins_over_older_paused_campaign(monkeypatch):
+    amazon = MagicMock()
+    amazon.list_campaigns.return_value = [
+        {'campaignId': 'old', 'name': 'Example | AUTO DISCOVERY | 2026-09-01', 'state': 'PAUSED'},
+        {'campaignId': 'new', 'name': 'Example | AUTO DISCOVERY | 2026-10-01', 'state': 'ENABLED'},
+    ]
+    monkeypatch.setattr(opportunity_monitor, 'load_products', lambda: [{'Title': 'Example', 'SKU': 'sku1'}])
+    result = opportunity_monitor.build_discovery_map(amazon)
+    assert 'new' in result
+    assert 'old' not in result
+    amazon.list_campaigns.assert_called_once()
+
+
+def test_opportunity_campaign_identity_uses_product_and_target_hash():
+    a = opportunity_monitor._campaign_name(
+        'Very Long Shared Product Title ' * 4, 'product-A', 'KEYWORD',
+        'long target phrase with shared prefix alpha'
+    )
+    b = opportunity_monitor._campaign_name(
+        'Very Long Shared Product Title ' * 4, 'product-B', 'KEYWORD',
+        'long target phrase with shared prefix beta'
+    )
+    assert a != b
+    assert len(a) <= 128 and len(b) <= 128
+
+
+def test_auto_launch_daily_cap_persists_across_invocations(monkeypatch):
+    base = {
+        'product_id': 'p1', 'product_title': 'Example', 'sku': 'sku1', 'asin': 'B0NATURE01',
+        'suggested_bid': .75, 'source_campaign_id': 'c1', 'target_type': 'KEYWORD',
+        'clicks': 10, 'orders': 3, 'spend': 10, 'sales': 90,
+        'conversion_rate': .3, 'acos': .1111,
+    }
+    first = [{**base, 'target': f'winner {i}', 'key': f'k{i}'} for i in range(3)]
+    fourth = [{**base, 'target': 'winner 4', 'key': 'k4'}]
+    monkeypatch.setattr(opportunity_monitor, 'build_discovery_map', lambda client: {'c1': {}})
+    batches = iter([first, fourth])
+    monkeypatch.setattr(opportunity_monitor, 'aggregate_opportunities', lambda rows, discovery: next(batches))
+    monkeypatch.setattr(opportunity_monitor, 'launch_opportunity',
+                        lambda client, item: {'success': True, 'campaign_id': item['key']})
+    monkeypatch.setattr(opportunity_monitor, 'eastern_day', lambda: date(2026, 10, 2))
+    state = {}
+    saved = []
+    persist = lambda current: saved.append(copy.deepcopy(current))
+    one = opportunity_monitor.process_opportunities([], MagicMock(), state, True, persist)
+    two = opportunity_monitor.process_opportunities([], MagicMock(), state, True, persist)
+    assert one['auto_launches_today'] == 3
+    assert two['auto_launches_today'] == 3
+    assert state['approvals']['k4']['reason'] == 'daily_auto_launch_limit'
+    assert state['auto_launch_counts']['2026-10-02'] == 3
+
+
+def test_auto_launch_slot_is_persisted_before_launch(monkeypatch):
+    item = {
+        'product_id': 'p1', 'product_title': 'Example', 'sku': 'sku1', 'asin': 'B0NATURE01',
+        'suggested_bid': .75, 'source_campaign_id': 'c1', 'target': 'winner',
+        'target_type': 'KEYWORD', 'clicks': 10, 'orders': 3, 'spend': 10, 'sales': 90,
+        'conversion_rate': .3, 'acos': .1111, 'key': 'k1',
+    }
+    monkeypatch.setattr(opportunity_monitor, 'build_discovery_map', lambda client: {'c1': {}})
+    monkeypatch.setattr(opportunity_monitor, 'aggregate_opportunities', lambda rows, discovery: [item])
+    monkeypatch.setattr(opportunity_monitor, 'eastern_day', lambda: date(2026, 10, 2))
+    events = []
+    def persist(current):
+        events.append(('persist', current['auto_launch_counts']['2026-10-02']))
+    def launch(client, opportunity):
+        events.append(('launch', opportunity['key']))
+        return {'success': True, 'campaign_id': 'cnew'}
+    monkeypatch.setattr(opportunity_monitor, 'launch_opportunity', launch)
+    opportunity_monitor.process_opportunities([], MagicMock(), {}, True, persist)
+    assert events[0] == ('persist', 1)
+    assert events[1] == ('launch', 'k1')
+
+
+def test_keyword_opportunity_dedupes_existing_manual_exact():
+    amazon = MagicMock()
+    amazon.list_campaigns.side_effect = [
+        [],
+        [{'campaignId': 'exact1', 'name': 'Example | MANUAL EXACT | 2026-10-01', 'state': 'ENABLED'}],
+    ]
+    amazon.list_keywords.return_value = [{
+        'keywordText': 'liquid kelp fertilizer',
+        'matchType': 'EXACT',
+        'state': 'ENABLED',
+    }]
+    item = {
+        'product_id': 'p1', 'product_title': 'Example', 'sku': 'sku1', 'asin': 'B0NATURE01',
+        'suggested_bid': .75, 'target_type': 'KEYWORD', 'target': 'liquid kelp fertilizer',
+    }
+    with patch.object(opportunity_monitor, 'choose_budget_protected_bid', return_value=(.4, .8, .6)):
+        result = opportunity_monitor.launch_opportunity(amazon, item)
+    assert result['duplicate_prevented'] is True
+    assert result['reason'] == 'already_in_manual_exact'
+    amazon.post.assert_not_called()
+
+
+@pytest.mark.parametrize('value', ['Infinity', float('nan'), 1.99, 25.01, 'bad'])
+def test_opportunity_daily_budget_rejects_unsafe_values(value):
+    with pytest.raises(ValueError):
+        opportunity_monitor._validated_daily_budget(value)
+
+
+def test_approve_opportunity_returns_422_before_storage_for_bad_budget():
+    with patch.object(opportunity_monitor, 'GCSState') as store:
+        response = opportunity_monitor.approve_opportunity(
+            'k1', {'apply_live': True, 'daily_budget': 'Infinity'}
+        )
+    assert response.status_code == 422
+    store.assert_not_called()
+
+
+def test_opportunity_queue_uses_native_accessible_dialog():
+    js = extended_server.DASHBOARD_PATCH_JS
+    assert "createElement('dialog')" in js
+    assert "showModal()" in js
+    assert "opportunityQueueTitle" in js
+    assert "addEventListener('cancel'" in js
+    assert "opportunityReturnFocus" in js
