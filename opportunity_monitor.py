@@ -6,7 +6,9 @@ Borderline opportunities are persisted for explicit approval.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -43,8 +45,23 @@ APPROVAL_MAX_ACOS = float(os.getenv("OPPORTUNITY_APPROVAL_MAX_ACOS", "0.60"))
 APPROVAL_MIN_CVR = float(os.getenv("OPPORTUNITY_APPROVAL_MIN_CVR", "0.05"))
 
 TEST_DAILY_BUDGET = float(os.getenv("OPPORTUNITY_TEST_DAILY_BUDGET", "7.00"))
+MAX_TEST_DAILY_BUDGET = float(os.getenv("OPPORTUNITY_MAX_TEST_DAILY_BUDGET", "25.00"))
 MAX_AUTO_LAUNCHES_PER_DAY = int(os.getenv("OPPORTUNITY_MAX_AUTO_LAUNCHES_PER_DAY", "3"))
-ASIN_RE = re.compile(r"^B0[A-Z0-9]{8}$", re.I)
+# ASINs are 10 alphanumeric characters. Requiring at least one digit avoids
+# classifying ordinary 10-letter search terms as product identifiers.
+ASIN_RE = re.compile(r"^(?=[A-Z0-9]{10}$)(?=.*\d)[A-Z0-9]{10}$", re.I)
+
+
+def _validated_daily_budget(value: Any) -> float:
+    try:
+        budget = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("daily_budget must be a number")
+    if not math.isfinite(budget):
+        raise ValueError("daily_budget must be finite")
+    if budget < 2.0 or budget > MAX_TEST_DAILY_BUDGET:
+        raise ValueError(f"daily_budget must be between $2.00 and \${MAX_TEST_DAILY_BUDGET:.2f}")
+    return round(budget, 2)
 
 
 def _number(row: Dict[str, Any], *keys: str) -> float:
@@ -183,14 +200,42 @@ def classify_opportunity(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _matching_launch_campaigns(
+    campaigns: List[Dict[str, Any]],
+    product_title: str,
+    campaign_type: str,
+) -> List[Dict[str, Any]]:
+    prefix = extended_server._safe_title({"title": product_title})
+    marker = "| AUTO DISCOVERY |" if campaign_type == "AUTO_DISCOVERY" else "| MANUAL EXACT |"
+    return [
+        campaign for campaign in campaigns
+        if str(campaign.get("state") or "").upper() != "ARCHIVED"
+        and str(campaign.get("name") or "").startswith(prefix)
+        and marker in str(campaign.get("name") or "")
+    ]
+
+
+def _preferred_campaign(campaigns: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not campaigns:
+        return None
+    return max(
+        campaigns,
+        key=lambda campaign: (
+            1 if str(campaign.get("state") or "").upper() == "ENABLED" else 0,
+            str(campaign.get("startDate") or ""),
+            str(campaign.get("campaignId") or ""),
+        ),
+    )
+
+
 def build_discovery_map(client: AmazonAdsClient) -> Dict[str, Dict[str, Any]]:
     mapping: Dict[str, Dict[str, Any]] = {}
+    campaigns = client.list_campaigns()
     for raw in load_products():
         product = normalized_product(raw)
-        existing = extended_server._find_existing_launch_campaigns(
-            client, extended_server._safe_title(product)
+        campaign = _preferred_campaign(
+            _matching_launch_campaigns(campaigns, str(product.get("title") or ""), "AUTO_DISCOVERY")
         )
-        campaign = existing.get("AUTO_DISCOVERY")
         if (
             campaign
             and campaign.get("campaignId")
@@ -216,19 +261,24 @@ def _target_row(
     }
 
 
-def _campaign_name(product_title: str, target_type: str, target: str) -> str:
-    safe_title = launch_server._sanitize_name(product_title)[:55]
-    safe_target = launch_server._sanitize_name(target)[:35]
-    return f"{safe_title} | OPPORTUNITY {target_type} | {safe_target}"[:128]
+def _campaign_name(product_title: str, product_id: str, target_type: str, target: str) -> str:
+    safe_title = launch_server._sanitize_name(product_title)[:46]
+    safe_product = launch_server._sanitize_name(product_id)[:18] or "product"
+    safe_target = launch_server._sanitize_name(target)[:24]
+    digest = hashlib.sha256(f"{product_id}|{target_type}|{target}".encode("utf-8")).hexdigest()[:10]
+    return (
+        f"{safe_title} | OPPORTUNITY {target_type} | {safe_product} | {safe_target} | {digest}"
+    )[:128]
 
 
 def _existing_opportunity_campaign(
     client: AmazonAdsClient,
     product_title: str,
+    product_id: str,
     target_type: str,
     target: str,
 ) -> Optional[Dict[str, Any]]:
-    wanted = _campaign_name(product_title, target_type, target)
+    wanted = _campaign_name(product_title, product_id, target_type, target)
     for campaign in client.list_campaigns():
         if str(campaign.get("name") or "") == wanted and str(campaign.get("state") or "").upper() != "ARCHIVED":
             return campaign
@@ -240,8 +290,10 @@ def launch_opportunity(
     item: Dict[str, Any],
     daily_budget: float = TEST_DAILY_BUDGET,
 ) -> Dict[str, Any]:
+    daily_budget = _validated_daily_budget(daily_budget)
+    product_id = str(item.get("product_id") or item.get("sku") or item.get("asin") or "")
     existing = _existing_opportunity_campaign(
-        client, item["product_title"], item["target_type"], item["target"]
+        client, item["product_title"], product_id, item["target_type"], item["target"]
     )
 
     _, _, protected_bid = choose_budget_protected_bid(
@@ -250,8 +302,35 @@ def launch_opportunity(
     bid = round(max(0.10, protected_bid), 2)
     start_date = datetime.date.today().isoformat()
     campaign_name = _campaign_name(
-        item["product_title"], item["target_type"], item["target"]
+        item["product_title"], product_id, item["target_type"], item["target"]
     )
+
+    if item["target_type"] == "KEYWORD":
+        campaigns = client.list_campaigns()
+        manual_exact = _preferred_campaign(
+            _matching_launch_campaigns(campaigns, item["product_title"], "MANUAL_EXACT")
+        )
+        if manual_exact and str(manual_exact.get("state") or "").upper() == "ENABLED":
+            manual_id = str(manual_exact.get("campaignId") or "")
+            wanted_exact = launch_server._normalize_keyword(item["target"])
+            already_exact = any(
+                launch_server._normalize_keyword(keyword.get("keywordText")) == wanted_exact
+                and str(keyword.get("matchType") or "").upper() == "EXACT"
+                and str(keyword.get("state") or "").upper() != "ARCHIVED"
+                for keyword in client.list_keywords(manual_id)
+            )
+            if already_exact:
+                return {
+                    "success": True,
+                    "duplicate_prevented": True,
+                    "reason": "already_in_manual_exact",
+                    "campaign_id": manual_id,
+                    "campaign_name": manual_exact.get("name"),
+                    "target_type": item["target_type"],
+                    "target": item["target"],
+                    "daily_budget": daily_budget,
+                    "bid": bid,
+                }
 
     if existing:
         campaign_id = str(existing.get("campaignId") or "")
@@ -266,7 +345,7 @@ def launch_opportunity(
         )
     else:
         campaign_id = launch_server._create_campaign(
-            client, campaign_name, "MANUAL", max(2.0, float(daily_budget)), start_date
+            client, campaign_name, "MANUAL", daily_budget, start_date
         )
         ad_group_id = launch_server._create_ad_group(
             client, campaign_id, "Opportunity Test", bid
@@ -334,7 +413,7 @@ def launch_opportunity(
         "campaign_name": campaign_name,
         "target_type": item["target_type"],
         "target": item["target"],
-        "daily_budget": round(max(2.0, float(daily_budget)), 2),
+        "daily_budget": daily_budget,
         "bid": bid,
         "target_result": target_result,
     }
@@ -365,7 +444,9 @@ def process_opportunities(
     rejected = state.setdefault("rejected", {})
     ignored = 0
     auto_results = []
-    auto_count = 0
+    today_key = eastern_day().isoformat()
+    daily_counts = state.setdefault("auto_launch_counts", {})
+    auto_count = int(daily_counts.get(today_key) or 0)
 
     for item in evaluated:
         key = item["key"]
@@ -397,7 +478,9 @@ def process_opportunities(
                 }
                 approvals.pop(key, None)
                 auto_results.append({"key": key, **result})
-                auto_count += 1
+                if not result.get("duplicate_prevented"):
+                    auto_count += 1
+                    daily_counts[today_key] = auto_count
             else:
                 auto_results.append({"key": key, "preview": True})
         elif item["decision"] == "APPROVAL":
@@ -414,6 +497,7 @@ def process_opportunities(
         "approval_candidates": sum(1 for x in evaluated if x["decision"] == "APPROVAL"),
         "ignored": ignored,
         "auto_launches": auto_results,
+        "auto_launches_today": auto_count,
         "approval_queue": list(approvals.values()),
         "rules": {
             "test_daily_budget": TEST_DAILY_BUDGET,
@@ -519,6 +603,12 @@ def get_queue() -> Dict[str, Any]:
 
 
 def approve_opportunity(key: str, payload: Dict[str, Any]) -> JSONResponse:
+    try:
+        daily_budget = _validated_daily_budget(
+            payload.get("daily_budget") if payload.get("daily_budget") is not None else TEST_DAILY_BUDGET
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=422)
     if not live_requested(payload):
         return JSONResponse({
             "success": True,
@@ -537,9 +627,7 @@ def approve_opportunity(key: str, payload: Dict[str, Any]) -> JSONResponse:
                     status_code=404,
                 )
             client = AmazonAdsClient()
-            result = launch_opportunity(
-                client, item, float(payload.get("daily_budget") or TEST_DAILY_BUDGET)
-            )
+            result = launch_opportunity(client, item, daily_budget)
             if result.get("success"):
                 state.setdefault("launched", {})[key] = {
                     "opportunity": item,
