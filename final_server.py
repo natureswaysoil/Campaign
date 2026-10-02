@@ -16,6 +16,7 @@ from extended_server import app
 from optimize_campaigns import AmazonAdsClient, load_products, verify_internal_token
 from ppc_agent import AmazonPpcAgent
 import opportunity_monitor
+import sales_growth_engine
 
 
 @app.post("/api/update-campaign-state")
@@ -258,8 +259,49 @@ def api_automation_harvest_tick(payload: Dict[str, Any] = Body(default={}),
     # monitoring too. Each workflow has separate durable state, so neither can
     # duplicate the other's report or launches.
     harvest_response = harvest_tick(payload, harvest_report_rows)
-    opportunity_monitor.opportunity_tick(payload)
-    return harvest_response
+    opportunity_response = opportunity_monitor.opportunity_tick(payload)
+    growth_response = sales_growth_engine.growth_tick(payload)
+
+    def _response_payload(response):
+        try:
+            return json.loads(response.body)
+        except Exception:
+            return {"status_code": response.status_code}
+
+    results = {
+        "harvest": _response_payload(harvest_response),
+        "opportunity": _response_payload(opportunity_response),
+        "growth": _response_payload(growth_response),
+    }
+    failures = [
+        {
+            "workflow": name,
+            "status_code": response.status_code,
+            "result": results[name],
+        }
+        for name, response in (
+            ("harvest", harvest_response),
+            ("opportunity", opportunity_response),
+            ("growth", growth_response),
+        )
+        if response.status_code >= 400
+    ]
+    if failures:
+        return JSONResponse({
+            "success": False,
+            "status": "subworkflow_failed",
+            "failures": failures,
+            **results,
+        }, status_code=max(item["status_code"] for item in failures))
+
+    return JSONResponse({
+        "success": True,
+        "status": "scheduler_tick_processed",
+        **results,
+    }, status_code=202 if any(
+        response.status_code == 202
+        for response in (harvest_response, opportunity_response, growth_response)
+    ) else 200)
 
 
 @app.post("/api/automation/retune-tick")
@@ -326,3 +368,26 @@ def api_reject_opportunity(
         "key": key,
         "message": "Rejection preview; queue unchanged",
     })
+
+
+
+@app.post("/api/automation/growth-tick")
+def api_automation_growth_tick(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    return sales_growth_engine.growth_tick(payload)
+
+
+@app.get("/api/growth")
+def api_growth_state(
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        return JSONResponse(sales_growth_engine.get_growth_state())
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=503)
