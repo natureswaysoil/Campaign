@@ -191,7 +191,11 @@ def build_discovery_map(client: AmazonAdsClient) -> Dict[str, Dict[str, Any]]:
             client, extended_server._safe_title(product)
         )
         campaign = existing.get("AUTO_DISCOVERY")
-        if campaign and campaign.get("campaignId"):
+        if (
+            campaign
+            and campaign.get("campaignId")
+            and str(campaign.get("state") or "").upper() == "ENABLED"
+        ):
             mapping[str(campaign["campaignId"])] = product
     return mapping
 
