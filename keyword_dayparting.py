@@ -6,7 +6,7 @@ from automation_store import GCSState
 from amazon_results import batch_outcome
 
 
-def retune_keywords(client, ad_groups, metrics, mode, apply_live, target_bid, protect_bid):
+def retune_keywords(client, ad_groups, metrics, mode, apply_live, target_bid, protect_bid, campaign_multipliers=None):
     all_keywords = {cid: client.list_keywords(cid) for cid in
                     sorted({str(g['campaignId']) for g in ad_groups})}
     if not any(kw.get('bid') is not None and str(kw.get('state', '')).upper() == 'ENABLED'
@@ -19,6 +19,7 @@ def retune_keywords(client, ad_groups, metrics, mode, apply_live, target_bid, pr
         baselines = state.setdefault('baselines', {})
         groups = {str(g['adGroupId']): g for g in ad_groups}
         updates, preview = [], []
+        campaign_multipliers = campaign_multipliers or {}
         for campaign_id in sorted({str(g['campaignId']) for g in ad_groups}):
             for kw in all_keywords[campaign_id]:
                 kid, gid = str(kw.get('keywordId') or ''), str(kw.get('adGroupId') or '')
@@ -34,12 +35,13 @@ def retune_keywords(client, ad_groups, metrics, mode, apply_live, target_bid, pr
                 if not math.isfinite(baseline) or baseline <= 0:
                     raise ValueError('Invalid persisted keyword baseline')
                 target = target_bid(baseline, mode)
+                target = max(0.10, min(2.50, target * float(campaign_multipliers.get(campaign_id, 1.0))))
                 campaign_metrics = metrics.get(campaign_id)
                 if campaign_metrics:
                     target, _, _ = protect_bid(target, baseline, campaign_metrics, current_bid=current)
                 else:
                     target = min(target, current)
-                preview.append({'keywordId': kid, 'currentBid': current, 'baselineBid': baseline, 'newBid': target})
+                preview.append({'keywordId': kid, 'campaignId': campaign_id, 'currentBid': current, 'baselineBid': baseline, 'salesMultiplier': float(campaign_multipliers.get(campaign_id, 1.0)), 'newBid': target})
                 if abs(target - current) >= .01:
                     updates.append({'keywordId': kid, 'bid': target})
         if store and apply_live:
