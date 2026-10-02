@@ -477,6 +477,10 @@ def process_opportunities(
                     }
                     continue
                 if not result.get("success"):
+                    auto_count = max(0, auto_count - 1)
+                    daily_counts[today_key] = auto_count
+                    if persist_state:
+                        persist_state(state)
                     approvals[key] = {**item, "reason": "auto_launch_failed", "launch_result": result}
                     continue
                 launched[key] = {
@@ -487,9 +491,11 @@ def process_opportunities(
                 }
                 approvals.pop(key, None)
                 auto_results.append({"key": key, **result})
-                if not result.get("duplicate_prevented"):
-                    auto_count += 1
+                if result.get("duplicate_prevented"):
+                    auto_count = max(0, auto_count - 1)
                     daily_counts[today_key] = auto_count
+                    if persist_state:
+                        persist_state(state)
             else:
                 auto_results.append({"key": key, "preview": True})
         elif item["decision"] == "APPROVAL":
