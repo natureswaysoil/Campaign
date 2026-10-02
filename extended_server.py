@@ -55,6 +55,23 @@ DASHBOARD_PATCH_JS = r"""
     });
   }
 
+  function apiGetJson(url){
+    var t = token();
+    if (!t) throw new Error('Missing DAILY_OPTIMIZER_TOKEN');
+    return fetch(url, {
+      headers: {
+        'Authorization': 'Bearer ' + t,
+        'X-Daily-Optimizer-Token': t
+      }
+    }).then(function(res){
+      return res.text().then(function(txt){
+        var data = txt ? JSON.parse(txt) : {};
+        if (!res.ok || data.error) throw new Error(data.message || data.detail || 'Request failed');
+        return data;
+      });
+    });
+  }
+
   function isEnabledCampaign(c){
     return String((c && c.state) || '').toUpperCase() === 'ENABLED';
   }
@@ -155,6 +172,137 @@ DASHBOARD_PATCH_JS = r"""
     bar.appendChild(btn);
   }
 
+  function closeOpportunityQueue(){
+    var overlay = byId('opportunityQueueOverlay');
+    if (overlay) overlay.remove();
+  }
+
+  function opportunityMetric(label, value){
+    var row = document.createElement('div');
+    row.style.fontSize = '12px';
+    row.style.marginTop = '3px';
+    row.textContent = label + ': ' + value;
+    return row;
+  }
+
+  function renderOpportunityQueue(data){
+    closeOpportunityQueue();
+    var overlay = document.createElement('div');
+    overlay.id = 'opportunityQueueOverlay';
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(0,0,0,.62)';
+    overlay.style.zIndex = '9999';
+    overlay.style.overflow = 'auto';
+    overlay.style.padding = '28px';
+
+    var panel = document.createElement('div');
+    panel.style.maxWidth = '900px';
+    panel.style.margin = '0 auto';
+    panel.style.background = '#fff';
+    panel.style.color = '#111827';
+    panel.style.borderRadius = '14px';
+    panel.style.padding = '20px';
+    overlay.appendChild(panel);
+
+    var head = document.createElement('div');
+    head.style.display = 'flex';
+    head.style.justifyContent = 'space-between';
+    head.style.alignItems = 'center';
+    var title = document.createElement('h2');
+    title.textContent = 'Amazon Opportunity Approval Queue';
+    title.style.margin = '0';
+    head.appendChild(title);
+    var close = document.createElement('button');
+    close.className = 'btn btn-ghost';
+    close.textContent = 'Close';
+    close.onclick = closeOpportunityQueue;
+    head.appendChild(close);
+    panel.appendChild(head);
+
+    var note = document.createElement('p');
+    note.textContent = 'Strong opportunities launch automatically. These opportunities were profitable enough to keep, but require your approval before spending.';
+    note.style.fontSize = '13px';
+    panel.appendChild(note);
+
+    var approvals = data.approvals || [];
+    if (!approvals.length) {
+      var empty = document.createElement('div');
+      empty.textContent = 'No opportunities are waiting for approval.';
+      empty.style.padding = '24px 0';
+      panel.appendChild(empty);
+    }
+
+    approvals.forEach(function(item){
+      var card = document.createElement('div');
+      card.style.border = '1px solid #d1d5db';
+      card.style.borderRadius = '10px';
+      card.style.padding = '14px';
+      card.style.marginTop = '12px';
+
+      var name = document.createElement('strong');
+      name.textContent = (item.product_title || 'Product') + ' — ' + (item.target || '');
+      card.appendChild(name);
+      card.appendChild(opportunityMetric('Target type', item.target_type || 'KEYWORD'));
+      card.appendChild(opportunityMetric('Orders', String(item.orders || 0)));
+      card.appendChild(opportunityMetric('Sales', fmtMoney(item.sales || 0)));
+      card.appendChild(opportunityMetric('Spend', fmtMoney(item.spend || 0)));
+      card.appendChild(opportunityMetric('ACoS', item.acos == null ? '—' : (Number(item.acos) * 100).toFixed(1) + '%'));
+      card.appendChild(opportunityMetric('Conversion rate', ((Number(item.conversion_rate || 0)) * 100).toFixed(1) + '%'));
+
+      var actions = document.createElement('div');
+      actions.style.marginTop = '12px';
+      actions.style.display = 'flex';
+      actions.style.gap = '8px';
+
+      var approve = document.createElement('button');
+      approve.className = 'btn btn-primary';
+      approve.textContent = 'Approve $7/day test';
+      approve.onclick = function(){
+        approve.disabled = true;
+        apiJson('/api/opportunities/approve', {key: item.key, apply_live: true})
+          .then(function(){ notify('✅ Opportunity campaign launched.'); return apiGetJson('/api/opportunities'); })
+          .then(renderOpportunityQueue)
+          .catch(function(err){ notify('❌ ' + err.message, true); approve.disabled = false; });
+      };
+      actions.appendChild(approve);
+
+      var reject = document.createElement('button');
+      reject.className = 'btn btn-ghost';
+      reject.textContent = 'Reject';
+      reject.onclick = function(){
+        reject.disabled = true;
+        apiJson('/api/opportunities/reject', {key: item.key, apply_live: true})
+          .then(function(){ return apiGetJson('/api/opportunities'); })
+          .then(renderOpportunityQueue)
+          .catch(function(err){ notify('❌ ' + err.message, true); reject.disabled = false; });
+      };
+      actions.appendChild(reject);
+      card.appendChild(actions);
+      panel.appendChild(card);
+    });
+
+    overlay.onclick = function(e){ if (e.target === overlay) closeOpportunityQueue(); };
+    document.body.appendChild(overlay);
+  }
+
+  function addOpportunityButton(){
+    var bar = document.querySelector('.prod-bar') || document.querySelector('#panel-products .toolbar');
+    if (!bar || byId('opportunityQueueBtn')) return;
+    var btn = document.createElement('button');
+    btn.id = 'opportunityQueueBtn';
+    btn.className = 'btn btn-warn';
+    btn.textContent = '🔥 Opportunity Queue';
+    btn.onclick = function(){
+      btn.disabled = true;
+      apiGetJson('/api/opportunities')
+        .then(renderOpportunityQueue)
+        .catch(function(err){ notify('❌ ' + err.message, true); })
+        .finally(function(){ btn.disabled = false; });
+    };
+    bar.appendChild(btn);
+  }
+
   function improveLaunchText(){
     var launchBtn = byId('launchBtn');
     if (launchBtn) launchBtn.innerHTML = '🚀 Launch AUTO + EXACT';
@@ -213,6 +361,7 @@ DASHBOARD_PATCH_JS = r"""
     forceActiveCampaignsOnly();
     patchCampaignRendering();
     addHarvestButton();
+    addOpportunityButton();
     improveLaunchText();
     var oldOpen = window.openLaunch;
     if (typeof oldOpen === 'function' && !oldOpen.__nwsPatched) {

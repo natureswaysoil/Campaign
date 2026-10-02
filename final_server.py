@@ -15,6 +15,7 @@ import extended_server  # noqa: F401 - registers routes and dashboard patch
 from extended_server import app
 from optimize_campaigns import AmazonAdsClient, load_products, verify_internal_token
 from ppc_agent import AmazonPpcAgent
+import opportunity_monitor
 
 
 @app.post("/api/update-campaign-state")
@@ -264,3 +265,59 @@ def api_automation_retune_tick(payload: Dict[str, Any] = Body(default={}),
     from scheduled_bids import retune_tick
     return retune_tick(payload, lambda body: server_with_bids.api_retune_existing_bids(
         body, authorization, x_daily_optimizer_token))
+
+
+
+@app.post("/api/automation/opportunity-tick")
+def api_automation_opportunity_tick(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    return opportunity_monitor.opportunity_tick(payload)
+
+
+@app.get("/api/opportunities")
+def api_opportunity_queue(
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    try:
+        return JSONResponse(opportunity_monitor.get_queue())
+    except Exception as exc:
+        return JSONResponse({"error": True, "message": str(exc)}, status_code=503)
+
+
+@app.post("/api/opportunities/approve")
+def api_approve_opportunity(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    key = str(payload.get("key") or "").strip()
+    if not key:
+        return JSONResponse({"error": True, "message": "key required"}, status_code=400)
+    return opportunity_monitor.approve_opportunity(key, payload)
+
+
+@app.post("/api/opportunities/reject")
+def api_reject_opportunity(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    key = str(payload.get("key") or "").strip()
+    if not key:
+        return JSONResponse({"error": True, "message": "key required"}, status_code=400)
+    if live_requested(payload):
+        return opportunity_monitor.reject_opportunity(key)
+    return JSONResponse({
+        "success": True,
+        "dry_run": True,
+        "key": key,
+        "message": "Rejection preview; queue unchanged",
+    })

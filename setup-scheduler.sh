@@ -23,8 +23,14 @@ if ! gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/
   gcloud iam service-accounts create campaign-optimizer-scheduler --project "$PROJECT_ID"
 fi
 gcloud run services add-iam-policy-binding "$SERVICE_NAME" --member="serviceAccount:${SA_EMAIL}" --role=roles/run.invoker --region "$REGION" --project "$PROJECT_ID"
-for job in ppc-daypart-tick ppc-harvest-tick; do
-  if [[ "$job" == ppc-daypart-tick ]]; then route=retune-tick; else route=harvest-tick; fi
+for job in ppc-daypart-tick ppc-harvest-tick ppc-opportunity-tick; do
+  if [[ "$job" == ppc-daypart-tick ]]; then
+    route=retune-tick
+  elif [[ "$job" == ppc-harvest-tick ]]; then
+    route=harvest-tick
+  else
+    route=opportunity-tick
+  fi
   verb=create
   header_flag=--headers
   if gcloud scheduler jobs describe "$job" --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then verb=update; header_flag=--update-headers; fi
@@ -40,4 +46,4 @@ for job in ppc-daypart-tick ppc-harvest-tick; do
 if gcloud scheduler jobs describe daily-campaign-optimizer --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
   gcloud scheduler jobs pause daily-campaign-optimizer --location "$REGION" --project "$PROJECT_ID"
 fi
-echo 'Bid and harvest ticks configured every 15 minutes Eastern. Harvesting completes once per day.'
+echo 'Bid, harvest, and opportunity ticks configured every 15 minutes Eastern. Harvesting and opportunity scans complete once per day.'

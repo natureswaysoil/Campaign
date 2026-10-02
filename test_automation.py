@@ -16,6 +16,7 @@ import scheduled_bids
 import final_server
 import extended_server
 import server as launch_server
+import opportunity_monitor
 
 
 class MemoryState:
@@ -380,3 +381,156 @@ def test_product_ad_and_negative_list_helpers_use_campaign_filters():
     assert amazon.post.call_args_list[0].args[1]['campaignIdFilter'] == {'include': ['c1']}
     assert amazon.list_campaign_negative_keywords('c2') == []
     assert amazon.post.call_args_list[1].args[1]['campaignIdFilter'] == {'include': ['c2']}
+
+
+
+def test_opportunity_profitability_gate_auto_launch():
+    item = opportunity_monitor.classify_opportunity({
+        'product_id': 'p1',
+        'product_title': 'Liquid Kelp',
+        'target_type': 'KEYWORD',
+        'target': 'liquid kelp fertilizer',
+        'clicks': 10,
+        'orders': 3,
+        'sales': 90.0,
+        'spend': 20.0,
+        'acos': 20.0 / 90.0,
+        'conversion_rate': 0.30,
+    })
+    assert item['decision'] == 'AUTO_LAUNCH'
+
+
+def test_opportunity_profitability_gate_queues_weaker_winner():
+    item = opportunity_monitor.classify_opportunity({
+        'product_id': 'p1',
+        'product_title': 'Liquid Kelp',
+        'target_type': 'KEYWORD',
+        'target': 'seaweed plant food',
+        'clicks': 6,
+        'orders': 1,
+        'sales': 29.99,
+        'spend': 12.0,
+        'acos': 12.0 / 29.99,
+        'conversion_rate': 1 / 6,
+    })
+    assert item['decision'] == 'APPROVAL'
+
+
+def test_opportunity_profitability_gate_ignores_unprofitable_term():
+    item = opportunity_monitor.classify_opportunity({
+        'product_id': 'p1',
+        'product_title': 'Liquid Kelp',
+        'target_type': 'KEYWORD',
+        'target': 'fertilizer',
+        'clicks': 20,
+        'orders': 1,
+        'sales': 20.0,
+        'spend': 30.0,
+        'acos': 1.5,
+        'conversion_rate': 0.05,
+    })
+    assert item['decision'] == 'IGNORE'
+
+
+def test_opportunity_aggregates_related_asin_from_discovery_rows():
+    rows = [
+        {'campaignId': 'c1', 'searchTerm': 'B012345678', 'clicks': 5, 'purchases7d': 1, 'cost': 8, 'sales7d': 30},
+        {'campaignId': 'c1', 'searchTerm': 'B012345678', 'clicks': 5, 'purchases7d': 2, 'cost': 10, 'sales7d': 60},
+    ]
+    discovery = {'c1': {
+        'product_id': 'p1',
+        'title': 'Dog Urine Neutralizer',
+        'sku': 'sku1',
+        'asin': 'B0NATURE01',
+        'suggested_bid': 0.75,
+    }}
+    result = opportunity_monitor.aggregate_opportunities(rows, discovery)
+    assert len(result) == 1
+    assert result[0]['target_type'] == 'ASIN'
+    assert result[0]['orders'] == 3
+    assert result[0]['sales'] == 90
+    assert result[0]['conversion_rate'] == 0.30
+
+
+def test_process_opportunities_auto_launches_only_strong_and_queues_weaker(monkeypatch):
+    strong = {
+        'product_id': 'p1', 'product_title': 'Liquid Kelp', 'sku': 'sku1', 'asin': 'a1',
+        'suggested_bid': .75, 'source_campaign_id': 'c1', 'target': 'liquid kelp fertilizer',
+        'target_type': 'KEYWORD', 'clicks': 10, 'orders': 3, 'spend': 20, 'sales': 90,
+        'conversion_rate': .30, 'acos': .2222, 'key': 'p1:keyword:strong',
+    }
+    weak = {
+        'product_id': 'p1', 'product_title': 'Liquid Kelp', 'sku': 'sku1', 'asin': 'a1',
+        'suggested_bid': .75, 'source_campaign_id': 'c1', 'target': 'seaweed plant food',
+        'target_type': 'KEYWORD', 'clicks': 6, 'orders': 1, 'spend': 10, 'sales': 25,
+        'conversion_rate': .1667, 'acos': .4, 'key': 'p1:keyword:weak',
+    }
+    monkeypatch.setattr(opportunity_monitor, 'build_discovery_map', lambda client: {'c1': {}})
+    monkeypatch.setattr(opportunity_monitor, 'aggregate_opportunities', lambda rows, discovery: [strong, weak])
+    launch = MagicMock(return_value={'success': True, 'campaign_id': 'new1'})
+    monkeypatch.setattr(opportunity_monitor, 'launch_opportunity', launch)
+    state = {}
+    result = opportunity_monitor.process_opportunities([], MagicMock(), state, live=True)
+    assert len(result['auto_launches']) == 1
+    assert len(result['approval_queue']) == 1
+    assert 'p1:keyword:strong' in state['launched']
+    assert 'p1:keyword:weak' in state['approvals']
+
+
+def test_rejected_opportunity_does_not_reappear(monkeypatch):
+    item = {
+        'product_id': 'p1', 'product_title': 'Liquid Kelp', 'sku': 'sku1', 'asin': 'a1',
+        'suggested_bid': .75, 'source_campaign_id': 'c1', 'target': 'seaweed plant food',
+        'target_type': 'KEYWORD', 'clicks': 6, 'orders': 1, 'spend': 10, 'sales': 25,
+        'conversion_rate': .1667, 'acos': .4, 'key': 'p1:keyword:weak',
+    }
+    monkeypatch.setattr(opportunity_monitor, 'build_discovery_map', lambda client: {'c1': {}})
+    monkeypatch.setattr(opportunity_monitor, 'aggregate_opportunities', lambda rows, discovery: [item])
+    state = {'rejected': {'p1:keyword:weak': {'rejected_at': 1}}}
+    result = opportunity_monitor.process_opportunities([], MagicMock(), state, live=True)
+    assert result['approval_queue'] == []
+
+
+def test_opportunity_launch_recovers_paused_campaign_and_missing_target():
+    amazon = MagicMock()
+    amazon.list_campaigns.return_value = [{
+        'campaignId': 'c1',
+        'name': 'Liquid Kelp | OPPORTUNITY ASIN | B012345678',
+        'state': 'PAUSED',
+    }]
+    amazon.list_ad_groups.return_value = [{'adGroupId': 'g1'}]
+    amazon.list_product_ads.return_value = [{'adGroupId': 'g1', 'sku': 'sku1', 'state': 'ENABLED'}]
+    amazon.list_targets.return_value = []
+    amazon.create_targets.return_value = {
+        'targetingClauses': {'success': [{'targetingClause': {'targetId': 't1'}}]}
+    }
+    amazon.put.return_value = {'campaigns': {'success': [{'campaign': {'campaignId': 'c1'}}]}}
+    item = {
+        'product_id': 'p1',
+        'product_title': 'Liquid Kelp',
+        'sku': 'sku1',
+        'asin': 'B0NATURE01',
+        'suggested_bid': .75,
+        'target_type': 'ASIN',
+        'target': 'B012345678',
+    }
+    with patch.object(opportunity_monitor, 'choose_budget_protected_bid', return_value=(.4, .8, .6)):
+        result = opportunity_monitor.launch_opportunity(amazon, item)
+    assert result['success'] is True
+    amazon.create_targets.assert_called_once()
+    amazon.put.assert_called_once()
+
+
+def test_opportunity_tick_preview_never_opens_storage():
+    with patch.object(opportunity_monitor, 'GCSState') as store:
+        response = opportunity_monitor.opportunity_tick({'apply_live': False})
+    assert response.status_code == 200
+    assert json.loads(response.body)['dry_run'] is True
+    store.assert_not_called()
+
+
+def test_scheduler_configuration_includes_opportunity_job():
+    from pathlib import Path
+    text = Path('setup-scheduler.sh').read_text()
+    assert 'ppc-opportunity-tick' in text
+    assert 'route=opportunity-tick' in text

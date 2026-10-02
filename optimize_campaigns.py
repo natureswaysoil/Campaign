@@ -48,6 +48,8 @@ SP_CONTENT_TYPES = {
     "/sp/adGroups/list": "application/vnd.spadgroup.v3+json",
     "/sp/productAds": "application/vnd.spproductad.v3+json",
     "/sp/productAds/list": "application/vnd.spproductad.v3+json",
+    "/sp/targets": "application/vnd.sptargetingclause.v3+json",
+    "/sp/targets/list": "application/vnd.sptargetingclause.v3+json",
     "/sp/keywords": "application/vnd.spkeyword.v3+json",
     "/sp/keywords/list": "application/vnd.spkeyword.v3+json",
     "/sp/campaignNegativeKeywords": "application/vnd.spcampaignnegativekeyword.v3+json",
@@ -57,6 +59,7 @@ BATCH_KEYS = {
     "/sp/campaigns": "campaigns",
     "/sp/adGroups": "adGroups",
     "/sp/productAds": "productAds",
+    "/sp/targets": "targetingClauses",
     "/sp/keywords": "keywords",
     "/sp/campaignNegativeKeywords": "campaignNegativeKeywords",
 }
@@ -432,6 +435,21 @@ class AmazonAdsClient:
             "/sp/productAds/list",
             "productAds",
             {"campaignIdFilter": {"include": [str(campaign_id)]}},
+        )
+
+    def list_targets(self, campaign_id: str) -> List[Dict[str, Any]]:
+        return self.list_all(
+            "/sp/targets/list",
+            "targetingClauses",
+            {"campaignIdFilter": {"include": [str(campaign_id)]}},
+        )
+
+    def create_targets(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.post(
+            "/sp/targets",
+            {"targetingClauses": rows},
+            content_type=SP_CONTENT_TYPES["/sp/targets"],
+            accept=SP_CONTENT_TYPES["/sp/targets"],
         )
 
     def list_campaign_negative_keywords(self, campaign_id: str) -> List[Dict[str, Any]]:
