@@ -259,9 +259,48 @@ def api_automation_harvest_tick(payload: Dict[str, Any] = Body(default={}),
     # monitoring too. Each workflow has separate durable state, so neither can
     # duplicate the other's report or launches.
     harvest_response = harvest_tick(payload, harvest_report_rows)
-    opportunity_monitor.opportunity_tick(payload)
-    sales_growth_engine.growth_tick(payload)
-    return harvest_response
+    opportunity_response = opportunity_monitor.opportunity_tick(payload)
+    growth_response = sales_growth_engine.growth_tick(payload)
+
+    def _payload(response):
+        try:
+            return json.loads(response.body)
+        except Exception:
+            return {"status_code": response.status_code}
+
+    harvest_body = _payload(harvest_response)
+    opportunity_body = _payload(opportunity_response)
+    growth_body = _payload(growth_response)
+
+    failures = []
+    for name, response, body in (
+        ("harvest", harvest_response, harvest_body),
+        ("opportunity", opportunity_response, opportunity_body),
+        ("growth", growth_response, growth_body),
+    ):
+        if response.status_code >= 400:
+            failures.append({"workflow": name, "status_code": response.status_code, "result": body})
+
+    if failures:
+        return JSONResponse({
+            "success": False,
+            "status": "subworkflow_failed",
+            "failures": failures,
+            "harvest": harvest_body,
+            "opportunity": opportunity_body,
+            "growth": growth_body,
+        }, status_code=max(item["status_code"] for item in failures))
+
+    return JSONResponse({
+        "success": True,
+        "status": "scheduler_tick_processed",
+        "harvest": harvest_body,
+        "opportunity": opportunity_body,
+        "growth": growth_body,
+    }, status_code=202 if any(
+        response.status_code == 202
+        for response in (harvest_response, opportunity_response, growth_response)
+    ) else 200)
 
 
 @app.post("/api/automation/retune-tick")
