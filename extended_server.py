@@ -227,7 +227,7 @@ DASHBOARD_PATCH_JS = r"""
     panel.appendChild(head);
 
     var note = document.createElement('p');
-    note.textContent = 'Strong opportunities launch automatically. These opportunities were profitable enough to keep, but require your approval before spending.';
+    note.textContent = 'Automatic launches require verified product economics. These candidates need your review; confirm costs and profitability before approving additional spending.';
     note.style.fontSize = '13px';
     panel.appendChild(note);
 
@@ -250,6 +250,7 @@ DASHBOARD_PATCH_JS = r"""
       name.textContent = (item.product_title || 'Product') + ' — ' + (item.target || '');
       card.appendChild(name);
       card.appendChild(opportunityMetric('Target type', item.target_type || 'KEYWORD'));
+      card.appendChild(opportunityMetric('Margin data', item.economics && ['product_costs','product_margin'].indexOf(item.economics.economics_source) >= 0 ? (Number(item.economics.gross_margin) * 100).toFixed(1) + '%' : 'Missing — profitability unverified'));
       card.appendChild(opportunityMetric('Orders', String(item.orders || 0)));
       card.appendChild(opportunityMetric('Sales', fmtMoney(item.sales || 0)));
       card.appendChild(opportunityMetric('Spend', fmtMoney(item.spend || 0)));
@@ -579,7 +580,7 @@ def api_harvest_discovery_winners(
         apply_live = live_requested(payload)
         fallback_bid = float(payload.get("winner_bid", product.get("suggested_bid") or DEFAULT_FALLBACK_BID))
         _, _, protected_bid = choose_budget_protected_bid({}, fallback_bid)
-        exact_bid = round(max(0.10, protected_bid * 1.15), 2)
+        exact_bid = round(protected_bid, 2)
 
         client = AmazonAdsClient()
         existing = _find_existing_launch_campaigns(client, _safe_title(product))

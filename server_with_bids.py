@@ -64,6 +64,8 @@ def _acos_protected_bid(
     return min(daypart_bid, _clamp_bid(suggested_bid * multiplier)), True, "acos_above_ceiling"
 
 def _load_baseline_bids() -> Dict[str, float]:
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        return GCSState("ad-group-baselines").read().get("baselines", {})
     try:
         if BASELINE_BIDS_FILE.exists():
             data = json.loads(BASELINE_BIDS_FILE.read_text(encoding="utf-8"))
@@ -75,6 +77,11 @@ def _load_baseline_bids() -> Dict[str, float]:
 
 
 def _save_baseline_bids(data: Dict[str, float]) -> None:
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        GCSState("ad-group-baselines").save({"baselines": data})
+        return
+    if os.getenv("K_SERVICE"):
+        raise RuntimeError("Durable state required for bid baselines")
     try:
         BASELINE_BIDS_FILE.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     except Exception:
@@ -195,8 +202,8 @@ def api_retune_existing_bids(
             daypart_bid = _clamp_bid(daypart_bid * sales_multiplier)
             metrics = campaign_metrics.get(campaign_id, {})
             new_bid, circuit_breaker_active, adjustment_reason = _acos_protected_bid(
-                daypart_bid, suggested_bid, metrics, current_bid=current_bid
-            ) if suggested_bid else (daypart_bid, False, None)
+                daypart_bid, base_bid, metrics, current_bid=current_bid
+            )
             if not metrics or not metrics_fresh:
                 new_bid = min(new_bid, current_bid)
                 adjustment_reason = "missing_or_stale_metrics_no_increase"
@@ -221,7 +228,7 @@ def api_retune_existing_bids(
                 "adjustmentReason": adjustment_reason,
             }
             preview.append(row)
-            if bid_source == "amazon_suggested_bid" and abs(new_bid - current_bid) >= 0.01:
+            if abs(new_bid - current_bid) >= 0.01:
                 update_row = {"adGroupId": ad_group_id, "defaultBid": new_bid}
                 if campaign_id:
                     update_row["campaignId"] = campaign_id

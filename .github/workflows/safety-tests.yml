@@ -15,4 +15,4 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt pytest httpx
-      - run: python -m pytest -q test_automation.py test_production_safety.py test_acos_bid_circuit_breaker.py test_amazon_bid_recommendations.py test_ppc_agent.py test_production_routes.py test_sales_growth_engine.py
+      - run: python -m pytest -q test_automation.py test_production_safety.py test_acos_bid_circuit_breaker.py test_amazon_bid_recommendations.py test_ppc_agent.py test_production_routes.py test_sales_growth_engine.py test_review_regressions.py

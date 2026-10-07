@@ -1,93 +1,47 @@
-# GCP Cloud Run Deployment
+# Production deployment and operation
 
-## 🚀 One-Time Setup
+## Current production behavior (October 2026)
 
-### 1. Deploy to Cloud Run
-```bash
-./deploy-cloud-run.sh
-```
-This builds the Docker image and deploys to Cloud Run (~5 minutes)
+The supported entrypoint is `final_server:app` (Dockerfile). The dashboard stores
+its access token using Set Token; `/login` belongs to the older app and is not a
+production login endpoint. The GitHub deploy workflow is the canonical deploy.
+`app.py`, `run_optimizer.py`, and the archived ZIP are legacy implementations.
 
-### 2. Set up Daily Scheduling
-```bash
-./setup-scheduler.sh
-```
-This creates a Cloud Scheduler job that runs daily at 9 AM EST
+Cloud Scheduler drives bids, harvesting, opportunities, and growth. The separate
+GitHub daily campaign-plan workflow only generates a preview artifact.
+Automatic growth and opportunity launches require complete product costs or an
+explicit gross margin from the product sheet. Missing costs hold expansion for
+review. The monitor checks all four workflows and reports missing outcomes.
 
-## 🧪 Testing
+With AUTOMATION_STATE_BUCKET configured, manual pending reports/history and
+ad-group baselines are stored in GCS. Manual report/apply calls are serialized;
+a killed request can require the lock recovery procedure in AUTOMATION_V2.md.
+Old process-local pending reports must be requested again after this deployment.
+Configured bid ranges on dashboard cards include enabled ad-group defaults and
+explicit keyword/target bids; they are not actual auction prices. Failed partial
+reads are labeled partial. Amazon recommendation ranges remain unavailable when
+no verified recommendation was retrieved.
 
-### Authenticated Smoke Test
-```bash
-./smoke-test-cloud-run.sh
-```
+## Deployment
 
-This verifies the deployed `app.py` dashboard stack with the same auth model used in production:
-- `GET /login` returns the dashboard login page
-- `POST /login` accepts the `DAILY_OPTIMIZER_TOKEN` and creates the session cookie used by the dashboard
-- `GET /health` returns the health payload
-- `POST /api/run-daily-optimization` can be exercised separately via `./trigger-optimizer.sh`
+Pushes to main run the production safety gate and then deploy Cloud Run. The
+runtime needs the Amazon Ads credentials, DAILY_OPTIMIZER_TOKEN, and
+AUTOMATION_STATE_BUCKET. The dashboard HTML and health endpoint are public;
+all /api/ endpoints require the optimizer token. Alternative deployment scripts
+preserve this access model and existing environment settings.
 
-### Manual Trigger
-```bash
-./trigger-optimizer.sh
-```
+Run `bash setup-scheduler.sh` once from an authorized Cloud Shell to provision
+schedules and state storage. Routine deployment preserves them. The harvest tick
+also drives opportunity and growth workflows; each has separate durable state.
+See AUTOMATION_V2.md for lock recovery after an interrupted process.
 
-### Manual Authenticated Checks
-```bash
-SERVICE_URL=$(gcloud run services describe campaign-optimizer \
-  --region us-central1 \
-  --format='value(status.url)' \
-  --project=amazon-ppc-bid-optimizer)
+## Verification
 
-curl "${SERVICE_URL}/login"
-curl "${SERVICE_URL}/health"
-curl -X POST "${SERVICE_URL}/api/run-daily-optimization" \
-  -H "Authorization: ******" \
-  -H "Content-Type: application/json" \
-  -d '{"apply_negatives_live":true,"apply_winners_live":true,"lookback_days":14,"winner_bid":0.90}'
-```
+Run `DAILY_OPTIMIZER_TOKEN=secret-token python -m pytest -q --ignore=test_creds.py`.
+Tests use mocked Amazon responses. `test_creds.py` is an explicit live credential
+smoke script and must not be collected as an offline test.
 
-### View Logs
-```bash
-gcloud logging read \
-  "resource.type=cloud_run_revision AND resource.labels.service_name=campaign-optimizer" \
-  --limit 50 \
-  --project=amazon-ppc-bid-optimizer
-```
-
-## 📅 Schedule
-
-**Automatic runs:** Every day at 9:00 AM EST
-
-The optimizer will:
-1. Fetch fresh campaign IDs from Amazon Ads
-2. Download latest campaign performance report
-3. Apply Priority 1 optimizations automatically
-4. Send notification with results
-
-## ⚙️ Configuration
-
-Edit environment variables in `deploy-cloud-run.sh`:
-- `PRIORITY_FILTER=1` - Which priority level to auto-apply (1-5)
-- `NOTIFICATION_EMAIL` - Email for notifications
-- `SLACK_WEBHOOK_URL` - Slack webhook for alerts
-
-## 🔒 Security
-
-- Cloud Run is deployed with `--allow-unauthenticated`, but the dashboard and control APIs are protected inside the app
-- Browser users authenticate through `/login` with `DAILY_OPTIMIZER_TOKEN`, which creates the session cookie used by the dashboard
-- Automation can call protected APIs with the same bearer token used by the UI
-- Uses GCP Secret Manager for Amazon Ads credentials
-- Runs with minimal IAM permissions
-
-## 💰 Cost
-
-Estimated monthly cost:
-- Cloud Run: ~$5/month (1 run/day, 5 min each)
-- Cloud Scheduler: $0.10/month
-- **Total: ~$5/month**
-
-## 📊 Monitoring
-
-View execution history in GCP Console:
-https://console.cloud.google.com/run/detail/us-central1/campaign-optimizer
+Open the dashboard and use Set Token once in the browser. The monitor reads
+saved outcomes; a green result verifies recent recorded workflow outcomes, not
+profitability or future delivery. To request manual optimization use the
+provided trigger script, then Apply Pending Report after Amazon finishes.

@@ -1,3 +1,5 @@
+> Current production instructions: see [README_DEPLOYMENT.md](README_DEPLOYMENT.md). This document describes an earlier workflow; its feature and activation claims may not apply to the deployed service.
+
 # Campaign Optimizer - Quick Start
 
 ## Run Analysis

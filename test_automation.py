@@ -386,6 +386,7 @@ def test_product_ad_and_negative_list_helpers_use_campaign_filters():
 
 def test_opportunity_profitability_gate_auto_launch():
     item = opportunity_monitor.classify_opportunity({
+        'economics': {'economics_source': 'product_margin', 'gross_margin': .4, 'profitable_acos': .3},
         'product_id': 'p1',
         'product_title': 'Liquid Kelp',
         'target_type': 'KEYWORD',
@@ -454,6 +455,7 @@ def test_opportunity_aggregates_related_asin_from_discovery_rows():
 
 def test_process_opportunities_auto_launches_only_strong_and_queues_weaker(monkeypatch):
     strong = {
+        'economics': {'economics_source': 'product_margin', 'gross_margin': .4, 'profitable_acos': .3},
         'product_id': 'p1', 'product_title': 'Liquid Kelp', 'sku': 'sku1', 'asin': 'a1',
         'suggested_bid': .75, 'source_campaign_id': 'c1', 'target': 'liquid kelp fertilizer',
         'target_type': 'KEYWORD', 'clicks': 10, 'orders': 3, 'spend': 20, 'sales': 90,
@@ -637,6 +639,7 @@ def test_opportunity_campaign_identity_uses_product_and_target_hash():
 
 def test_auto_launch_daily_cap_persists_across_invocations(monkeypatch):
     base = {
+        'economics': {'economics_source': 'product_margin', 'gross_margin': .4, 'profitable_acos': .3},
         'product_id': 'p1', 'product_title': 'Example', 'sku': 'sku1', 'asin': 'B0NATURE01',
         'suggested_bid': .75, 'source_campaign_id': 'c1', 'target_type': 'KEYWORD',
         'clicks': 10, 'orders': 3, 'spend': 10, 'sales': 90,
@@ -663,6 +666,7 @@ def test_auto_launch_daily_cap_persists_across_invocations(monkeypatch):
 
 def test_auto_launch_slot_is_persisted_before_launch(monkeypatch):
     item = {
+        'economics': {'economics_source': 'product_margin', 'gross_margin': .4, 'profitable_acos': .3},
         'product_id': 'p1', 'product_title': 'Example', 'sku': 'sku1', 'asin': 'B0NATURE01',
         'suggested_bid': .75, 'source_campaign_id': 'c1', 'target': 'winner',
         'target_type': 'KEYWORD', 'clicks': 10, 'orders': 3, 'spend': 10, 'sales': 90,
