@@ -579,7 +579,7 @@ def api_harvest_discovery_winners(
         apply_live = live_requested(payload)
         fallback_bid = float(payload.get("winner_bid", product.get("suggested_bid") or DEFAULT_FALLBACK_BID))
         _, _, protected_bid = choose_budget_protected_bid({}, fallback_bid)
-        exact_bid = round(max(0.10, protected_bid * 1.15), 2)
+        exact_bid = round(protected_bid, 2)
 
         client = AmazonAdsClient()
         existing = _find_existing_launch_campaigns(client, _safe_title(product))

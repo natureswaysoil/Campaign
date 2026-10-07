@@ -10,15 +10,17 @@ from zoneinfo import ZoneInfo
 def read_states():
     bucket = os.environ.get('AUTOMATION_STATE_BUCKET', 'amazon-ppc-bid-optimizer-ppc-automation-state')
     states = {}
-    for kind in ('bid', 'harvest'):
-        listing = subprocess.run(['gcloud', 'storage', 'ls', f'gs://{bucket}/*/{kind}-workflow.json'],
-                                 check=True, capture_output=True, text=True)
-        for uri in listing.stdout.splitlines():
-            if not uri.startswith('gs://'):
-                continue
-            result = subprocess.run(['gcloud', 'storage', 'cat', uri], check=True,
-                                    capture_output=True, text=True)
-            states.setdefault(uri.split('/')[-2], {})[kind] = json.loads(result.stdout)
+    listing = subprocess.run(['gcloud', 'storage', 'ls', f'gs://{bucket}/*/*-workflow.json'],
+                             check=True, capture_output=True, text=True)
+    for uri in listing.stdout.splitlines():
+        if not uri.startswith('gs://'):
+            continue
+        kind = uri.rsplit('/', 1)[-1].removesuffix('-workflow.json')
+        if kind not in ('bid', 'harvest', 'opportunity', 'sales-growth'):
+            continue
+        result = subprocess.run(['gcloud', 'storage', 'cat', uri], check=True,
+                                capture_output=True, text=True)
+        states.setdefault(uri.split('/')[-2], {})[kind] = json.loads(result.stdout)
     return states
 
 
@@ -29,16 +31,16 @@ def summarize(states, now=None):
     for profile, workflows in states.items():
         output = {'profile': profile}
         alerts = []
-        for kind in ('bid', 'harvest'):
+        for kind in ('bid', 'harvest', 'opportunity', 'sales-growth'):
             state = workflows.get(kind, {})
             result = state.get('last_result') or {}
             pending = state.get('pending') or {}
-            requested = pending.get('requested_at') if kind == 'harvest' else state.get('requested_at')
-            waiting = bool(pending) if kind == 'harvest' else bool(state.get('report_id'))
+            requested = pending.get('requested_at') if kind != 'bid' else state.get('requested_at')
+            waiting = bool(pending) if kind != 'bid' else bool(state.get('report_id'))
             age = round((now - requested) / 3600, 2) if waiting and requested else None
             last_run = state.get('last_run_at')
             entry = {'report_pending': waiting, 'pending_hours': age,
-                     'report_id': pending.get('report_id') if kind == 'harvest' else state.get('report_id'),
+                     'report_id': pending.get('report_id') if kind != 'bid' else state.get('report_id'),
                      'last_run_at': last_run, 'last_success': result.get('success')}
             if kind == 'bid':
                 entry.update(ad_group_updates=result.get('updates_applied'),
@@ -52,13 +54,20 @@ def summarize(states, now=None):
                              keyword_errors=result.get('keyword_errors'))
                 completed = state.get('completed_day')
                 if completed and (today - datetime.fromisoformat(completed).date()).days > 1:
-                    alerts.append('Daily harvesting is more than one day behind')
+                    alerts.append(f'{kind} is more than one day behind')
+            if kind == 'opportunity':
+                entry['auto_launches'] = len(result.get('auto_launches') or [])
+                entry['approvals'] = len(state.get('approvals') or {})
+            elif kind == 'sales-growth':
+                entry['auto_scales'] = len(result.get('auto_scales') or [])
+                entry['recommendations'] = len(state.get('recommendations') or {})
             if age is not None and age > 2:
                 alerts.append(f'{kind} report pending over two hours')
-            if result.get('success') is False:
+            if result.get('success') is False or result.get('error') is True:
                 alerts.append(f'{kind} latest apply reported failure')
             if not result:
                 entry['verification'] = 'No recorded apply result yet; live changes unverified'
+                alerts.append(f'{kind} has no recorded apply result')
             output[kind] = entry
         output['alerts'] = alerts
         profiles.append(output)

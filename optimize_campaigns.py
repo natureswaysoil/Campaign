@@ -102,6 +102,17 @@ async def protect_api(request: Request, call_next):
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         except (ValueError, UnicodeDecodeError):
             return JSONResponse({"detail": "Invalid JSON"}, status_code=422)
+    manual_paths = {"/api/run-optimizer", "/api/run-daily-optimization", "/api/apply-negatives",
+                    "/api/apply-winners", "/api/apply-optimization"}
+    if request.url.path in manual_paths and os.getenv("AUTOMATION_STATE_BUCKET"):
+        from automation_store import GCSState, StateBusy
+        try:
+            with GCSState("manual-optimizer-guard").locked():
+                return await call_next(request)
+        except StateBusy as exc:
+            return JSONResponse({"error": True, "message": str(exc)}, status_code=409)
+        except Exception:
+            return JSONResponse({"error": True, "message": "Durable optimizer state unavailable"}, status_code=503)
     return await call_next(request)
 
 
@@ -315,6 +326,11 @@ def _days_ago_iso(days: int) -> str:
 
 
 def _load_pending_report() -> Dict[str, Any]:
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        from automation_store import GCSState
+        return GCSState("manual-pending-report").read()
+    if os.getenv("K_SERVICE"):
+        raise RuntimeError("AUTOMATION_STATE_BUCKET required for manual optimizer reports")
     try:
         if PENDING_REPORT_FILE.exists():
             return json.loads(PENDING_REPORT_FILE.read_text(encoding="utf-8"))
@@ -324,10 +340,19 @@ def _load_pending_report() -> Dict[str, Any]:
 
 
 def _save_pending_report(entry: Dict[str, Any]) -> None:
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        from automation_store import GCSState
+        GCSState("manual-pending-report").save(entry)
+        return
+    if os.getenv("K_SERVICE"):
+        raise RuntimeError("AUTOMATION_STATE_BUCKET required for manual optimizer reports")
     PENDING_REPORT_FILE.write_text(json.dumps(entry, indent=2, default=str), encoding="utf-8")
 
 
 def _load_optimizer_history() -> List[Dict[str, Any]]:
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        from automation_store import GCSState
+        return GCSState("manual-optimizer-history").read().get("history", [])
     try:
         if OPTIMIZER_HISTORY_FILE.exists():
             data = json.loads(OPTIMIZER_HISTORY_FILE.read_text(encoding="utf-8"))
@@ -340,7 +365,11 @@ def _load_optimizer_history() -> List[Dict[str, Any]]:
 def _save_optimizer_history(entry: Dict[str, Any]) -> None:
     history = _load_optimizer_history()
     history.append(entry)
-    OPTIMIZER_HISTORY_FILE.write_text(json.dumps(history[-50:], indent=2, default=str), encoding="utf-8")
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        from automation_store import GCSState
+        GCSState("manual-optimizer-history").save({"history": history[-50:]})
+    else:
+        OPTIMIZER_HISTORY_FILE.write_text(json.dumps(history[-50:], indent=2, default=str), encoding="utf-8")
 
 
 class AmazonAdsClient:
@@ -813,6 +842,8 @@ def api_dashboard_data(authorization: Optional[str] = Header(default=None), x_da
             if str(campaign.get("state") or "").upper() == "ENABLED"
         ]
 
+        from dashboard_bids import enrich_campaign_bids
+        enrich_campaign_bids(client, active_campaigns)
         summary, per_campaign = _get_cached_dashboard_summary()
         for c in active_campaigns:
             cid = str(c.get("campaignId") or c.get("campaign_id") or "")

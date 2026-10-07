@@ -13,6 +13,7 @@ Goals:
 - Support NEGATIVE_EXACT and NEGATIVE_PHRASE when applying negatives.
 """
 from __future__ import annotations
+from amazon_results import batch_outcome
 
 import os
 import re
@@ -298,7 +299,13 @@ def apply_negatives_step_with_match_types(client: Any, classified: Dict[str, Any
         rows = negative_keyword_rows_with_match_types(classified, campaign_id)
         if not rows:
             continue
-        client.create_negative_keywords(rows)
+        existing = { (normalize_term(k.get("keywordText")), k.get("matchType")) for k in client.list_campaign_negative_keywords(str(campaign_id)) if str(k.get("state") or "").upper() != "ARCHIVED" }
+        rows = [r for r in rows if (r["keywordText"], r["matchType"]) not in existing]
+        for offset in range(0, len(rows), 100):
+            batch = rows[offset:offset + 100]
+            outcome = batch_outcome(client.create_negative_keywords(batch), "campaignNegativeKeywords", len(batch))
+            if not outcome["success"]:
+                raise RuntimeError(f"Negative keyword application incomplete: {outcome}")
         negatives_applied.append({
             "campaign_id": campaign_id,
             "count": len(rows),

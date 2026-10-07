@@ -59,7 +59,11 @@ def _valid_authorization(authorization: Optional[str]) -> bool:
 
 @app.middleware("http")
 async def require_login(request: Request, call_next):
-    # Auth disabled: dashboard and API are open, no sign-in token required.
+    if request.url.path.startswith("/api/"):
+        try:
+            verify_internal_token(request.headers.get("authorization"), request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
 
 
@@ -687,8 +691,9 @@ def classify_terms(rows: List[Dict]):
 
 
 def verify_internal_token(authorization: Optional[str], request: Optional[Request] = None):
-    # Auth disabled: optimizer / apply endpoints require no token.
-    return
+    if _valid_authorization(authorization) or (request is not None and _valid_session(request.cookies.get(SESSION_COOKIE))):
+        return
+    raise HTTPException(status_code=403, detail="Invalid or missing optimizer token")
 
 
 # ========================= CAMPAIGN CREATION =========================

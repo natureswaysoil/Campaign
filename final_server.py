@@ -46,12 +46,15 @@ def api_update_campaign_state(
             content_type="application/vnd.spcampaign.v3+json",
             accept="application/vnd.spcampaign.v3+json",
         )
+        outcome = batch_outcome(result, "campaigns", 1)
         return JSONResponse({
-            "success": True,
+            "success": outcome["success"],
+            "error": not outcome["success"],
+            "message": "Campaign state acknowledged" if outcome["success"] else "Amazon rejected or did not confirm the state change",
             "campaign_id": campaign_id,
             "state": state,
             "amazon_response": result,
-        })
+        }, status_code=200 if outcome["success"] else 502)
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=500)
 
@@ -124,7 +127,7 @@ def harvest_report_rows(payload, client, rows, report_id, start_date, end_date):
                         break
                 fallback_bid = float(payload.get("winner_bid", product.get("suggested_bid") or 0.75))
                 _, _, protected_bid = extended_server.choose_budget_protected_bid({}, fallback_bid)
-                exact_bid = round(max(0.10, protected_bid * 1.15), 2)
+                exact_bid = round(protected_bid, 2)
                 keyword_rows = extended_server.base._exact_keyword_rows(selected, exact_id, exact_ad_group_id, exact_bid)
                 outcome = create_keywords_verified(client, keyword_rows) if apply_live else {
                     "accepted": 0, "failed": 0, "success": True, "errors": []}

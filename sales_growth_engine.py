@@ -6,6 +6,7 @@ Only SCALE may change budgets automatically. All other actions are recommendatio
 from __future__ import annotations
 
 import os
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -46,9 +47,8 @@ def _optional_money(value: Any) -> Optional[float]:
     if value in (None, ""):
         return None
     try:
-        return float(
-            str(value).replace("$", "").replace(",", "").replace("%", "").strip()
-        )
+        number = float(str(value).replace("$", "").replace(",", "").replace("%", "").strip())
+        return number if math.isfinite(number) and number >= 0 else None
     except Exception:
         return None
 
@@ -82,7 +82,7 @@ def product_economics(raw: Dict[str, Any]) -> Dict[str, Any]:
     amazon_fees = fees_value or 0.0
     shipping = shipping_value or 0.0
     explicit_margin = explicit_margin_value if explicit_margin_value is not None else -1.0
-    if explicit_margin > 1:
+    if "%" in margin_raw or explicit_margin > 1:
         explicit_margin /= 100.0
 
     complete_costs = all(
@@ -93,15 +93,15 @@ def product_economics(raw: Dict[str, Any]) -> Dict[str, Any]:
     if complete_costs and price > 0:
         gross_margin = max(0.0, min(0.95, (price - known_costs) / price))
         source = "product_costs"
-    elif explicit_margin >= 0:
+    elif 0 <= explicit_margin <= 1:
         gross_margin = max(0.0, min(0.95, explicit_margin))
         source = "product_margin"
     else:
-        gross_margin = DEFAULT_GROSS_MARGIN
-        source = "default_margin"
+        gross_margin = 0.0
+        source = "missing_costs"
 
     break_even_acos = gross_margin
-    profitable_acos = max(0.05, min(SCALE_MAX_ACOS, break_even_acos - PROFIT_RESERVE))
+    profitable_acos = max(0.0, min(SCALE_MAX_ACOS, break_even_acos - PROFIT_RESERVE))
     return {
         "price": round(price, 2),
         "cogs": round(cogs, 2),
@@ -145,6 +145,9 @@ def classify_product(
     elif clicks >= FIX_MIN_CLICKS and (orders == 0 or cvr < FIX_MAX_CVR):
         decision = "FIX_LISTING"
         reason = "traffic_not_converting"
+    elif economics.get("economics_source") not in {"product_costs", "product_margin"}:
+        decision = "HOLD"
+        reason = "verified_product_costs_or_margin_required"
     elif (
         orders >= SCALE_MIN_ORDERS
         and sales >= SCALE_MIN_SALES
@@ -373,7 +376,7 @@ def run_growth(
             persist_state(state)
 
     return {
-        "success": True,
+        "success": not any(v.get("status") != "verified" for k, v in reservations.items() if k.startswith(today + ":")),
         "live": live,
         "evaluated": len(evaluated),
         "counts": {decision: sum(1 for x in evaluated if x["decision"] == decision)
@@ -418,9 +421,10 @@ def growth_tick(payload: Dict[str, Any]) -> JSONResponse:
             )
             state["last_result"] = result
             state["last_run_at"] = time.time()
-            state["completed_day"] = today
+            if result["success"]:
+                state["completed_day"] = today
             store.save(state)
-            return JSONResponse(result)
+            return JSONResponse(result, status_code=200 if result["success"] else 502)
     except GrowthMetricsNotReady as exc:
         return JSONResponse({
             "success": True,

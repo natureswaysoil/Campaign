@@ -1,3 +1,5 @@
+> Current production instructions: see [README_DEPLOYMENT.md](README_DEPLOYMENT.md). This document describes an earlier workflow; its feature and activation claims may not apply to the deployed service.
+
 # Scheduled PPC automation
 
 This adds two production endpoints to `final_server:app`. Both require the

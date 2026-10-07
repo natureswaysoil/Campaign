@@ -60,7 +60,7 @@ def _validated_daily_budget(value: Any) -> float:
     if not math.isfinite(budget):
         raise ValueError("daily_budget must be finite")
     if budget < 2.0 or budget > MAX_TEST_DAILY_BUDGET:
-        raise ValueError(f"daily_budget must be between $2.00 and \${MAX_TEST_DAILY_BUDGET:.2f}")
+        raise ValueError(f"daily_budget must be between $2.00 and ${MAX_TEST_DAILY_BUDGET:.2f}")
     return round(budget, 2)
 
 
@@ -97,6 +97,7 @@ def aggregate_opportunities(
     rows: List[Dict[str, Any]],
     discovery_map: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    from sales_growth_engine import product_economics
     aggregated: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in rows:
         cid = _campaign_id(row)
@@ -111,6 +112,7 @@ def aggregate_opportunities(
             "sku": product.get("sku") or "",
             "asin": product.get("asin") or "",
             "suggested_bid": float(product.get("suggested_bid") or DEFAULT_FALLBACK_BID),
+            "economics": product_economics(product.get("raw") or {}),
             "source_campaign_id": cid,
             "target": term,
             "target_type": "ASIN" if ASIN_RE.match(term) else "KEYWORD",
@@ -156,8 +158,16 @@ def classify_opportunity(item: Dict[str, Any]) -> Dict[str, Any]:
     acos = item.get("acos")
     cvr = float(item.get("conversion_rate") or 0)
 
+    economics = item.get("economics") or {}
+    margin_known = economics.get("economics_source") in {"product_costs", "product_margin"}
+    profitable = (
+        margin_known and acos is not None
+        and float(acos) <= float(economics.get("profitable_acos") or 0)
+        and float(economics.get("gross_margin") or 0) * sales > float(item.get("spend") or 0)
+    )
     auto = (
-        clicks >= AUTO_MIN_CLICKS
+        profitable
+        and clicks >= AUTO_MIN_CLICKS
         and orders >= AUTO_MIN_ORDERS
         and sales >= AUTO_MIN_SALES
         and acos is not None
@@ -205,7 +215,7 @@ def _matching_launch_campaigns(
     product_title: str,
     campaign_type: str,
 ) -> List[Dict[str, Any]]:
-    prefix = extended_server._safe_title({"title": product_title})
+    prefix = extended_server._safe_title({"title": product_title}) + " | "
     marker = "| AUTO DISCOVERY |" if campaign_type == "AUTO_DISCOVERY" else "| MANUAL EXACT |"
     return [
         campaign for campaign in campaigns
@@ -505,7 +515,7 @@ def process_opportunities(
             ignored += 1
 
     return {
-        "success": True,
+        "success": not any(x.get("reason") == "auto_launch_failed" for x in approvals.values()),
         "live": live,
         "evaluated": len(evaluated),
         "auto_launch_candidates": sum(1 for x in evaluated if x["decision"] == "AUTO_LAUNCH"),
@@ -597,10 +607,11 @@ def opportunity_tick(payload: Dict[str, Any]) -> JSONResponse:
             result = process_opportunities(rows, client, state, live=True, persist_state=store.save)
             state["last_result"] = result
             state["last_run_at"] = time.time()
-            state["completed_day"] = pending["day"]
-            state.pop("pending", None)
+            if result["success"]:
+                state["completed_day"] = pending["day"]
+                state.pop("pending", None)
             store.save(state)
-            return JSONResponse(result)
+            return JSONResponse(result, status_code=200 if result["success"] else 502)
     except StateBusy as exc:
         return JSONResponse({"success": False, "message": str(exc)}, status_code=409)
     except Exception as exc:

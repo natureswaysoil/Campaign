@@ -1,4 +1,4 @@
-name: PPC Optimizer - Daily Run (with Dayparting)
+name: Daily campaign plan (preview only)
 
 on:
   schedule:
@@ -29,7 +29,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pandas requests
 
-      - name: Run PPC Optimizer
+      - name: Generate offline campaign plan
         run: python optimize_campaigns.py
         env:
           DRY_RUN: "true"           # Keep True until you are ready to go live
