@@ -5,12 +5,20 @@ or overwritten. SP-API Secret Manager values remain server-side references.
 """
 import json
 import os
+import re
 import subprocess
 import urllib.request
 
 
 def gcloud(*args):
-    return subprocess.check_output(['gcloud', *args], text=True, stderr=subprocess.PIPE).strip()
+    try:
+        return subprocess.check_output(['gcloud', *args], text=True, stderr=subprocess.PIPE).strip()
+    except subprocess.CalledProcessError as exc:
+        # Show only the operation and recognized error categories, never arguments,
+        # stdout, environment, headers, or a traceback containing credentials.
+        details = re.findall(r"PERMISSION_DENIED|NOT_FOUND|INVALID_ARGUMENT|UNAUTHENTICATED|unrecognized arguments|(?:run|secretmanager|cloudscheduler|iam)\.[a-zA-Z]+\.[a-zA-Z]+", exc.stderr or '')
+        operation = ' '.join(args[:3])
+        raise RuntimeError(operation + ' failed: ' + ', '.join(dict.fromkeys(details))) from None
 
 
 def main():
@@ -66,5 +74,5 @@ if __name__ == '__main__':
         main()
     except Exception as exc:
         # Subprocess exceptions can include token-bearing arguments; never print them.
-        print('Profit setup incomplete (' + type(exc).__name__ + '). Check cloud permissions and configuration.')
+        print('Profit setup incomplete: ' + (str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__))
         raise SystemExit(1)
