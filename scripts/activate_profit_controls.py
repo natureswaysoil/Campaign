@@ -31,10 +31,20 @@ def main():
     existing = {e['name'] for e in config['spec']['template']['spec']['containers'][0].get('env', [])}
     required = ['SP_API_CLIENT_ID', 'SP_API_CLIENT_SECRET', 'SP_API_REFRESH_TOKEN',
                 'SP_API_SELLER_ID', 'SP_API_MARKETPLACE_ID']
-    available = {s['name'].split('/')[-1] for s in json.loads(gcloud('secrets', 'list', '--project', project, '--format=json'))}
-    missing = [name for name in required if name not in existing and name not in available]
+    missing = []
+    for name in required:
+        if name in existing:
+            continue
+        try:
+            # Use existing secret-version access, not project-wide list permissions.
+            # Discard values immediately; only Secret Manager references are deployed.
+            if not gcloud('secrets', 'versions', 'access', 'latest', '--secret=' + name, '--project', project):
+                missing.append(name)
+        except RuntimeError as exc:
+            print(str(exc))
+            missing.append(name)
     if missing:
-        print('SP-API setup missing: ' + ', '.join(missing))
+        print('SP-API setup unavailable: ' + ', '.join(missing))
     else:
         attach = [name + '=' + name + ':latest' for name in required if name not in existing]
         if attach:
@@ -45,10 +55,21 @@ def main():
         raise RuntimeError('Optimizer token missing')
     if os.environ.get('GITHUB_ACTIONS') == 'true':
         print('::add-mask::' + token, flush=True)
+    req = urllib.request.Request(url + '/api/profit/status', headers={'X-Daily-Optimizer-Token': token})
+    with urllib.request.urlopen(req, timeout=60) as response:
+        status = json.load(response)
+    print('Saved spending policy: ' + ('present' if status.get('policy') else 'MISSING'))
+    print('Saved product economics records: ' + str(len(status.get('products', []))))
+    print('Complete spending snapshot: ' + ('present' if status.get('complete_spend_at') else 'awaiting sync'))
     # Reuse the scheduler identity already configured for this application.
     sa = 'campaign-optimizer-scheduler@' + project + '.iam.gserviceaccount.com'
-    jobs = json.loads(gcloud('scheduler', 'jobs', 'list', '--location', region, '--project', project, '--format=json'))
-    present = any(j['name'].endswith('/ppc-profit-tick') for j in jobs)
+    try:
+        gcloud('scheduler', 'jobs', 'describe', 'ppc-profit-tick', '--location', region, '--project', project, '--format=value(state)')
+        present = True
+    except RuntimeError as exc:
+        if 'NOT_FOUND' not in str(exc):
+            raise
+        present = False
     gcloud('scheduler', 'jobs', 'update' if present else 'create', 'http', 'ppc-profit-tick',
            '--location', region, '--project', project, '--schedule=*/15 * * * *', '--time-zone=America/New_York',
            '--uri=' + url + '/api/automation/profit-tick', '--http-method=POST',
@@ -60,12 +81,6 @@ def main():
     if job['state'] == 'PAUSED':
         gcloud('scheduler', 'jobs', 'resume', 'ppc-profit-tick', '--location', region, '--project', project, '--format=value(name)')
     print('Profit scheduler configured every 15 minutes.')
-    req = urllib.request.Request(url + '/api/profit/status', headers={'X-Daily-Optimizer-Token': token})
-    with urllib.request.urlopen(req, timeout=60) as response:
-        status = json.load(response)
-    print('Saved spending policy: ' + ('present' if status.get('policy') else 'MISSING'))
-    print('Saved product economics records: ' + str(len(status.get('products', []))))
-    print('Complete spending snapshot: ' + ('present' if status.get('complete_spend_at') else 'awaiting sync'))
     print('Readiness checked. Missing/stale inputs continue to block spending increases.')
 
 

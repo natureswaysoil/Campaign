@@ -387,7 +387,9 @@ def test_activation_reuses_secrets_and_does_not_invent_policy(monkeypatch, capsy
         if args[:2] == ('secrets', 'list'):
             return '[]'
         if args[:3] == ('secrets', 'versions', 'access'):
-            return 'private-test-token'
+            if '--secret=DAILY_OPTIMIZER_TOKEN' in args:
+                return 'private-test-token'
+            raise RuntimeError('NOT_FOUND')
         if args[:3] == ('scheduler', 'jobs', 'list'):
             return '[]'
         if args[:3] == ('scheduler', 'jobs', 'describe'):
@@ -400,5 +402,5 @@ def test_activation_reuses_secrets_and_does_not_invent_policy(monkeypatch, capsy
     output = capsys.readouterr().out
     assert 'Saved spending policy: MISSING' in output
     assert 'private-test-token' not in output
-    assert any(c[:3] == ('scheduler', 'jobs', 'create') for c in calls)
+    assert any(c[:3] == ('scheduler', 'jobs', 'update') for c in calls)
     assert not any(c[:3] == ('run', 'services', 'update') for c in calls)
