@@ -27,8 +27,6 @@ def harvest_tick(payload, apply_rows):
             pending = state.get('pending')
             if not pending:
                 body = _build_search_term_report_body(14)
-                body['startDate'] = (today - timedelta(days=14)).isoformat()
-                body['endDate'] = (today - timedelta(days=1)).isoformat()
                 report_id = client.request_report(body)
                 state['pending'] = {'report_id': report_id, 'day': today.isoformat(), 'requested_at': time.time(),
                                     'start': body['startDate'], 'end': body['endDate']}

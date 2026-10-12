@@ -394,3 +394,7 @@ def api_growth_state(
         return JSONResponse(sales_growth_engine.get_growth_state())
     except Exception as exc:
         return JSONResponse({"error": True, "message": str(exc)}, status_code=503)
+
+# Shared profit controls use the existing /api/ authentication middleware.
+from profit_api import register as register_profit_routes
+register_profit_routes(app)

@@ -471,20 +471,9 @@ def _first_ad_group_id(client: AmazonAdsClient, campaign_id: str) -> Optional[st
 
 
 def _search_term_rows(client: AmazonAdsClient, lookback_days: int) -> Tuple[List[Dict[str, Any]], str, str, str]:
-    start_date = (datetime.date.today() - datetime.timedelta(days=lookback_days)).isoformat()
-    end_date = datetime.date.today().isoformat()
-    report_id = client.request_report({
-        "startDate": start_date,
-        "endDate": end_date,
-        "configuration": {
-            "adProduct": "SPONSORED_PRODUCTS",
-            "groupBy": ["searchTerm"],
-            "columns": ["campaignId", "adGroupId", "searchTerm", "clicks", "cost", "sales7d", "purchases7d"],
-            "reportTypeId": "spSearchTerm",
-            "timeUnit": "SUMMARY",
-            "format": "GZIP_JSON",
-        },
-    })
+    body = base.optimizer_core._build_search_term_report_body(lookback_days)
+    start_date, end_date = body['startDate'], body['endDate']
+    report_id = client.request_report(body)
     report_url = client.wait_for_report(report_id, timeout_seconds=1200)
     return parse_report_json_bytes(client.download_binary(report_url)), report_id, start_date, end_date
 

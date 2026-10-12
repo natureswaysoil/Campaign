@@ -500,6 +500,7 @@ def api_create_recommended_campaigns(
         raw_keywords = generate_keywords_for_product(product_row)
         exact_keywords = _select_exact_keywords(raw_keywords, max_exact_keywords)
         client = AmazonAdsClient()
+        client.profit_product_asin = asin
         start_date = datetime.date.today().isoformat()
         safe_title = _sanitize_name(str(product.get("title") or "Product"))[:70]
 

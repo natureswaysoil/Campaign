@@ -403,6 +403,13 @@ class AmazonAdsClient:
 
     def request(self, method: str, endpoint: str, payload: Any = None, content_type: Optional[str] = None, accept: Optional[str] = None, timeout: int = 60) -> Dict[str, Any]:
         body = self._wrap_payload(endpoint, payload)
+        from profit_guard import ENDPOINTS, guarded_write
+        if method.upper() in ('POST', 'PUT') and endpoint in ENDPOINTS:
+            return guarded_write(self, method.upper(), endpoint, body,
+                                 lambda guarded: self._request_raw(method, endpoint, guarded, content_type, accept, timeout))
+        return self._request_raw(method, endpoint, body, content_type, accept, timeout)
+
+    def _request_raw(self, method, endpoint, body=None, content_type=None, accept=None, timeout=60):
         ct = content_type or SP_CONTENT_TYPES.get(endpoint, "application/json")
         kwargs: Dict[str, Any] = {"headers": self._headers(ct, accept or ct), "timeout": timeout}
         if body is not None:
@@ -633,9 +640,12 @@ def run_optimizer(search_terms_path: Optional[str] = None, dry_run: bool = True)
 
 
 def _build_search_term_report_body(lookback_days: int) -> Dict[str, Any]:
+    from profit_intelligence import ET
+    # Seven-day attribution fields below are complete well before this conservative 14-day lag.
+    end = dt.datetime.now(ET).date() - dt.timedelta(days=15)
     return {
-        "startDate": _days_ago_iso(lookback_days),
-        "endDate": _today_iso(),
+        "startDate": (end - dt.timedelta(days=max(1, min(31, lookback_days)) - 1)).isoformat(),
+        "endDate": end.isoformat(),
         "configuration": {
             "adProduct": "SPONSORED_PRODUCTS",
             "groupBy": ["searchTerm"],
@@ -950,6 +960,9 @@ def api_apply_optimization(payload: Dict[str, Any] = Body(default={}), authoriza
         classified = classify_terms(rows)
         settings = pending.get("settings") or {}
         apply_live = live_requested(payload) and settings.get("apply_live") is True
+        from profit_intelligence import report_is_mature
+        if apply_live and not report_is_mature(settings.get("end_date")):
+            return JSONResponse({"error": True, "message": "Request a new report: stored report has unknown or immature attribution dates."}, status_code=409)
         apply_negatives = apply_live and settings.get("apply_negatives") is True
         apply_winners = apply_live and settings.get("apply_winners") is True
         winner_bid = float(settings.get("winner_bid", payload.get("winner_bid", 0.90)))

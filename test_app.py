@@ -91,6 +91,11 @@ class TestAmazonAdsClientPost:
         client = self._make_client()
         client.session.post.return_value = self._ok_response({batch_key: {"success": [], "error": []}})
 
+        if endpoint in {"/sp/campaigns", "/sp/adGroups", "/sp/productAds", "/sp/keywords"}:
+            with pytest.raises(RuntimeError, match="Legacy ad writes disabled"):
+                client.post(endpoint, payload)
+            client.session.post.assert_not_called()
+            return
         client.post(endpoint, payload)
 
         sent_body = client.session.post.call_args.kwargs["json"]

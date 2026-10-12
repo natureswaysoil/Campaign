@@ -33,6 +33,8 @@ class AmazonAdsClient:
 
     def _request(self, method: str, endpoint: str, **kwargs):
         # ... (same as before) ...
+        if method.upper() != "GET":
+            raise RuntimeError("Legacy ad writes disabled; use optimize_campaigns.AmazonAdsClient")
         self._get_access_token()
         url = f"{self.BASE_URL}{endpoint}"
         resp = requests.request(method, url, headers=self.headers, **kwargs)

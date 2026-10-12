@@ -1,0 +1,341 @@
+"""Regression tests for real spending boundaries, delayed reports and safe recovery."""
+import copy
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+import profit_intelligence as intelligence
+import profit_guard as guards
+import profit_api
+import profit_actions
+import decision_sync
+from profit_intelligence import Policy, Product, Metric, ET
+
+
+@pytest.fixture
+def now():
+    return time.time()
+
+
+@pytest.fixture
+def product(now):
+    return {'asin': 'B012345678', 'sku': 'soil', 'price': 40., 'cogs': 15., 'fees': 6., 'shipping': 10.,
+            'other_cost': 0, 'fee_source': 'manual', 'updated_at': now, 'inventory': 100,
+            'inventory_at': now, 'daily_units': 2., 'velocity_at': now, 'lead_days': 7}
+
+
+def metric(now, **overrides):
+    return {'grain': 'campaign', 'date': (datetime.fromtimestamp(now, ET).date() - timedelta(days=20)).isoformat(),
+            'campaign_id': 'c', 'clicks': 100, 'orders': 10, 'sales': 400., 'spend': 20.,
+            'impressions': 1000, 'observed_at': now, **overrides}
+
+
+@pytest.fixture
+def data(product, now):
+    return {'products': {product['asin']: product}, 'metrics': [metric(now)], 'complete_spend_at': now}
+
+
+@pytest.fixture
+def client():
+    client = MagicMock()
+    client.profit_product_asin = None
+    campaigns = [{'campaignId': 'c', 'state': 'ENABLED', 'budget': {'budget': 30., 'budgetType': 'DAILY'},
+                  'dynamicBidding': {'strategy': 'MANUAL'}}]
+    groups = [{'campaignId': 'c', 'adGroupId': 'g', 'state': 'ENABLED', 'defaultBid': .2}]
+    keywords = [{'campaignId': 'c', 'adGroupId': 'g', 'keywordId': 'k', 'state': 'ENABLED', 'bid': .2}]
+    client.list_campaigns.return_value = campaigns
+    client.list_product_ads.return_value = [{'campaignId': 'c', 'adGroupId': 'g', 'adId': 'a', 'asin': 'B012345678', 'sku': 'soil', 'state': 'ENABLED'}]
+    def listing(path, key, filters=None):
+        return {'/sp/adGroups/list': groups, '/sp/keywords/list': keywords, '/sp/targets/list': [],
+                '/sp/productAds/list': client.list_product_ads.return_value}[path]
+    client.list_all.side_effect = listing
+    client.list_keywords.return_value = keywords
+    client.list_targets.return_value = []
+    return client
+
+
+def guard(client, data, now, **policy):
+    return guards.Guard(client, data, Policy(daily_limit=100, **policy), {}, now)
+
+
+def test_margin_and_cross_asin_aov_cap(product, now):
+    policy = Policy(daily_limit=100)
+    result = intelligence.cpc_ceiling(product, [metric(now, sales=4000)], policy, now)
+    assert result['margin'] == .225
+    assert result['target_acos'] == .125
+    assert result['aov'] == 40  # Other purchased ASINs cannot inflate product AOV.
+    assert result['max_cpc'] == .45
+
+
+@pytest.mark.parametrize('field', ['price', 'cogs', 'fees', 'shipping'])
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -1])
+def test_nonfinite_and_negative_costs_rejected(product, field, value):
+    with pytest.raises(ValueError):
+        Product.model_validate({**product, field: value})
+
+
+def test_recent_clicks_do_not_become_losses(data, now):
+    data['metrics'].append(metric(now, date=datetime.fromtimestamp(now, ET).date().isoformat(), clicks=1000, orders=0))
+    assert len(intelligence.mature_rows(data, Policy(daily_limit=100), now, grain='campaign')) == 1
+
+
+def test_preliminary_old_report_is_not_mature(data, now):
+    data['metrics'][0]['observed_at'] = now - 18 * 86400
+    assert intelligence.mature_rows(data, Policy(daily_limit=100), now, grain='campaign') == []
+
+
+def test_inventory_zero_stops_even_without_conversions(product, now):
+    p = {**product, 'inventory': 0}
+    assert intelligence.cpc_ceiling(p, [], Policy(daily_limit=100), now)['max_cpc'] == 0
+
+
+def test_restock_eta_does_not_invent_stock(product, now):
+    p = {**product, 'inventory': 10, 'restock_date': (datetime.now(ET).date() - timedelta(days=1)).isoformat()}
+    factor, cover = intelligence.inventory_factor(p, Policy(daily_limit=100), now)
+    assert cover == 5
+    assert factor < 1
+
+
+def test_stale_inventory_blocks_increases_but_allows_reduction(client, data, now):
+    data['products']['B012345678']['inventory_at'] = now - 90000
+    g = guard(client, data, now)
+    with pytest.raises(guards.GuardBlocked, match='inventory'):
+        g.prepare('PUT', '/sp/adGroups', {'adGroups': [{'adGroupId': 'g', 'defaultBid': .5}]})
+    assert g.prepare('PUT', '/sp/adGroups', {'adGroups': [{'adGroupId': 'g', 'defaultBid': .1}]})['adGroups'][0]['defaultBid'] == .1
+
+
+def test_individual_keyword_performance_controls_ceiling(client, data, now):
+    data['metrics'].append(metric(now, grain='keyword', keyword_id='k', orders=1, sales=40))
+    g = guard(client, data, now)
+    result = g.prepare('PUT', '/sp/keywords', {'keywords': [{'keywordId': 'k', 'bid': 2.5}]})
+    assert result['keywords'][0]['bid'] == .08
+
+
+def test_margin_ceiling_accounts_for_placement_and_dynamic_uplift(client, data, now):
+    client.list_campaigns.return_value[0]['dynamicBidding'] = {'strategy': 'AUTO_FOR_SALES', 'placementBidding': [{'placement': 'PLACEMENT_TOP', 'percentage': 100}]}
+    result = guard(client, data, now).prepare('PUT', '/sp/adGroups', {'adGroups': [{'adGroupId': 'g', 'defaultBid': 2.5}]})
+    assert result['adGroups'][0]['defaultBid'] * 4 <= .45
+
+
+def test_zero_margin_pauses_instead_of_bid_floor(client, data, now):
+    data['products']['B012345678']['shipping'] = 19
+    result = guard(client, data, now).prepare('PUT', '/sp/adGroups', {'adGroups': [{'adGroupId': 'g', 'defaultBid': 1}]})
+    assert result['adGroups'][0] == {'adGroupId': 'g', 'state': 'PAUSED'}
+
+
+def test_identity_spoof_does_not_escape_guard(client, data, now):
+    with pytest.raises(guards.GuardBlocked, match='mismatch'):
+        guard(client, data, now).prepare('PUT', '/sp/keywords', {'keywords': [{'keywordId': 'k', 'campaignId': 'other', 'bid': .01}]})
+
+
+def test_enabled_campaign_create_rejected(client, data, now):
+    with pytest.raises(guards.GuardBlocked, match='PAUSED'):
+        guard(client, data, now).prepare('POST', '/sp/campaigns', {'campaigns': [{'state': 'ENABLED', 'budget': {'budget': 5}}]})
+
+
+def test_account_budget_reservations_count_other_campaigns(client, data, now):
+    g = guard(client, data, now)
+    g.ledger['budget_days'] = {datetime.fromtimestamp(now, ET).date().isoformat(): {'other': 80}}
+    with pytest.raises(guards.GuardBlocked, match='Aggregate'):
+        g.account_room('c', 30)
+
+
+def test_stale_complete_spend_blocks_growth(client, data, now):
+    data['complete_spend_at'] = now - 7200
+    with pytest.raises(guards.GuardBlocked, match='Fresh complete'):
+        guard(client, data, now).account_room('c', 31)
+
+
+def test_buffered_spend_pauses_campaigns(client, data, now):
+    data['metrics'].append(metric(now, date=datetime.fromtimestamp(now, ET).date().isoformat(), spend=86))
+    result = profit_actions.build_plan(client, data, Policy(daily_limit=100), now)
+    assert result['actions'][0]['row'] == {'campaignId': 'c', 'state': 'PAUSED'}
+
+
+def test_missing_hourly_data_never_invents_a_peak(now):
+    assert intelligence.learned_multiplier([], Policy(daily_limit=100), now) == 1
+
+
+def test_learned_weekday_and_hour_bounded(now):
+    rows = [metric(now, grain='hourly', hour=datetime.fromtimestamp(now, ET).hour,
+                   date=(datetime.fromtimestamp(now, ET).date() - timedelta(days=21 + i * 7)).isoformat(),
+                   clicks=100, sales=400, orders=10) for i in range(4)]
+    rows.append(metric(now, grain='hourly', hour=(datetime.fromtimestamp(now, ET).hour+1)%24, clicks=1000, orders=10, sales=400))
+    assert intelligence.learned_multiplier(rows, Policy(daily_limit=100), now) == 1.25
+
+
+class MemoryStore:
+    values = {}
+    events = []
+    def __init__(self, name): self.name = name
+    def read(self): return copy.deepcopy(self.values.get(self.name, {}))
+    def save(self, data):
+        self.events.append(self.name)
+        self.values[self.name] = copy.deepcopy(data)
+    @contextmanager
+    def locked(self): yield self.read()
+
+
+@pytest.fixture
+def storage(monkeypatch):
+    MemoryStore.values = {}
+    MemoryStore.events = []
+    for mod in (intelligence, guards, profit_actions, profit_api, decision_sync):
+        monkeypatch.setattr(mod, 'GCSState', MemoryStore)
+    return MemoryStore
+
+
+def test_replayed_import_replaces_not_adds(storage, product, now):
+    intelligence.ingest(products=[product], metrics=[metric(now)], source='test')
+    intelligence.ingest(products=[product], metrics=[metric(now)], source='test')
+    rows = storage.values['profit-data']['metrics']
+    assert len(rows) == 1 and rows[0]['sales'] == 400
+    assert len([k for k in storage.values if k.startswith('profit-history/')]) == 1
+
+
+def test_report_restatement_removes_disappeared_rows(storage, now):
+    m = metric(now)
+    intelligence.ingest(metrics=[m])
+    intelligence.ingest(metrics=[], replace_window=('campaign', m['date'], m['date'], now+1))
+    assert storage.values['profit-data']['metrics'] == []
+
+
+def test_reservation_written_before_ambiguous_amazon_failure(storage, client, data, now):
+    storage.values['profit-data'] = data
+    storage.values['profit-policy'] = {'policy': Policy(daily_limit=100).model_dump()}
+    def send(body):
+        assert storage.values['profit-write-guard']['budget_days'][datetime.fromtimestamp(now, ET).date().isoformat()]['c'] == 30
+        raise TimeoutError('unknown acceptance')
+    with pytest.raises(TimeoutError):
+        guards.guarded_write(client, 'PUT', '/sp/adGroups', {'adGroups': [{'adGroupId': 'g', 'defaultBid': .4}]}, send)
+    assert list(v for k,v in storage.values.items() if k.startswith('profit-audit/'))[0]['status'] == 'unconfirmed'
+
+
+def test_emergency_pause_does_not_require_storage(monkeypatch):
+    monkeypatch.setattr(guards, 'GCSState', lambda n: pytest.fail('Must not open storage for emergency pause'))
+    send = MagicMock(return_value={'campaigns': {'success': [{'campaignId': 'c'}]}})
+    guards.guarded_write(MagicMock(), 'PUT', '/sp/campaigns', {'campaigns': [{'campaignId': 'c', 'state': 'PAUSED'}]}, send)
+    send.assert_called_once()
+
+
+def test_alerts_deduplicate_resolve_and_reopen(storage):
+    a = {'key': 'stock:x', 'message': 'Low stock'}
+    profit_actions.update_alerts([a], now=10)
+    profit_actions.update_alerts([a], now=20)
+    assert len(storage.values['profit-alerts']['alerts']) == 1
+    profit_actions.update_alerts([], now=30)
+    assert storage.values['profit-alerts']['alerts']['stock:x']['resolved_at'] == 30
+    profit_actions.update_alerts([a], now=40)
+    assert storage.values['profit-alerts']['alerts']['stock:x']['first_seen'] == 10
+    assert storage.values['profit-alerts']['alerts']['stock:x']['resolved_at'] is None
+
+
+def test_spapi_fbm_listing_does_not_use_fba_units(storage, product):
+    storage.values['profit-data'] = {'products': {product['asin']: product}}
+    client = MagicMock(marketplace='ATVPDKIKX0DER')
+    client.listing.return_value = {'summaries': [{'asin': product['asin']}],
+        'offers': [{'marketplaceId': 'ATVPDKIKX0DER', 'offerType': 'B2C', 'price': {'currencyCode': 'USD', 'amount': 40}}],
+        'fulfillmentAvailability': [{'fulfillmentChannelCode': 'DEFAULT', 'quantity': 24}]}
+    client.fees.return_value = 6
+    client.request_sales.return_value = 'sales-report'
+    result = decision_sync.sync_retail(client)
+    assert result['sales'] == 'requested'
+    client.fba_units.assert_not_called()
+    assert storage.values['profit-data']['products'][product['asin']]['inventory'] == 24
+
+
+def test_api_auth_preview_and_experiment_eligibility(storage, monkeypatch):
+    import final_server
+    monkeypatch.setenv('DAILY_OPTIMIZER_TOKEN', 'profit-test')
+    api = TestClient(final_server.app)
+    assert api.get('/api/profit/status').status_code == 403
+    headers = {'X-Daily-Optimizer-Token': 'profit-test'}
+    response = api.post('/api/profit/policy', headers=headers, json={'policy': {'daily_limit': 100}, 'dry_run': True})
+    assert response.status_code == 200 and storage.values == {}
+    bad = {'asin': 'B012345678', 'kind': 'title', 'hypothesis': 'A clearer title', 'status': 'running'}
+    assert api.post('/api/profit/experiments', headers=headers, json={'experiment': bad, 'apply_live': True}).status_code == 422
+    bad['status'] = 'planned'
+    assert api.post('/api/profit/experiments', headers=headers, json={'experiment': bad, 'apply_live': True}).status_code == 200
+
+
+def test_actual_client_mutation_cannot_bypass_guard(monkeypatch):
+    from optimize_campaigns import AmazonAdsClient
+    client = AmazonAdsClient.__new__(AmazonAdsClient)
+    raw = MagicMock()
+    client._request_raw = raw
+    monkeypatch.setattr(guards, 'guarded_write', MagicMock(side_effect=guards.GuardBlocked('blocked')))
+    with pytest.raises(guards.GuardBlocked):
+        client.put('/sp/keywords', {'keywords': [{'keywordId': 'k', 'bid': 50}]})
+    raw.assert_not_called()
+
+
+def test_unknown_placement_fails_instead_of_silent_misattribution(now):
+    with pytest.raises(ValueError, match='placement'):
+        decision_sync.normalize_ads([{'date': '2026-09-01', 'campaignId': 'c', 'placementClassification': 'mystery'}], 'placement', now)
+
+
+def test_yesterdays_snapshot_cannot_authorize_new_day_spending(now):
+    just_after_midnight = datetime.now(ET).replace(hour=0, minute=5, second=0, microsecond=0).timestamp()
+    d = {'metrics': [], 'complete_spend_at': just_after_midnight - 600}
+    assert not intelligence.pacing(d, Policy(daily_limit=100), just_after_midnight)['fresh']
+
+
+def test_paused_campaign_spend_still_counts(client, data, now):
+    data['metrics'].append(metric(now, campaign_id='paused', date=datetime.fromtimestamp(now, ET).date().isoformat(), spend=75))
+    with pytest.raises(guards.GuardBlocked, match='Aggregate'):
+        guard(client, data, now).account_room('c', 30)
+
+
+def test_simultaneous_workflow_uses_same_account_lock(storage, client, data, monkeypatch):
+    @contextmanager
+    def busy(self):
+        raise guards.GuardBlocked('lock busy')
+        yield
+    monkeypatch.setattr(MemoryStore, 'locked', busy)
+    send = MagicMock()
+    with pytest.raises(guards.GuardBlocked, match='lock busy'):
+        guards.guarded_write(client, 'PUT', '/sp/adGroups', {'adGroups': [{'adGroupId': 'g', 'defaultBid': .4}]}, send)
+    send.assert_not_called()
+
+
+def test_old_velocity_import_does_not_replace_new_inventory(storage, product, now):
+    intelligence.ingest(products=[{**product, 'inventory': 50, 'inventory_at': now}])
+    intelligence.ingest(products=[{**product, 'inventory': 100, 'inventory_at': now-60}])
+    assert storage.values['profit-data']['products'][product['asin']]['inventory'] == 50
+
+
+def test_import_cannot_claim_complete_spend_snapshot():
+    with pytest.raises(ValueError):
+        profit_api.DataImport.model_validate({'complete_spend_at': time.time(), 'apply_live': True})
+
+
+def test_budget_growth_cannot_use_profitable_but_immature_sales(client, data, now):
+    data['metrics'] = [metric(now, date=datetime.fromtimestamp(now, ET).date().isoformat())]
+    g = guard(client, data, now)
+    with pytest.raises(guards.GuardBlocked, match='mature profitable'):
+        g.verify_budget_growth('c', 40)
+
+
+def test_exploration_budget_has_separate_small_cap(client, data, now):
+    data['metrics'] = []
+    g = guard(client, data, now, exploration_cvr=.02)
+    g.verify_budget_growth('c', 5)
+    with pytest.raises(guards.GuardBlocked, match='bounded exploration'):
+        g.verify_budget_growth('c', 25)
+
+
+def test_search_term_reports_exclude_attribution_window():
+    from optimize_campaigns import _build_search_term_report_body
+    report = _build_search_term_report_body(14)
+    assert intelligence.report_is_mature(report['endDate'])
+    assert (datetime.fromisoformat(report['endDate']) - datetime.fromisoformat(report['startDate'])).days == 13
+
+
+def test_monitor_detects_missing_profit_workflow():
+    from scripts.monitor_automation import summarize
+    result = summarize({'profile': {}})
+    assert 'profit has no recorded apply result' in result['alerts']

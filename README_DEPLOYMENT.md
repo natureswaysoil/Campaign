@@ -45,3 +45,13 @@ Open the dashboard and use Set Token once in the browser. The monitor reads
 saved outcomes; a green result verifies recent recorded workflow outcomes, not
 profitability or future delivery. To request manual optimization use the
 provided trigger script, then Apply Pending Report after Amazon finishes.
+
+## Unified profit protection rollout
+
+See [PROFIT_CONTROLS.md](PROFIT_CONTROLS.md) before deploying the new mandatory
+write guard. Configure product economics, account limit, profile timezone and
+SP-API access, then provision `ppc-profit-tick`. The new `/profit` dashboard shows
+data health, policy, inventory alerts, protective actions and listing experiments.
+Missing inputs block increases; this is an intentional behavior change. Amazon
+fee estimates and delayed reports do not establish realized profit or a hard
+billing cap. Hourly learning needs an authorized cumulative hourly feed.

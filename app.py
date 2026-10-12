@@ -560,6 +560,9 @@ class AmazonAdsClient:
         return body
 
     def post(self, endpoint: str, body: Any):
+        from profit_guard import ENDPOINTS as guarded_endpoints
+        if endpoint in guarded_endpoints:
+            raise RuntimeError("Legacy ad writes disabled; use final_server profit-guarded API")
         url = f"{self.base_url}{endpoint}"
         wrapped = self._wrap_batch(endpoint, body)
         content_type = self._content_type_for(endpoint)
@@ -579,6 +582,7 @@ class AmazonAdsClient:
         return resp.json() if resp.text.strip() else None
 
     def put(self, endpoint: str, body: Any):
+        raise RuntimeError("Legacy ad writes disabled; use final_server profit-guarded API")
         url = f"{self.base_url}{endpoint}"
         wrapped = self._wrap_batch(endpoint, body)
         content_type = self._content_type_for(endpoint)
