@@ -168,14 +168,12 @@ def fresh(ts, hours, now):
 
 
 def mature_rows(data, policy, now, **filters):
-    candidates = [r for r in data.get('metrics', []) if all(r.get(k) == v for k, v in filters.items())]
-    if not candidates or not fresh(max(r['observed_at'] for r in candidates), policy.data_max_age_hours, now):
-        return []
     today = datetime.fromtimestamp(now, ET).date()
     last = (today - timedelta(days=policy.attribution_days + 1)).isoformat()
     first = (today - timedelta(days=90)).isoformat()
     return [r for r in data.get('metrics', [])
             if first <= r['date'] <= last
+            and fresh(r['observed_at'], policy.data_max_age_hours, now)
             and r['observed_at'] >= datetime.combine(date.fromisoformat(r['date']) + timedelta(days=policy.attribution_days + 1), datetime.min.time(), ET).timestamp()
             and all(r.get(k) == v for k, v in filters.items())]
 

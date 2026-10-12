@@ -339,3 +339,66 @@ def test_monitor_detects_missing_profit_workflow():
     from scripts.monitor_automation import summarize
     result = summarize({'profile': {}})
     assert 'profit has no recorded apply result' in result['alerts']
+
+
+def test_current_spend_cannot_refresh_stale_mature_evidence(now):
+    stale = metric(now, observed_at=now - 48 * 3600)
+    current = metric(now, date=datetime.fromtimestamp(now, ET).date().isoformat())
+    assert intelligence.mature_rows({'metrics': [stale, current]}, Policy(daily_limit=100), now, grain='campaign') == []
+
+
+def test_legacy_optimizer_cannot_send_live_bids():
+    from campaign_optimizer import AmazonAdsClient
+    client = AmazonAdsClient.__new__(AmazonAdsClient)
+    client.session = MagicMock()
+    with pytest.raises(RuntimeError, match='Legacy live writes'):
+        client.put('/sp/keywords', {})
+    client.session.put.assert_not_called()
+
+
+def test_manual_import_cannot_supply_hourly_learning(storage, monkeypatch, now):
+    import final_server
+    monkeypatch.setenv('DAILY_OPTIMIZER_TOKEN', 'profit-test')
+    response = TestClient(final_server.app).post('/api/profit/data',
+        headers={'X-Daily-Optimizer-Token': 'profit-test'}, json={'apply_live': True,
+        'metrics': [metric(now, grain='hourly', hour=12, utc_offset='-04:00')]})
+    assert response.status_code == 422
+    assert not storage.values
+
+
+def test_stuck_ads_report_is_replaced(storage, now):
+    client = MagicMock(profile_id='123')
+    client.get.side_effect = [[{'profileId': '123', 'currencyCode': 'USD', 'timezone': ET.key}], {'status': 'PENDING'}]
+    storage.values['profit-ads-sync'] = {'current': {'report_id': 'stuck', 'requested_at': now - 7300}}
+    with pytest.raises(RuntimeError, match='replacement scheduled'):
+        decision_sync.sync_ads(client)
+    assert 'report_id' not in storage.values['profit-ads-sync']['current']
+
+
+def test_activation_reuses_secrets_and_does_not_invent_policy(monkeypatch, capsys):
+    import json
+    from io import BytesIO
+    from scripts import activate_profit_controls as activate
+    calls = []
+    def cloud(*args):
+        calls.append(args)
+        if args[:3] == ('run', 'services', 'describe'):
+            return json.dumps({'status': {'url': 'https://example.test'}, 'spec': {'template': {'spec': {'containers': [{'env': []}]}}}})
+        if args[:2] == ('secrets', 'list'):
+            return '[]'
+        if args[:3] == ('secrets', 'versions', 'access'):
+            return 'private-test-token'
+        if args[:3] == ('scheduler', 'jobs', 'list'):
+            return '[]'
+        if args[:3] == ('scheduler', 'jobs', 'describe'):
+            return '{"state":"ENABLED"}'
+        return ''
+    monkeypatch.setattr(activate, 'gcloud', cloud)
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    monkeypatch.setattr(activate.urllib.request, 'urlopen', lambda *a, **k: BytesIO(b'{"products":[],"policy":null}'))
+    activate.main()
+    output = capsys.readouterr().out
+    assert 'Saved spending policy: MISSING' in output
+    assert 'private-test-token' not in output
+    assert any(c[:3] == ('scheduler', 'jobs', 'create') for c in calls)
+    assert not any(c[:3] == ('run', 'services', 'update') for c in calls)

@@ -164,7 +164,9 @@ def sync_ads(client):
                 raise RuntimeError(kind + ' report failed; next tick will request again')
             if result.get('status') not in ('COMPLETED', 'SUCCESS'):
                 if time.time() - job['requested_at'] > 7200:
-                    raise RuntimeError(kind + ' report pending over two hours')
+                    job.pop('report_id', None)
+                    store.save(state)
+                    raise RuntimeError(kind + ' report pending over two hours; replacement scheduled')
                 outcomes[kind] = 'pending'
                 continue
             from optimize_campaigns import parse_report_json_bytes
@@ -231,7 +233,9 @@ def sync_retail(client):
             raise
         if report is None:
             if time.time() - pending['at'] > 7200:
-                raise RuntimeError('Retail sales report pending over two hours')
+                state.pop('pending', None)
+                store.save(state)
+                raise RuntimeError('Retail sales report pending over two hours; replacement scheduled')
             return {'inventory': 'synced', 'sales': 'pending'}
         rows = []
         for r in report.get('salesAndTrafficByAsin', []):

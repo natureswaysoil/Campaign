@@ -191,3 +191,10 @@ FBM sync, API authentication and experiment eligibility.
 - https://developer-docs.amazon/sp-api/reference/getmyfeesestimateforasin
 - https://developer-docs.amazon/sp-api/reference/getinventorysummaries
 - https://sell.amazon.com/tools/manage-your-experiments
+
+Deployment now runs `scripts/activate_profit_controls.py`: it attaches existing,
+complete SP-API Secret Manager bindings, provisions the profit scheduler using the
+existing scheduler identity, and reports only presence/counts for activation data.
+It never creates costs or chooses a spending limit. Missing SP-API secrets are
+reported by name; missing cloud permissions fail the setup step explicitly.
+The runtime identity must already have access to any attached secret versions.

@@ -84,6 +84,8 @@ def register(app):
         # Imports cannot claim a complete account spend snapshot. Only verified Ads sync can.
         if payload.source == 'authorized_hourly_adapter' and any(m.grain != 'hourly' for m in payload.metrics):
             raise HTTPException(422, 'Hourly adapter accepts hourly cumulative buckets only')
+        if payload.source != 'authorized_hourly_adapter' and any(m.grain == 'hourly' for m in payload.metrics):
+            raise HTTPException(422, 'Hourly metrics require the authorized hourly adapter source')
         return ingest(products=[p.model_dump(mode='json') for p in payload.products],
                       metrics=[m.model_dump(mode='json') for m in payload.metrics], source=payload.source)
 
