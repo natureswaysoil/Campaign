@@ -145,6 +145,8 @@ class AmazonAdsClient:
         }
 
     def post(self, endpoint: str, body: Any, content_type: str = "application/json") -> Any:
+        if endpoint.rstrip('/').endswith(('/campaigns', '/adGroups', '/keywords', '/targets', '/productAds')):
+            raise RuntimeError("Legacy live writes are disabled; use the guarded client")
         url = f"{self.base_url}{endpoint}"
         resp = self.session.post(url, headers=self.headers(content_type), json=body, timeout=60)
         if not resp.ok:
@@ -152,11 +154,7 @@ class AmazonAdsClient:
         return resp.json() if resp.text.strip() else {}
 
     def put(self, endpoint: str, body: Any, content_type: str = "application/json") -> Any:
-        url = f"{self.base_url}{endpoint}"
-        resp = self.session.put(url, headers=self.headers(content_type), json=body, timeout=60)
-        if not resp.ok:
-            raise RuntimeError(f"PUT {endpoint} failed: {resp.status_code} {resp.text[:500]}")
-        return resp.json() if resp.text.strip() else {}
+        raise RuntimeError("Legacy live writes are disabled; use optimize_campaigns.AmazonAdsClient with profit controls")
 
     def get(self, endpoint: str, content_type: str = "application/json") -> Any:
         url = f"{self.base_url}{endpoint}"

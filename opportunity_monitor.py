@@ -301,6 +301,7 @@ def launch_opportunity(
     daily_budget: float = TEST_DAILY_BUDGET,
 ) -> Dict[str, Any]:
     daily_budget = _validated_daily_budget(daily_budget)
+    client.profit_product_asin = str(item.get("asin") or "")
     product_id = str(item.get("product_id") or item.get("sku") or item.get("asin") or "")
     existing = _existing_opportunity_campaign(
         client, item["product_title"], product_id, item["target_type"], item["target"]
@@ -571,8 +572,6 @@ def opportunity_tick(payload: Dict[str, Any]) -> JSONResponse:
             pending = state.get("pending")
             if not pending:
                 body = _build_search_term_report_body(14)
-                body["startDate"] = (today - datetime.timedelta(days=14)).isoformat()
-                body["endDate"] = (today - datetime.timedelta(days=1)).isoformat()
                 report_id = client.request_report(body)
                 state["pending"] = {
                     "report_id": report_id,

@@ -70,7 +70,7 @@ def test_apply_requires_both_report_and_request_live_intent(settings, request_pa
     amazon = MagicMock()
     amazon.get.return_value = {'status': 'COMPLETED', 'url': 'https://example.test/report'}
     amazon.download_binary.return_value = b'[]'
-    pending = {'report_id': 'r1', 'settings': {**settings, 'apply_negatives': True, 'apply_winners': True}}
+    pending = {'report_id': 'r1', 'settings': {**settings, 'apply_negatives': True, 'apply_winners': True, 'end_date': '2026-01-01'}}
     with (patch.object(core, 'AmazonAdsClient', return_value=amazon),
           patch.object(core, '_load_pending_report', return_value=pending),
           patch.object(core, 'apply_negatives_step', return_value=[]) as negatives,

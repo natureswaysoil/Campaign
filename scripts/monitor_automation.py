@@ -16,7 +16,7 @@ def read_states():
         if not uri.startswith('gs://'):
             continue
         kind = uri.rsplit('/', 1)[-1].removesuffix('-workflow.json')
-        if kind not in ('bid', 'harvest', 'opportunity', 'sales-growth'):
+        if kind not in ('bid', 'harvest', 'opportunity', 'sales-growth', 'profit'):
             continue
         result = subprocess.run(['gcloud', 'storage', 'cat', uri], check=True,
                                 capture_output=True, text=True)
@@ -31,7 +31,7 @@ def summarize(states, now=None):
     for profile, workflows in states.items():
         output = {'profile': profile}
         alerts = []
-        for kind in ('bid', 'harvest', 'opportunity', 'sales-growth'):
+        for kind in ('bid', 'harvest', 'opportunity', 'sales-growth', 'profit'):
             state = workflows.get(kind, {})
             result = state.get('last_result') or {}
             pending = state.get('pending') or {}
@@ -55,6 +55,8 @@ def summarize(states, now=None):
                 completed = state.get('completed_day')
                 if completed and (today - datetime.fromisoformat(completed).date()).days > 1:
                     alerts.append(f'{kind} is more than one day behind')
+            if kind == 'profit' and last_run and now - last_run > 7200:
+                alerts.append('No completed profit-control run in over two hours')
             if kind == 'opportunity':
                 entry['auto_launches'] = len(result.get('auto_launches') or [])
                 entry['approvals'] = len(state.get('approvals') or {})

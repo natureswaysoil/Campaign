@@ -139,3 +139,6 @@ jobs:
           bash setup-scheduler.sh
           gcloud scheduler jobs list --location us-central1 --project "$PROJECT_ID" \
             --format='table(name.basename(),state,schedule,timeZone,httpTarget.uri)'
+
+      - name: Configure profit synchronization and check activation inputs
+        run: python3 scripts/activate_profit_controls.py

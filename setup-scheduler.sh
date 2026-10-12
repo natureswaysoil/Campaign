@@ -23,11 +23,13 @@ if ! gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/
   gcloud iam service-accounts create campaign-optimizer-scheduler --project "$PROJECT_ID"
 fi
 gcloud run services add-iam-policy-binding "$SERVICE_NAME" --member="serviceAccount:${SA_EMAIL}" --role=roles/run.invoker --region "$REGION" --project "$PROJECT_ID"
-for job in ppc-daypart-tick ppc-harvest-tick ppc-opportunity-tick; do
+for job in ppc-daypart-tick ppc-harvest-tick ppc-opportunity-tick ppc-profit-tick; do
   if [[ "$job" == ppc-daypart-tick ]]; then
     route=retune-tick
   elif [[ "$job" == ppc-harvest-tick ]]; then
     route=harvest-tick
+  elif [[ "$job" == ppc-profit-tick ]]; then
+    route=profit-tick
   else
     route=opportunity-tick
   fi

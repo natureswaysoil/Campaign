@@ -65,6 +65,21 @@ def _first(row: Dict[str, Any], *keys: str) -> str:
 
 
 def product_economics(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # Live product observations are the shared source after profit-control setup.
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        from profit_intelligence import Policy, economics
+        saved = GCSState("profit-data").read().get("products", {}).get(_first(raw, "ASIN"))
+        configured = GCSState("profit-policy").read().get("policy")
+        if saved and configured:
+            try:
+                result = economics(saved, Policy.model_validate(configured), time.time())
+                return {"price": saved["price"], "cogs": saved["cogs"], "amazon_fees": saved["fees"],
+                        "shipping": saved["shipping"], "gross_margin": result["margin"],
+                        "break_even_acos": max(0, result["margin"]), "profitable_acos": result["target_acos"],
+                        "economics_source": "product_costs", "fee_source": saved["fee_source"]}
+            except ValueError:
+                return {"price": saved["price"], "gross_margin": 0., "break_even_acos": 0.,
+                        "profitable_acos": 0., "economics_source": "stale_costs"}
     price_raw = _first(raw, "Price", "Amazon_Price", "Amazon Price", "Sale Price", "Selling Price")
     cogs_raw = _first(raw, "COGS", "Product_Cost", "Product Cost", "Cost_of_Goods", "Cost of Goods")
     fees_raw = _first(raw, "Amazon_Fees", "Amazon Fees", "FBA_Fees", "FBA Fees")
@@ -115,6 +130,10 @@ def product_economics(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _inventory_units(raw: Dict[str, Any]) -> Optional[int]:
+    if os.getenv("AUTOMATION_STATE_BUCKET"):
+        saved = GCSState("profit-data").read().get("products", {}).get(_first(raw, "ASIN"))
+        if saved:
+            return saved.get("inventory")
     value = _first(raw, "Inventory", "Inventory_Units", "Inventory Units", "Units_Available", "Units Available")
     if not value:
         return None
