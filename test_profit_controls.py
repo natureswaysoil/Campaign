@@ -397,10 +397,28 @@ def test_activation_reuses_secrets_and_does_not_invent_policy(monkeypatch, capsy
         return ''
     monkeypatch.setattr(activate, 'gcloud', cloud)
     monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
-    monkeypatch.setattr(activate.urllib.request, 'urlopen', lambda *a, **k: BytesIO(b'{"products":[],"policy":null}'))
+    monkeypatch.setattr(activate.urllib.request, 'urlopen', lambda *a, **k: BytesIO(b'{"products":[],"policy":{"daily_limit":75}}'))
     activate.main()
     output = capsys.readouterr().out
-    assert 'Saved spending policy: MISSING' in output
+    assert 'Saved spending policy: present' in output
     assert 'private-test-token' not in output
     assert any(c[:3] == ('scheduler', 'jobs', 'update') for c in calls)
     assert not any(c[:3] == ('run', 'services', 'update') for c in calls)
+
+
+def test_owner_approved_limit_saved_and_read_back(monkeypatch):
+    from io import BytesIO
+    import json
+    from scripts import activate_profit_controls as activate
+    calls = []
+    def request(req, **kwargs):
+        calls.append(req)
+        if req.get_method() == 'POST':
+            assert json.loads(req.data) == {'apply_live': True, 'policy': {'daily_limit': 75.0}}
+            return BytesIO(b'{"success":true,"policy":{"daily_limit":75}}')
+        return BytesIO(b'{"policy":{"daily_limit":75},"products":[]}')
+    monkeypatch.setattr(activate.urllib.request, 'urlopen', request)
+    assert activate.initialize_spending_policy('https://example.test', 'private-token', {})['policy']['daily_limit'] == 75
+    assert len(calls) == 2
+    assert activate.initialize_spending_policy('https://example.test', 'private-token', {'policy': {'daily_limit': 60}})['policy']['daily_limit'] == 60
+    assert len(calls) == 2

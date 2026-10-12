@@ -21,6 +21,29 @@ def gcloud(*args):
         raise RuntimeError(operation + ' failed: ' + ', '.join(dict.fromkeys(details))) from None
 
 
+
+def initialize_spending_policy(url, token, status):
+    """Seed the owner's approved $75 limit once; preserve subsequent dashboard edits."""
+    if status.get('policy'):
+        return status
+    payload = {'apply_live': True, 'policy': {'daily_limit': 75.0}}
+    request = urllib.request.Request(url + '/api/profit/policy',
+        data=json.dumps(payload).encode(), method='POST',
+        headers={'X-Daily-Optimizer-Token': token, 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        result = json.load(response)
+    if not result.get('success') or result.get('policy', {}).get('daily_limit') != 75.0:
+        raise RuntimeError('Approved spending policy was not saved')
+    request = urllib.request.Request(url + '/api/profit/status',
+        headers={'X-Daily-Optimizer-Token': token})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        verified = json.load(response)
+    if verified.get('policy', {}).get('daily_limit') != 75.0:
+        raise RuntimeError('Spending policy read-back did not match')
+    print('Owner-approved daily spending limit saved and verified.')
+    return verified
+
+
 def main():
     project = os.environ.get('GCP_PROJECT_ID', 'amazon-ppc-bid-optimizer')
     region = 'us-central1'
@@ -28,6 +51,8 @@ def main():
     scope = ['--project', project, '--region', region]
     config = json.loads(gcloud('run', 'services', 'describe', service, *scope, '--format=json'))
     url = config['status']['url']
+    print('Deployment identity: ' + gcloud('auth', 'list', '--filter=status:ACTIVE', '--format=value(account)'))
+    print('Runtime identity: ' + config['spec']['template']['spec'].get('serviceAccountName', '(default)'))
     existing = {e['name'] for e in config['spec']['template']['spec']['containers'][0].get('env', [])}
     required = ['SP_API_CLIENT_ID', 'SP_API_CLIENT_SECRET', 'SP_API_REFRESH_TOKEN',
                 'SP_API_SELLER_ID', 'SP_API_MARKETPLACE_ID']
@@ -58,6 +83,7 @@ def main():
     req = urllib.request.Request(url + '/api/profit/status', headers={'X-Daily-Optimizer-Token': token})
     with urllib.request.urlopen(req, timeout=60) as response:
         status = json.load(response)
+    status = initialize_spending_policy(url, token, status)
     print('Saved spending policy: ' + ('present' if status.get('policy') else 'MISSING'))
     print('Saved product economics records: ' + str(len(status.get('products', []))))
     print('Complete spending snapshot: ' + ('present' if status.get('complete_spend_at') else 'awaiting sync'))
