@@ -44,6 +44,52 @@ def initialize_spending_policy(url, token, status):
     return verified
 
 
+SP_API_SECRET_NAMES = {
+    'SP_API_CLIENT_ID': 'PPCADSCLIENT',
+    'SP_API_CLIENT_SECRET': 'PPCADSSECRET',
+    'SP_API_REFRESH_TOKEN': 'PPCADSREFRESHTOKEN',
+    'SP_API_SELLER_ID': 'SP_API_SELLER_ID',
+    'SP_API_MARKETPLACE_ID': 'SP_API_MARKETPLACE_ID',
+}
+
+
+def configure_sp_api_secrets(config, service, scope, project):
+    """Bind the owner's SP-API secrets independently of missing seller metadata."""
+    existing = {e['name']: e for e in config['spec']['template']['spec']['containers'][0].get('env', [])}
+    attach, missing = [], []
+    for name, secret in SP_API_SECRET_NAMES.items():
+        current = existing.get(name, {})
+        ref = current.get('valueFrom', {}).get('secretKeyRef', {})
+        if ref.get('name') == secret and ref.get('key') == 'latest':
+            continue
+        # Preserve already configured seller/marketplace identifiers.
+        if name in ('SP_API_SELLER_ID', 'SP_API_MARKETPLACE_ID') and current:
+            continue
+        try:
+            if not gcloud('secrets', 'versions', 'access', 'latest', '--secret=' + secret, '--project', project):
+                missing.append(name)
+                continue
+        except RuntimeError as exc:
+            print('SP-API binding unavailable: ' + name + ' (' + secret + '): ' + str(exc))
+            missing.append(name)
+            continue
+        attach.append(name + '=' + secret + ':latest')
+    if attach:
+        gcloud('run', 'services', 'update', service, *scope, '--update-secrets', ','.join(attach), '--format=value(status.url)')
+        verified = json.loads(gcloud('run', 'services', 'describe', service, *scope, '--format=json'))
+        bindings = {e['name']: e.get('valueFrom', {}).get('secretKeyRef', {})
+                    for e in verified['spec']['template']['spec']['containers'][0].get('env', [])}
+        for item in attach:
+            name = item.split('=', 1)[0]
+            if bindings.get(name) != {'name': SP_API_SECRET_NAMES[name], 'key': 'latest'}:
+                raise RuntimeError('SP-API secret binding read-back failed for ' + name)
+        print('SP-API secret bindings saved and verified: ' + ', '.join(item.split('=', 1)[0] for item in attach))
+    if missing:
+        print('SP-API setup still needs: ' + ', '.join(missing))
+    else:
+        print('SP-API environment bindings present; Amazon authorization remains to be checked by synchronization.')
+
+
 def main():
     project = os.environ.get('GCP_PROJECT_ID', 'amazon-ppc-bid-optimizer')
     region = 'us-central1'
@@ -53,28 +99,7 @@ def main():
     url = config['status']['url']
     print('Deployment identity: ' + gcloud('auth', 'list', '--filter=status:ACTIVE', '--format=value(account)'))
     print('Runtime identity: ' + config['spec']['template']['spec'].get('serviceAccountName', '(default)'))
-    existing = {e['name'] for e in config['spec']['template']['spec']['containers'][0].get('env', [])}
-    required = ['SP_API_CLIENT_ID', 'SP_API_CLIENT_SECRET', 'SP_API_REFRESH_TOKEN',
-                'SP_API_SELLER_ID', 'SP_API_MARKETPLACE_ID']
-    missing = []
-    for name in required:
-        if name in existing:
-            continue
-        try:
-            # Use existing secret-version access, not project-wide list permissions.
-            # Discard values immediately; only Secret Manager references are deployed.
-            if not gcloud('secrets', 'versions', 'access', 'latest', '--secret=' + name, '--project', project):
-                missing.append(name)
-        except RuntimeError as exc:
-            print(str(exc))
-            missing.append(name)
-    if missing:
-        print('SP-API setup unavailable: ' + ', '.join(missing))
-    else:
-        attach = [name + '=' + name + ':latest' for name in required if name not in existing]
-        if attach:
-            gcloud('run', 'services', 'update', service, *scope, '--update-secrets', ','.join(attach), '--format=value(status.url)')
-        print('SP-API environment bindings present; authorization will be checked by synchronization.')
+    configure_sp_api_secrets(config, service, scope, project)
     token = gcloud('secrets', 'versions', 'access', 'latest', '--secret=DAILY_OPTIMIZER_TOKEN', '--project', project)
     if not token:
         raise RuntimeError('Optimizer token missing')

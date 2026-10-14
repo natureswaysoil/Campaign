@@ -422,3 +422,30 @@ def test_owner_approved_limit_saved_and_read_back(monkeypatch):
     assert len(calls) == 2
     assert activate.initialize_spending_policy('https://example.test', 'private-token', {'policy': {'daily_limit': 60}})['policy']['daily_limit'] == 60
     assert len(calls) == 2
+
+
+def test_named_spapi_credentials_bound_even_when_seller_metadata_missing(monkeypatch):
+    import json
+    from scripts import activate_profit_controls as activate
+    config = {'spec': {'template': {'spec': {'containers': [{'env': []}]}}}}
+    calls = []
+    credential_names = list(activate.SP_API_SECRET_NAMES)[:3]
+    def cloud(*args):
+        calls.append(args)
+        if args[:3] == ('secrets', 'versions', 'access'):
+            if any('--secret=' + activate.SP_API_SECRET_NAMES[n] in args for n in credential_names):
+                return 'secret-value-never-logged'
+            raise RuntimeError('NOT_FOUND')
+        if args[:3] == ('run', 'services', 'describe'):
+            config['spec']['template']['spec']['containers'][0]['env'] = [
+                {'name': n, 'valueFrom': {'secretKeyRef': {'name': activate.SP_API_SECRET_NAMES[n], 'key': 'latest'}}}
+                for n in credential_names]
+            return json.dumps(config)
+        return ''
+    monkeypatch.setattr(activate, 'gcloud', cloud)
+    activate.configure_sp_api_secrets(config, 'campaign-optimizer', [], 'test-project')
+    updates = [c for c in calls if c[:3] == ('run', 'services', 'update')]
+    assert len(updates) == 1
+    mapping = updates[0][updates[0].index('--update-secrets') + 1]
+    assert mapping == 'SP_API_CLIENT_ID=PPCADSCLIENT:latest,SP_API_CLIENT_SECRET=PPCADSSECRET:latest,SP_API_REFRESH_TOKEN=PPCADSREFRESHTOKEN:latest'
+    assert 'AMAZON_ADS' not in mapping
