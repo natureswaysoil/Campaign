@@ -692,3 +692,17 @@ def test_cost_confirmation_verifies_market_before_persisting(monkeypatch, produc
     with pytest.raises(RuntimeError):
         profit_api.save_confirmed_costs(payload)
     persist.assert_not_called()
+
+
+def test_product_exploration_is_scoped_and_budget_bounded(product, data, client, now):
+    policy = Policy(daily_limit=75, product_exploration={product['asin']: {'cvr': .01, 'daily_budget': 2}})
+    assert intelligence.cpc_ceiling(product, [], policy, now)['source'] == 'explicit_exploration'
+    with pytest.raises(ValueError, match='insufficient_mature'):
+        intelligence.cpc_ceiling({**product, 'asin': 'B099999999'}, [], policy, now)
+    data['metrics'] = []
+    g = guards.Guard(client, data, policy, {}, now)
+    g.verify_budget_growth('c', 2)
+    with pytest.raises(guards.GuardBlocked):
+        g.verify_budget_growth('c', 2.01)
+    with pytest.raises(ValueError):
+        intelligence.cpc_ceiling({**product, 'inventory': 100, 'inventory_at': now-7*86400}, [], policy, now)

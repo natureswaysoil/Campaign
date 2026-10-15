@@ -152,3 +152,7 @@ jobs:
 
       - name: Check reported incomplete campaign without changing ads
         run: python3 scripts/diagnose_launch.py 77293223689063
+
+      - name: Apply approved orchid-only exploration settings
+        if: github.event.head_commit.message == 'Enable approved orchid-only exploration with bounded campaign budgets'
+        run: python3 scripts/enable_orchid_exploration.py

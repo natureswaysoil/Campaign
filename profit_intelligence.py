@@ -24,8 +24,14 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
 
 
+class ProductExploration(StrictModel):
+    cvr: float = Field(gt=0, le=.03)
+    daily_budget: float = Field(gt=0, le=5)
+
+
 class Policy(StrictModel):
     daily_limit: float = Field(gt=0, le=100000)
+    product_exploration: dict[str, ProductExploration] = Field(default_factory=dict)
     currency: Literal['USD'] = 'USD'
     timezone: str = ET.key
     target_acos: float = Field(default=.25, gt=0, le=1)
@@ -225,8 +231,9 @@ def cpc_ceiling(product, rows, policy, now):
         # Do not let cross-ASIN attributed basket sales inflate this ASIN's ceiling.
         aov = min(product['price'], t['sales'] / t['orders']) if t['orders'] else product['price']
         source = 'mature_target_metrics'
-    elif policy.exploration_cvr > 0:
-        cvr, aov, source = policy.exploration_cvr, product['price'], 'explicit_exploration'
+    elif product.get('asin') in policy.product_exploration or policy.exploration_cvr > 0:
+        opt_in = policy.product_exploration.get(product.get('asin'))
+        cvr, aov, source = opt_in.cvr if opt_in else policy.exploration_cvr, product['price'], 'explicit_exploration'
     else:
         raise ValueError('insufficient_mature_conversion_data')
     ceiling = min(policy.max_cpc, aov * econ['target_acos'] * cvr) * stock_factor

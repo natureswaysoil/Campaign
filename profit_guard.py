@@ -182,7 +182,12 @@ class Guard:
         t = totals(rows)
         target = min(economics(p, self.policy, self.now)['target_acos'] for p in self.campaign_products(cid))
         proven = t['clicks'] >= self.policy.minimum_clicks and t['orders'] >= 3 and t['sales'] > 0 and t['spend'] <= t['sales'] * target
-        if not proven and not (self.policy.exploration_cvr > 0 and proposed <= self.policy.exploration_daily_budget):
+        permitted = all(
+            proposed <= self.policy.product_exploration[p['asin']].daily_budget
+            if p['asin'] in self.policy.product_exploration else
+            self.policy.exploration_cvr > 0 and proposed <= self.policy.exploration_daily_budget
+            for p in self.campaign_products(cid))
+        if not proven and not permitted:
             raise GuardBlocked('Budget growth needs mature profitable demand or an explicitly bounded exploration budget')
 
     def verify_activation(self, cid, campaign):

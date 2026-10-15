@@ -517,7 +517,23 @@ def api_create_recommended_campaigns(
         asin, sku = verified['asin'], verified['sku']
         client.profit_product_asin = asin
 
+        exploration = GCSState('profit-policy').read().get('policy', {}).get('product_exploration', {}).get(asin)
+        if exploration:
+            discovery_budget = min(discovery_budget, float(exploration['daily_budget']))
+            exact_budget = min(exact_budget, float(exploration['daily_budget']))
+            total_budget = round(discovery_budget + exact_budget, 2)
+
         resume_campaigns = payload.get("_resume_campaigns") or {}
+        if exploration and resume_campaigns:
+            for existing in client.list_campaigns():
+                if str(existing.get('campaignId')) in {str(v) for v in resume_campaigns.values()} and existing.get('state') == 'PAUSED':
+                    current = existing.get('budget', {}).get('budget', 0)
+                    if current > float(exploration['daily_budget']):
+                        response = client.put('/sp/campaigns', {'campaigns': [{'campaignId': str(existing['campaignId']),
+                            'budget': {'budget': float(exploration['daily_budget']), 'budgetType': 'DAILY'}}]},
+                            content_type='application/vnd.spcampaign.v3+json', accept='application/vnd.spcampaign.v3+json')
+                        # Later activation checks the actual persisted budget again.
+
 
         # 1) Amazon-recommended discovery: automatic targeting campaign.
         discovery_campaign_id = str(resume_campaigns.get("AUTO_DISCOVERY") or "")
