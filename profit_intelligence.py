@@ -88,7 +88,7 @@ class Metric(StrictModel):
     asin: str = ''
     keyword_id: str = ''
     target_id: str = ''
-    placement: Literal['', 'PLACEMENT_TOP', 'PLACEMENT_REST_OF_SEARCH', 'PLACEMENT_PRODUCT_PAGE'] = ''
+    placement: Literal['', 'PLACEMENT_TOP', 'PLACEMENT_REST_OF_SEARCH', 'PLACEMENT_PRODUCT_PAGE', 'PLACEMENT_OFF_AMAZON'] = ''
     hour: int | None = Field(default=None, ge=0, le=23)
     # offset distinguishes the repeated Eastern hour at DST fall-back.
     utc_offset: str = ''

@@ -113,6 +113,7 @@ def ads_report_body(kind, today):
 
 PLACEMENTS = {'Top of Search on-Amazon': 'PLACEMENT_TOP', 'Other on-Amazon': 'PLACEMENT_REST_OF_SEARCH',
               'Detail Page on-Amazon': 'PLACEMENT_PRODUCT_PAGE',
+              'Off Amazon': 'PLACEMENT_OFF_AMAZON',
               'PLACEMENT_TOP': 'PLACEMENT_TOP', 'PLACEMENT_REST_OF_SEARCH': 'PLACEMENT_REST_OF_SEARCH',
               'PLACEMENT_PRODUCT_PAGE': 'PLACEMENT_PRODUCT_PAGE'}
 

@@ -544,3 +544,16 @@ def test_private_cost_packet_round_trip_and_no_automatic_reverification(monkeypa
     assert verified_costs.import_encrypted_costs(encrypt(schedule)) == schedule
     expired = {**schedule, 'verified_at': now - 31 * 86400}
     assert verified_costs.import_encrypted_costs(encrypt(expired))['saved'] == 0
+
+
+def test_off_amazon_report_rows_preserved_separately(now):
+    from decision_sync import normalize_ads
+    raw = [{'date': '2026-10-14', 'campaignId': 'c', 'cost': 3,
+            'placementClassification': 'Off Amazon'},
+           {'date': '2026-10-14', 'campaignId': 'c', 'cost': 4,
+            'placementClassification': 'Other on-Amazon'}]
+    rows = normalize_ads(raw, 'placement', now)
+    assert Metric.model_validate(rows[0]).placement == 'PLACEMENT_OFF_AMAZON'
+    assert Metric.model_validate(rows[1]).placement == 'PLACEMENT_REST_OF_SEARCH'
+    assert intelligence.metric_key(rows[0]) != intelligence.metric_key(rows[1])
+    assert sum(r['spend'] for r in rows) == 7
