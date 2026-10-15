@@ -1,10 +1,50 @@
 """Read-only monitoring; print counts/status, never credentials or keyword text."""
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+
+def sync_summary(sync):
+    """Allowlisted diagnostics only: never emit raw API errors or response bodies."""
+    output = {'at': sync.get('at'), 'success': sync.get('success')}
+    for name in ('ads', 'retail', 'controls'):
+        value = sync.get(name, {})
+        if not isinstance(value, dict):
+            continue
+        entry = {}
+        if value.get('error'):
+            error = value['error']
+            entry['error'] = error if error in ('RuntimeError', 'HTTPError', 'StateBusy', 'ValueError', 'KeyError', 'Timeout', 'ConnectionError') else 'OtherError'
+            message = str(value.get('message', ''))
+            code = re.search(r'\b([45][0-9]{2}) (?:Client|Server) Error', message)
+            if code:
+                entry['http_status'] = int(code.group(1))
+            for needle, category in (
+                ('api.amazon.com/auth/o2/token', 'lwa_token_exchange'),
+                ('sellingpartnerapi-na.amazon.com', 'selling_partner_api'),
+                ('AMAZON_ADS_TIMEZONE', 'ads_timezone_mismatch'),
+                ('SP-API is not configured', 'sp_api_configuration_missing'),
+                ('US marketplace and USD', 'marketplace_mismatch'),
+                ('profit-data', 'profit_data'),
+                ('already running or interrupted', 'state_lock'),
+            ):
+                if needle in message:
+                    entry['category'] = category
+                    break
+            for zone in ('America/Los_Angeles', 'America/New_York', 'America/Chicago', 'America/Denver', 'UTC'):
+                if 'observed: ' + zone == message[-len('observed: ' + zone):]:
+                    entry['observed_timezone'] = zone
+        for key in ('current', 'campaign', 'keyword', 'placement', 'inventory', 'sales'):
+            if value.get(key) in ('requested', 'pending', 'ingested', 'synced', 'current'):
+                entry[key] = value[key]
+        if isinstance(value.get('success'), bool):
+            entry['success'] = value['success']
+        output[name] = entry
+    return output
 
 
 def read_states():
@@ -21,6 +61,11 @@ def read_states():
         result = subprocess.run(['gcloud', 'storage', 'cat', uri], check=True,
                                 capture_output=True, text=True)
         states.setdefault(uri.split('/')[-2], {})[kind] = json.loads(result.stdout)
+        if kind == 'profit':
+            sync_uri = uri.rsplit('/', 1)[0] + '/profit-sync-status.json'
+            sync = subprocess.run(['gcloud', 'storage', 'cat', sync_uri],
+                                  check=True, capture_output=True, text=True)
+            states[uri.split('/')[-2]]['profit_sync'] = sync_summary(json.loads(sync.stdout))
     return states
 
 
@@ -30,6 +75,8 @@ def summarize(states, now=None):
     profiles = []
     for profile, workflows in states.items():
         output = {'profile': profile}
+        if 'profit_sync' in workflows:
+            output['profit_sync'] = workflows['profit_sync']
         alerts = []
         for kind in ('bid', 'harvest', 'opportunity', 'sales-growth', 'profit'):
             state = workflows.get(kind, {})
