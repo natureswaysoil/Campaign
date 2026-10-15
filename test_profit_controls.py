@@ -477,3 +477,36 @@ def test_profit_diagnostics_never_echo_raw_errors():
     assert result['retail'] == {'error': 'HTTPError', 'http_status': 403, 'category': 'selling_partner_api'}
     assert result['ads']['observed_timezone'] == 'America/Los_Angeles'
     assert 'private-value' not in str(result)
+
+
+def test_verified_cost_schedule_rejects_stale_and_invalid_values(now):
+    from scripts.import_verified_costs import validate_schedule
+    data = {'verified_at': now - 10, 'sizes': {s: [1, 2] for s in ('32oz', '1gal', '2.5gal')}}
+    assert validate_schedule(data, now) == data
+    with pytest.raises(ValueError):
+        validate_schedule({**data, 'verified_at': now - 31 * 86400}, now)
+    with pytest.raises(ValueError):
+        validate_schedule({**data, 'verified_at': now + 10}, now)
+    data['sizes']['32oz'] = [float('nan'), 1]
+    with pytest.raises(ValueError):
+        validate_schedule(data, now)
+
+
+def test_owner_fbm_costs_require_matching_listing_and_real_fees(product):
+    from decision_sync import refresh_product_market
+    client = MagicMock()
+    client.marketplace = 'market'
+    listing = {'summaries': [{'asin': product['asin']}],
+        'offers': [{'marketplaceId': 'market', 'offerType': 'B2C', 'price': {'currencyCode': 'USD', 'amount': 40}}],
+        'fulfillmentAvailability': [{'fulfillmentChannelCode': 'DEFAULT', 'quantity': 20}]}
+    client.listing.return_value = listing
+    client.fees.return_value = 6
+    result = refresh_product_market(client, product, fbm_only=True)
+    assert result['updated_at'] == product['updated_at']
+    assert result['fees'] == 6 and result['inventory'] == 20
+    client.fees.side_effect = RuntimeError('fees unavailable')
+    with pytest.raises(RuntimeError):
+        refresh_product_market(client, product, fbm_only=True)
+    listing['fulfillmentAvailability'] = []
+    with pytest.raises(RuntimeError, match='only to FBM'):
+        refresh_product_market(client, product, fbm_only=True)

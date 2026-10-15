@@ -185,6 +185,28 @@ def sync_ads(client):
     return outcomes
 
 
+def refresh_product_market(client, product, fbm_only=False):
+    """Get matching listing, fee estimate and inventory before persisting economics."""
+    listing = client.listing(product['sku'])
+    summaries = listing.get('summaries', [])
+    if not any(r.get('asin') == product['asin'] for r in summaries):
+        raise RuntimeError('Listing SKU/ASIN mismatch')
+    offers = [r for r in listing.get('offers', []) if r.get('marketplaceId') == client.marketplace and r.get('offerType') == 'B2C']
+    if len(offers) != 1 or offers[0].get('price', {}).get('currencyCode') != 'USD':
+        raise RuntimeError('Unambiguous USD offer required')
+    available = listing.get('fulfillmentAvailability', [])
+    fbm = [r for r in available if r.get('fulfillmentChannelCode') == 'DEFAULT']
+    fba = not fbm
+    if fbm_only and fba:
+        raise RuntimeError('Owner shipping schedule applies only to FBM products')
+    units = client.fba_units(product['sku']) if fba else int(fbm[0]['quantity'])
+    price = float(offers[0]['price']['amount'])
+    # Local COGS/shipping verification time is not renewed by an Amazon fee lookup.
+    updated = {**product, 'price': price, 'fees': client.fees(product['asin'], price, fba),
+               'fee_source': 'estimate', 'market_at': time.time(), 'inventory': units, 'inventory_at': time.time()}
+    return updated
+
+
 def sync_retail(client):
     store = GCSState('profit-retail-sync')
     outcomes = {}
@@ -194,21 +216,7 @@ def sync_retail(client):
         # Five SKUs per tick bounds API load. Failures leave the cursor at the failed SKU.
         cursor = state.get('cursor', 0) % max(1, len(products))
         for product in products[cursor:cursor + 5]:
-            listing = client.listing(product['sku'])
-            summaries = listing.get('summaries', [])
-            if not any(r.get('asin') == product['asin'] for r in summaries):
-                raise RuntimeError('Listing SKU/ASIN mismatch')
-            offers = [r for r in listing.get('offers', []) if r.get('marketplaceId') == client.marketplace and r.get('offerType') == 'B2C']
-            if len(offers) != 1 or offers[0].get('price', {}).get('currencyCode') != 'USD':
-                raise RuntimeError('Unambiguous USD offer required')
-            available = listing.get('fulfillmentAvailability', [])
-            fbm = [r for r in available if r.get('fulfillmentChannelCode') == 'DEFAULT']
-            fba = not fbm
-            units = client.fba_units(product['sku']) if fba else int(fbm[0]['quantity'])
-            price = float(offers[0]['price']['amount'])
-            # Local COGS/shipping verification time is not renewed by an Amazon fee lookup.
-            updated = {**product, 'price': price, 'fees': client.fees(product['asin'], price, fba),
-                       'fee_source': 'estimate', 'market_at': time.time(), 'inventory': units, 'inventory_at': time.time()}
+            updated = refresh_product_market(client, product)
             ingest(products=[updated], source='sp_api:listing_fees_inventory')
             cursor += 1
             state['cursor'] = cursor
