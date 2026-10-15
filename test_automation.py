@@ -19,6 +19,31 @@ import server as launch_server
 import opportunity_monitor
 
 
+def test_monitor_waits_for_successful_production_deployment():
+    from pathlib import Path
+    text = (Path(__file__).parent / '.github/workflows/automation-monitor.yml').read_text()
+    triggers = text.split('permissions:', 1)[0]
+    assert "  workflow_run:\n    workflows: ['Deploy to Cloud Run']\n    types: [completed]\n    branches: [main]" in triggers
+    assert '  push:' not in triggers
+    assert "if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'" in text
+    assert "cron: '20 * * * *'" in triggers
+    assert '  workflow_dispatch:' in triggers
+
+
+@pytest.mark.parametrize('last_result,failed', [
+    ({'success': True}, False),
+    ({'success': False}, True),
+    ({'error': True}, True),
+])
+def test_monitor_preserves_apply_failures_while_next_bid_report_is_pending(last_result, failed):
+    from scripts.monitor_automation import summarize
+    state = {'last_result': last_result, 'report_id': 'next-report', 'requested_at': 10000}
+    report = summarize({'profile': {'bid': state}}, now=10468)
+    assert report['profiles'][0]['bid']['report_pending'] is True
+    assert ('bid latest apply reported failure' in report['alerts']) is failed
+    assert 'bid report pending over two hours' not in report['alerts']
+
+
 class MemoryState:
     def __init__(self):
         self.data = {}
