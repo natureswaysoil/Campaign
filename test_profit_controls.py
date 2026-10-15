@@ -397,7 +397,7 @@ def test_activation_reuses_secrets_and_does_not_invent_policy(monkeypatch, capsy
         return ''
     monkeypatch.setattr(activate, 'gcloud', cloud)
     monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
-    monkeypatch.setattr(activate.urllib.request, 'urlopen', lambda *a, **k: BytesIO(b'{"products":[],"policy":{"daily_limit":75}}'))
+    monkeypatch.setattr(activate.urllib.request, 'urlopen', lambda *a, **k: BytesIO(b'{"products":[],"policy":{"daily_limit":75,"timezone":"America/New_York"}}'))
     activate.main()
     output = capsys.readouterr().out
     assert 'Saved spending policy: present' in output
@@ -449,3 +449,31 @@ def test_named_spapi_credentials_bound_even_when_seller_metadata_missing(monkeyp
     mapping = updates[0][updates[0].index('--update-secrets') + 1]
     assert mapping == 'SP_API_CLIENT_ID=PPCADSCLIENT:latest,SP_API_CLIENT_SECRET=PPCADSSECRET:latest,SP_API_REFRESH_TOKEN=PPCADSREFRESHTOKEN:latest'
     assert 'AMAZON_ADS' not in mapping
+
+
+def test_policy_timezone_alignment_preserves_owner_limits(monkeypatch):
+    import json
+    from io import BytesIO
+    from scripts import activate_profit_controls as activate
+    old = {'daily_limit': 75, 'timezone': 'America/New_York', 'max_cpc': 1.25}
+    expected = {**old, 'timezone': 'America/Los_Angeles'}
+    calls = []
+    def request(req, **kwargs):
+        calls.append(req)
+        if req.get_method() == 'POST':
+            assert json.loads(req.data) == {'apply_live': True, 'policy': expected}
+        return BytesIO(json.dumps({'policy': expected}).encode())
+    monkeypatch.setattr(activate.urllib.request, 'urlopen', request)
+    result = activate.align_policy_timezone('https://example.test', 'private-token', {'policy': old}, 'America/Los_Angeles')
+    assert result['policy'] == expected
+    assert len(calls) == 2
+    activate.align_policy_timezone('https://example.test', 'private-token', result, 'America/Los_Angeles')
+    assert len(calls) == 2
+
+
+def test_profit_diagnostics_never_echo_raw_errors():
+    from scripts.monitor_automation import sync_summary
+    result = sync_summary({'retail': {'error': 'HTTPError', 'message': '403 Client Error for url: https://sellingpartnerapi-na.amazon.com/private-value'}, 'ads': {'error': 'RuntimeError', 'message': 'Set AMAZON_ADS_TIMEZONE; observed: America/Los_Angeles'}})
+    assert result['retail'] == {'error': 'HTTPError', 'http_status': 403, 'category': 'selling_partner_api'}
+    assert result['ads']['observed_timezone'] == 'America/Los_Angeles'
+    assert 'private-value' not in str(result)

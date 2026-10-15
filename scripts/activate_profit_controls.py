@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import urllib.request
+import urllib.error
 
 
 def gcloud(*args):
@@ -51,6 +52,28 @@ SP_API_SECRET_NAMES = {
     'SP_API_SELLER_ID': 'SP_API_SELLER_ID',
     'SP_API_MARKETPLACE_ID': 'SP_API_MARKETPLACE_ID',
 }
+
+
+def align_policy_timezone(url, token, status, timezone):
+    """Preserve all owner limits while aligning the accounting day with Ads."""
+    policy = status.get('policy')
+    if not policy or policy.get('timezone') == timezone:
+        return status
+    request = urllib.request.Request(url + '/api/profit/policy',
+        data=json.dumps({'apply_live': True, 'policy': {**policy, 'timezone': timezone}}).encode(),
+        headers={'X-Daily-Optimizer-Token': token, 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        saved = json.load(response)
+    expected = {**policy, 'timezone': timezone}
+    if saved.get('policy') != expected:
+        raise RuntimeError('Policy timezone update did not preserve saved settings')
+    request = urllib.request.Request(url + '/api/profit/status', headers={'X-Daily-Optimizer-Token': token})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        verified = json.load(response)
+    if verified.get('policy') != expected:
+        raise RuntimeError('Policy timezone read-back failed')
+    print('Policy accounting timezone aligned with Ads; spending limits preserved.')
+    return verified
 
 
 def configure_sp_api_secrets(config, service, scope, project):
@@ -109,6 +132,9 @@ def main():
     with urllib.request.urlopen(req, timeout=60) as response:
         status = json.load(response)
     status = initialize_spending_policy(url, token, status)
+    env = config['spec']['template']['spec']['containers'][0].get('env', [])
+    timezone = next((e['value'] for e in env if e['name'] == 'AMAZON_ADS_TIMEZONE' and 'value' in e), 'America/New_York')
+    status = align_policy_timezone(url, token, status, timezone)
     print('Saved spending policy: ' + ('present' if status.get('policy') else 'MISSING'))
     print('Saved product economics records: ' + str(len(status.get('products', []))))
     print('Complete spending snapshot: ' + ('present' if status.get('complete_spend_at') else 'awaiting sync'))
@@ -133,6 +159,19 @@ def main():
         gcloud('scheduler', 'jobs', 'resume', 'ppc-profit-tick', '--location', region, '--project', project, '--format=value(name)')
     print('Profit scheduler configured every 15 minutes.')
     print('Readiness checked. Missing/stale inputs continue to block spending increases.')
+    if os.environ.get('VERIFY_PROFIT_SYNC') == 'true':
+        from monitor_automation import sync_summary
+        request = urllib.request.Request(url + '/api/automation/profit-tick',
+            data=b'{"apply_live":true}', headers={'X-Daily-Optimizer-Token': token, 'Content-Type': 'application/json'})
+        try:
+            response = urllib.request.urlopen(request, timeout=600)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 503:
+                raise RuntimeError('Profit verification HTTP status ' + str(exc.code)) from None
+            response = exc
+        with response:
+            result = json.load(response)
+        print('PROFIT_SYNC_CHECK ' + json.dumps(sync_summary(result)))
 
 
 if __name__ == '__main__':

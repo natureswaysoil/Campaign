@@ -127,7 +127,7 @@ jobs:
             --allow-unauthenticated \
             --timeout 1800 \
             --memory 1Gi \
-            --update-env-vars GCP_PROJECT_ID=${{ env.GCP_PROJECT_ID }},PRIORITY_FILTER=1,PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
+            --update-env-vars GCP_PROJECT_ID=${{ env.GCP_PROJECT_ID }},PRIORITY_FILTER=1,AMAZON_ADS_TIMEZONE=America/Los_Angeles,PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
             --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest,DAILY_OPTIMIZER_TOKEN=DAILY_OPTIMIZER_TOKEN:latest
 
 
@@ -141,4 +141,6 @@ jobs:
             --format='table(name.basename(),state,schedule,timeZone,httpTarget.uri)'
 
       - name: Configure profit synchronization and check activation inputs
+        env:
+          VERIFY_PROFIT_SYNC: "true"
         run: python3 scripts/activate_profit_controls.py
