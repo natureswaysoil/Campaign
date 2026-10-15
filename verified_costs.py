@@ -1,0 +1,100 @@
+"""Private, idempotent import of owner-confirmed per-size costs."""
+import base64
+import json
+import time
+
+# Explicit SKU/ASIN size matches reviewed from the owner's product catalog.
+# Mixed-size titles and dry products are intentionally not assigned liquid costs.
+MATCHES = {
+    'B0D9HT7ND8': ('FR-IJ8R-6LQK', '32oz'),
+    'B0DJ1MF2BP': ('VY-T7ZM-760R', '1gal'),
+    'B0F8R45FJ2': ('8K-DBU9-JA4K', '1gal'),
+    'B0F9B4Q5Z8': ('3L-41WW-8JVG', '2.5gal'),
+    'B0F9V3K9L7': ('GA-TZ69-N9XK', '2.5gal'),
+    'B0F9V4HQNK': ('IT-ADBS-CXUC', '1gal'),
+    'B0F9W6R4K9': ('TY-Z0X8-ENHG', '1gal'),
+    'B0FF98QKY7': ('VH-WPH5-BD2P', '1gal'),
+    'B0FFZPLCG7': ('XX-XBWB-DF03', '32oz'),
+    'B0FFZRM6BD': ('FP-AL1H-WYNQ', '32oz'),
+    'B0FG38YYJ5': ('T0-MB9Q-JIKC', '1gal'),
+    'B0FGWSKGCY': ('BH-NBDZ-TCRT', '32oz'),
+    'B0FMQNT193': ('CC-PTT2-IUMQ', '1gal'),
+    'B0GTBZ7N56': ('NWS-FRUIT-32', '32oz'),
+    'B0GSCVPS49': ('NWS-SEED-32', '32oz'),
+}
+
+
+def validate_schedule(data, now=None):
+    now = time.time() if now is None else now
+    import math
+    if set(data) != {'verified_at', 'sizes'} or set(data['sizes']) != {'32oz', '1gal', '2.5gal'}:
+        raise ValueError('Incomplete confirmed cost schedule')
+    at = data['verified_at']
+    if not isinstance(at, (int, float)) or not math.isfinite(at) or not 0 <= now - at <= 30 * 86400:
+        raise ValueError('Cost confirmation is expired or in the future')
+    for pair in data['sizes'].values():
+        if not isinstance(pair, list) or len(pair) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0 for x in pair):
+            raise ValueError('Invalid confirmed costs')
+    return data
+
+
+def seed_products(client, data):
+    from automation_store import GCSState
+    from decision_sync import refresh_product_market
+    from profit_intelligence import Product, ingest
+    saved, existing, failed = 0, 0, []
+    # Use the normal ad-write lock so imports cannot race policy/control changes.
+    with GCSState('profit-write-guard').locked():
+        current = GCSState('profit-data').read().get('products', {})
+        for asin, (sku, size) in MATCHES.items():
+            if asin in current:
+                existing += 1
+                continue
+            cogs, shipping = data['sizes'][size]
+            candidate = {'asin': asin, 'sku': sku, 'cogs': cogs, 'shipping': shipping,
+                         'updated_at': data['verified_at']}
+            try:
+                product = Product.model_validate(refresh_product_market(client, candidate, fbm_only=True)).model_dump(mode='json')
+                ingest(products=[product], source='owner_confirmed:2026-10-14')
+                verified = GCSState('profit-data').read().get('products', {}).get(asin)
+                if not verified or any(verified[k] != product[k] for k in ('sku', 'cogs', 'shipping', 'updated_at')):
+                    raise RuntimeError('Cost read-back failed')
+                saved += 1
+            except Exception as exc:
+                status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                # ASIN identifiers are public; raw errors/responses and costs are not.
+                failed.append({'asin': asin, 'error': type(exc).__name__, 'http_status': status})
+    return {'saved': saved, 'existing_preserved': existing, 'failed': failed, 'catalog_snapshot_unmatched': 10}
+
+
+
+def import_public_key():
+    from automation_store import GCSState
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    store = GCSState('profit-cost-import-key')
+    with store.locked() as state:
+        if not state.get('private_pem'):
+            key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+            state['private_pem'] = key.private_bytes(serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+            store.save(state)
+        key = serialization.load_pem_private_key(state['private_pem'].encode(), password=None)
+    return key.public_key().public_bytes(serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+
+
+def import_encrypted_costs(packet):
+    from automation_store import GCSState
+    from decision_sync import SellingPartnerClient
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    state = GCSState('profit-cost-import-key').read()
+    key = serialization.load_pem_private_key(state['private_pem'].encode(), password=None)
+    data = json.loads(key.decrypt(base64.b64decode(packet, validate=True),
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)))
+    # Replaying a historical setup packet must not renew costs or block deploys.
+    at = data.get('verified_at') if isinstance(data, dict) else None
+    if isinstance(at, (int, float)) and time.time() - at > 30 * 86400:
+        return {'skipped': 'expired_confirmation', 'saved': 0}
+    return seed_products(SellingPartnerClient(), validate_schedule(data))

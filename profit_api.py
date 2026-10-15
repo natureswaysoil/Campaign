@@ -43,6 +43,27 @@ class Experiment(StrictModel):
 
 
 def register(app):
+    @app.post('/api/profit/cost-import/key')
+    def cost_key(payload: dict):
+        if not live_requested(payload):
+            return {'dry_run': True}
+        from verified_costs import import_public_key
+        return {'public_key': import_public_key()}
+
+    @app.post('/api/profit/cost-import')
+    def cost_import(payload: dict):
+        if not live_requested(payload):
+            return {'dry_run': True}
+        from verified_costs import import_encrypted_costs
+        packet = payload.get('packet')
+        if not isinstance(packet, str) or len(packet) > 1024:
+            raise HTTPException(422, 'Invalid encrypted cost packet')
+        try:
+            return import_encrypted_costs(packet)
+        except Exception as exc:
+            # Never include decrypted data, key material or raw Amazon errors.
+            raise HTTPException(503, 'Private cost import failed: ' + type(exc).__name__) from None
+
     @app.get('/profit')
     def page():
         from pathlib import Path

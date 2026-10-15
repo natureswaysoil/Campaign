@@ -141,9 +141,7 @@ jobs:
             --format='table(name.basename(),state,schedule,timeZone,httpTarget.uri)'
 
       - name: Import confirmed private product costs
-        run: |
-          python3 -m pip install -q -r requirements.txt
-          python3 scripts/import_verified_costs.py
+        run: python3 scripts/import_verified_costs.py
 
       - name: Configure profit synchronization and check activation inputs
         env:

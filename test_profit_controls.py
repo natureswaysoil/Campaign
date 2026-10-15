@@ -480,7 +480,7 @@ def test_profit_diagnostics_never_echo_raw_errors():
 
 
 def test_verified_cost_schedule_rejects_stale_and_invalid_values(now):
-    from scripts.import_verified_costs import validate_schedule
+    from verified_costs import validate_schedule
     data = {'verified_at': now - 10, 'sizes': {s: [1, 2] for s in ('32oz', '1gal', '2.5gal')}}
     assert validate_schedule(data, now) == data
     with pytest.raises(ValueError):
