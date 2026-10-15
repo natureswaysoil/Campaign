@@ -149,3 +149,6 @@ jobs:
         env:
           VERIFY_PROFIT_SYNC: "true"
         run: python3 scripts/activate_profit_controls.py
+
+      - name: Check reported incomplete campaign without changing ads
+        run: python3 scripts/diagnose_launch.py 77293223689063

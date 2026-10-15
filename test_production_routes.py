@@ -67,3 +67,24 @@ def test_dashboard_refresh_returns_immediately_while_report_runs():
     assert response.status_code == 202
     assert payload["refreshing"] is True
     assert payload["cache_ready"] is False
+
+
+def test_unverified_launch_does_not_create_any_campaign():
+    import server
+    from automation_store import GCSState
+    product = {'title': 'Example', 'sku': 'sku-1', 'asin': 'B012345678',
+               'suggested_budget': 10, 'suggested_bid': .2}
+    client = MagicMock()
+    with (
+        patch.object(server, 'load_products', return_value=[{'Product_ID': 'p1'}]),
+        patch.object(server, 'normalized_product', return_value=product),
+        patch.object(server, 'generate_keywords_for_product', return_value=[]),
+        patch.object(server, 'AmazonAdsClient', return_value=client),
+        patch('automation_store.GCSState') as store,
+    ):
+        store.return_value.read.return_value = {'products': {}}
+        response = server.api_create_recommended_campaigns(
+            {'product_id': 'p1', 'apply_live': True}, None, 'secret-token')
+    assert response.status_code == 400
+    assert 'B012345678' in json.loads(response.body)['message']
+    client.post.assert_not_called()

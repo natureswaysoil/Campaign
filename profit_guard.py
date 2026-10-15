@@ -26,6 +26,21 @@ class GuardBlocked(RuntimeError):
     pass
 
 
+def resolve_launch_product(products, asin, sku):
+    """Resolve exact identity before creating any Amazon campaign objects."""
+    asin, sku = str(asin or '').strip(), str(sku or '').strip()
+    product = products.get(asin) if asin else None
+    if not asin and sku:
+        matches = [p for p in products.values() if p.get('sku') == sku]
+        product = matches[0] if len(matches) == 1 else None
+    if not product:
+        raise ValueError('Launch blocked: no verified product costs mapped for ASIN '
+                         + (asin or '(missing)') + '. Verify this product in the Profit dashboard before launching.')
+    if not product.get('sku') or not product.get('asin'):
+        raise ValueError('Launch blocked: verified product is missing its Amazon SKU or ASIN')
+    return product
+
+
 def amount(value):
     number = float(value)
     if not math.isfinite(number) or number < 0:

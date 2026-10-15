@@ -649,3 +649,13 @@ def test_asin_sku_recovery_requires_one_exact_marketplace_match():
     client.request.return_value = {'items': []}
     with pytest.raises(ValueError, match='no_matching_listing'):
         client.find_listing_sku('B012345678')
+
+
+def test_launch_identity_uses_verified_sku_and_rejects_conflicting_asin(product):
+    products = {product['asin']: product}
+    assert guards.resolve_launch_product(products, product['asin'], 'obsolete-sku') == product
+    assert guards.resolve_launch_product(products, '', product['sku']) == product
+    with pytest.raises(ValueError, match='no verified product costs'):
+        guards.resolve_launch_product(products, 'B099999999', product['sku'])
+    with pytest.raises(ValueError):
+        guards.resolve_launch_product({}, product['asin'], product['sku'])

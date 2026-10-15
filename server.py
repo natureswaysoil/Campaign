@@ -508,6 +508,15 @@ def api_create_recommended_campaigns(
             return JSONResponse({"success": True, "dry_run": True, "apply_live": False,
                                  "product": product["title"], "total_daily_budget": total_budget})
 
+        # Fail before creating a paused campaign, and use Amazon-verified SKU
+        # when the sheet still contains an obsolete SKU for this exact ASIN.
+        from automation_store import GCSState
+        from profit_guard import resolve_launch_product
+        verified = resolve_launch_product(
+            GCSState('profit-data').read().get('products', {}), asin, sku)
+        asin, sku = verified['asin'], verified['sku']
+        client.profit_product_asin = asin
+
         resume_campaigns = payload.get("_resume_campaigns") or {}
 
         # 1) Amazon-recommended discovery: automatic targeting campaign.

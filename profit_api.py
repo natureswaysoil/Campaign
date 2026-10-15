@@ -69,6 +69,30 @@ def register(app):
         from pathlib import Path
         return FileResponse(Path(__file__).parent / 'templates' / 'profit.html')
 
+    @app.get('/api/profit/launch-diagnostic/{campaign_id}')
+    def launch_diagnostic(campaign_id: str):
+        # Read-only, authenticated by the same middleware as all profit APIs.
+        # Names are used only to locate candidates, never to authorize spending.
+        from optimize_campaigns import AmazonAdsClient, load_products, normalized_product
+        from server import _sanitize_name
+        client = AmazonAdsClient()
+        campaign = next((c for c in client.list_campaigns()
+                         if str(c.get('campaignId')) == campaign_id), None)
+        if not campaign:
+            raise HTTPException(404, 'Campaign not found')
+        products = GCSState('profit-data').read().get('products', {})
+        ads = client.list_product_ads(campaign_id)
+        candidates = []
+        name = str(campaign.get('name') or '')
+        for row in load_products():
+            product = normalized_product(row)
+            prefix = _sanitize_name(str(product.get('title') or 'Product'))[:70] + ' | '
+            if name.startswith(prefix):
+                asin = str(product.get('asin') or '')
+                candidates.append({'asin': asin, 'verified': asin in products})
+        return {'campaign_id': campaign_id, 'state': campaign.get('state'),
+                'product_ads': len(ads), 'catalog_candidates': candidates}
+
     @app.get('/api/profit/status')
     def status():
         try:
