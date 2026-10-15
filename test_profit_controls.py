@@ -659,3 +659,36 @@ def test_launch_identity_uses_verified_sku_and_rejects_conflicting_asin(product)
         guards.resolve_launch_product(products, 'B099999999', product['sku'])
     with pytest.raises(ValueError):
         guards.resolve_launch_product({}, product['asin'], product['sku'])
+
+
+def test_confirmed_costs_require_live_intent_and_finite_values():
+    from fastapi import FastAPI
+    app = FastAPI()
+    profit_api.register(app)
+    http = TestClient(app)
+    payload = {'asin': 'B012345678', 'sku': 'soil', 'cogs': 1, 'shipping': 2, 'other_cost': 0}
+    assert http.post('/api/profit/confirm-costs', json=payload).json() == {'dry_run': True}
+    assert http.post('/api/profit/confirm-costs', json={**payload, 'cogs': -1}).status_code == 422
+
+
+def test_cost_confirmation_verifies_market_before_persisting(monkeypatch, product):
+    store = MagicMock()
+    state = {'products': {}}
+    store.read.side_effect = lambda: state
+    monkeypatch.setattr(profit_api, 'GCSState', lambda name: store)
+    monkeypatch.setattr(decision_sync, 'SellingPartnerClient', MagicMock())
+    refresh = MagicMock(return_value={**product, 'cogs': 1., 'shipping': 2.})
+    monkeypatch.setattr(decision_sync, 'refresh_product_market', refresh)
+    def save(products, **kwargs):
+        state['products'][product['asin']] = products[0]
+    persist = MagicMock(side_effect=save)
+    monkeypatch.setattr(profit_api, 'ingest', persist)
+    payload = profit_api.CostConfirmation(asin=product['asin'], sku=product['sku'], cogs=1, shipping=2, other_cost=0)
+    assert profit_api.save_confirmed_costs(payload)['success']
+    assert refresh.call_args.kwargs['fbm_only'] is True
+    assert 'daily_units' not in refresh.call_args.args[1]
+    persist.reset_mock()
+    refresh.side_effect = RuntimeError('SKU/ASIN mismatch')
+    with pytest.raises(RuntimeError):
+        profit_api.save_confirmed_costs(payload)
+    persist.assert_not_called()

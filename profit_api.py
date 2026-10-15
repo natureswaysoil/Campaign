@@ -20,6 +20,33 @@ class DataImport(StrictModel):
     metrics: list[Metric] = Field(default_factory=list, max_length=10000)
 
 
+class CostConfirmation(StrictModel):
+    apply_live: bool = False
+    dry_run: bool = False
+    asin: str = Field(pattern=r'^[A-Z0-9]{10}$')
+    sku: str = Field(min_length=1, max_length=100)
+    cogs: float = Field(ge=0)
+    shipping: float = Field(ge=0)
+    other_cost: float = Field(ge=0)
+
+
+def save_confirmed_costs(payload):
+    from decision_sync import SellingPartnerClient, refresh_product_market
+    with GCSState('profit-write-guard').locked():
+        existing = GCSState('profit-data').read().get('products', {}).get(payload.asin, {})
+        candidate = {**existing, 'asin': payload.asin, 'sku': payload.sku,
+                     'cogs': payload.cogs, 'shipping': payload.shipping,
+                     'other_cost': payload.other_cost, 'updated_at': time.time()}
+        # Verify exact SKU/ASIN against Amazon; no placeholder fees or sales velocity.
+        product = Product.model_validate(refresh_product_market(
+            SellingPartnerClient(), candidate, fbm_only=True)).model_dump(mode='json')
+        ingest(products=[product], source='owner_confirmed:dashboard')
+        saved = GCSState('profit-data').read().get('products', {}).get(payload.asin)
+        if not saved or any(saved.get(k) != product[k] for k in ('sku', 'cogs', 'shipping', 'other_cost', 'updated_at')):
+            raise RuntimeError('Cost save read-back failed')
+        return {'success': True, 'asin': payload.asin}
+
+
 class Experiment(StrictModel):
     asin: str = Field(pattern=r'^[A-Z0-9]{10}$')
     kind: Literal['title', 'main_image', 'bullets', 'description', 'a_plus', 'brand_story']
@@ -121,6 +148,15 @@ def register(app):
                 state.update(policy=parsed, updated_at=time.time())
                 store.save(state)
         return {'success': True, 'policy': parsed}
+
+    @app.post('/api/profit/confirm-costs')
+    def confirm_costs(payload: CostConfirmation):
+        if not payload.apply_live or payload.dry_run:
+            return {'dry_run': True}
+        try:
+            return save_confirmed_costs(payload)
+        except Exception:
+            raise HTTPException(503, 'Could not verify and save this product. Check its exact Amazon SKU and ASIN, then retry. No launch was performed.') from None
 
     @app.post('/api/profit/data')
     def import_data(payload: DataImport):
