@@ -3,16 +3,16 @@ on:
   schedule:
     - cron: '20 * * * *'
   workflow_dispatch:
-  push:
+  workflow_run:
+    workflows: ['Deploy to Cloud Run']
+    types: [completed]
     branches: [main]
-    paths:
-      - '.github/workflows/automation-monitor.yml'
-      - 'scripts/monitor_automation.py'
 permissions:
   contents: read
   id-token: write
 jobs:
   monitor:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
