@@ -557,3 +557,15 @@ def test_off_amazon_report_rows_preserved_separately(now):
     assert Metric.model_validate(rows[1]).placement == 'PLACEMENT_REST_OF_SEARCH'
     assert intelligence.metric_key(rows[0]) != intelligence.metric_key(rows[1])
     assert sum(r['spend'] for r in rows) == 7
+
+
+def test_amazon_error_diagnostics_do_not_leak_request_or_message():
+    import requests
+    from decision_sync import safe_api_error
+    response = requests.Response()
+    response.status_code = 400
+    response.url = 'https://sellingpartnerapi-na.amazon.com/listings/2021-08-01/items/private-id/private-sku'
+    response._content = b'{"errors":[{"code":"InvalidInput","message":"Invalid seller private-id and sku private-sku"}]}'
+    result = safe_api_error(requests.HTTPError(response=response))
+    assert result == {'operation': 'listing', 'amazon_code': 'InvalidInput', 'fields': ['seller_id', 'sku']}
+    assert 'private' not in str(result)

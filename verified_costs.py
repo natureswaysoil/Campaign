@@ -40,11 +40,22 @@ def validate_schedule(data, now=None):
 
 def seed_products(client, data):
     from automation_store import GCSState
-    from decision_sync import refresh_product_market
+    from decision_sync import refresh_product_market, safe_api_error
     from profit_intelligence import Product, ingest
     saved, existing, failed = 0, 0, []
     # Use the normal ad-write lock so imports cannot race policy/control changes.
     with GCSState('profit-write-guard').locked():
+        # Owner confirmation is durable even while Amazon market data is unavailable.
+        # It is kept separate from usable economics: no placeholder price/fee records.
+        schedule_store = GCSState('profit-confirmed-costs')
+        confirmed = schedule_store.read()
+        if confirmed.get('verified_at', 0) <= data['verified_at']:
+            schedule_store.save(data)
+            confirmed = schedule_store.read()
+            if confirmed != data:
+                raise RuntimeError('Private cost schedule read-back failed')
+        else:
+            data = confirmed
         current = GCSState('profit-data').read().get('products', {})
         for asin, (sku, size) in MATCHES.items():
             if asin in current:
@@ -63,8 +74,8 @@ def seed_products(client, data):
             except Exception as exc:
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 # ASIN identifiers are public; raw errors/responses and costs are not.
-                failed.append({'asin': asin, 'error': type(exc).__name__, 'http_status': status})
-    return {'saved': saved, 'existing_preserved': existing, 'failed': failed, 'catalog_snapshot_unmatched': 10}
+                failed.append({'asin': asin, 'error': type(exc).__name__, 'http_status': status, **safe_api_error(exc)})
+    return {'cost_schedule_saved': True, 'saved': saved, 'existing_preserved': existing, 'failed': failed, 'catalog_snapshot_unmatched': 10}
 
 
 

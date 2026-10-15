@@ -16,6 +16,39 @@ from automation_store import GCSState
 from profit_intelligence import ET, ingest
 
 
+def safe_api_error(exc):
+    """Classify failed Amazon requests without logging identifiers or bodies."""
+    response = getattr(exc, 'response', None)
+    if response is None:
+        return {}
+    url = str(getattr(response, 'url', ''))
+    result = {}
+    for prefix, operation in (('/listings/', 'listing'), ('/products/fees/', 'fees'), ('/reports/', 'reports'), ('/auth/o2/token', 'authorization')):
+        if prefix in url:
+            result['operation'] = operation
+            break
+    try:
+        errors = response.json().get('errors', [])
+        code = errors[0].get('code', '') if errors else ''
+        if code in ('InvalidInput', 'InvalidParameterValue', 'InvalidRequest', 'Unauthorized', 'AccessDenied', 'QuotaExceeded'):
+            result['amazon_code'] = code
+        message = ' '.join(str(e.get('message', '')) for e in errors).lower()
+        fields = [label for needles, label in (
+            (('seller', 'merchant'), 'seller_id'),
+            (('includeddata', 'included data'), 'included_data'),
+            (('marketplace',), 'marketplace'),
+            (('sku',), 'sku'),
+            (('currency',), 'currency'),
+            (('price', 'amount'), 'price'),
+            (('access token',), 'access_token'),
+        ) if any(word in message for word in needles)]
+        if fields:
+            result['fields'] = fields
+    except (ValueError, AttributeError, TypeError, IndexError):
+        pass
+    return result
+
+
 class SellingPartnerClient:
     def __init__(self):
         names = ('SP_API_CLIENT_ID', 'SP_API_CLIENT_SECRET', 'SP_API_REFRESH_TOKEN', 'SP_API_SELLER_ID', 'SP_API_MARKETPLACE_ID')
