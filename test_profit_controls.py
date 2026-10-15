@@ -569,3 +569,68 @@ def test_amazon_error_diagnostics_do_not_leak_request_or_message():
     result = safe_api_error(requests.HTTPError(response=response))
     assert result == {'operation': 'listing', 'amazon_code': 'InvalidInput', 'fields': ['seller_id', 'sku']}
     assert 'private' not in str(result)
+
+
+def test_confirmed_costs_survive_failed_amazon_lookup_without_fake_economics(monkeypatch, now):
+    import automation_store
+    import verified_costs
+    state = {}
+    class Store:
+        def __init__(self, name): self.name = name
+        def read(self): return copy.deepcopy(state.get(self.name, {}))
+        def save(self, value): state[self.name] = copy.deepcopy(value)
+        @contextmanager
+        def locked(self): yield self.read()
+    monkeypatch.setattr(automation_store, 'GCSState', Store)
+    monkeypatch.setattr(verified_costs, 'MATCHES', {'B012345678': ('sku', '32oz')})
+    def unavailable(*args, **kwargs): raise RuntimeError('Amazon unavailable')
+    monkeypatch.setattr(decision_sync, 'refresh_product_market', unavailable)
+    data = {'verified_at': now, 'sizes': {s: [1, 2] for s in ('32oz', '1gal', '2.5gal')}}
+    result = verified_costs.seed_products(object(), data)
+    assert result['cost_schedule_saved'] is True and result['saved'] == 0
+    assert state['profit-confirmed-costs'] == data
+    assert 'profit-data' not in state
+
+
+def test_listing_recovers_only_from_matching_authorized_ads_account(monkeypatch):
+    import requests
+    import optimize_campaigns
+    client = decision_sync.SellingPartnerClient.__new__(decision_sync.SellingPartnerClient)
+    client.seller, client.marketplace = 'invalid', 'ATVPDKIKX0DER'
+    response = requests.Response()
+    response.status_code = 400
+    calls = []
+    def request(method, path, **kwargs):
+        calls.append(path)
+        if '/invalid/' in path:
+            raise requests.HTTPError(response=response)
+        return {'sku': 'sku', 'summaries': [{'asin': 'B012345678'}]}
+    client.request = request
+    ads = MagicMock()
+    ads.profile_id = 'configured'
+    ads.get.return_value = [{'profileId': 'configured', 'accountInfo': {
+        'type': 'seller', 'marketplaceStringId': client.marketplace, 'id': 'ATESTSELLER123'}}]
+    monkeypatch.setattr(optimize_campaigns, 'AmazonAdsClient', lambda: ads)
+    assert client.listing('sku')['sku'] == 'sku'
+    assert client.seller == 'ATESTSELLER123' and client.seller_id_recovered is True
+    client.listing('sku')
+    assert len(calls) == 3
+    ads.get.assert_called_once()
+
+
+def test_listing_recovery_rejects_wrong_ads_profile(monkeypatch):
+    import requests
+    import optimize_campaigns
+    client = decision_sync.SellingPartnerClient.__new__(decision_sync.SellingPartnerClient)
+    client.seller, client.marketplace = 'invalid', 'ATVPDKIKX0DER'
+    response = requests.Response()
+    response.status_code = 400
+    client.request = MagicMock(side_effect=requests.HTTPError(response=response))
+    ads = MagicMock()
+    ads.profile_id = 'configured'
+    ads.get.return_value = [{'profileId': 'other', 'accountInfo': {'type': 'seller',
+        'marketplaceStringId': client.marketplace, 'id': 'ATESTSELLER123'}}]
+    monkeypatch.setattr(optimize_campaigns, 'AmazonAdsClient', lambda: ads)
+    with pytest.raises(requests.HTTPError):
+        client.listing('sku')
+    client.request.assert_called_once()

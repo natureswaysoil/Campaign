@@ -32,7 +32,7 @@ def safe_api_error(exc):
         code = errors[0].get('code', '') if errors else ''
         if code in ('InvalidInput', 'InvalidParameterValue', 'InvalidRequest', 'Unauthorized', 'AccessDenied', 'QuotaExceeded'):
             result['amazon_code'] = code
-        message = ' '.join(str(e.get('message', '')) for e in errors).lower()
+        message = ' '.join(str(e.get('message', '')) + ' ' + str(e.get('details', '')) for e in errors).lower()
         fields = [label for needles, label in (
             (('seller', 'merchant'), 'seller_id'),
             (('includeddata', 'included data'), 'included_data'),
@@ -82,8 +82,35 @@ class SellingPartnerClient:
         response.raise_for_status()
 
     def listing(self, sku):
-        return self.request('GET', '/listings/2021-08-01/items/' + quote(self.seller, safe='') + '/' + quote(sku, safe=''),
-            params={'marketplaceIds': self.marketplace, 'includedData': 'summaries,offers,fulfillmentAvailability'})
+        def lookup(seller):
+            return self.request('GET', '/listings/2021-08-01/items/' + quote(seller, safe='') + '/' + quote(sku, safe=''),
+                params={'marketplaceIds': self.marketplace, 'includedData': 'summaries,offers,fulfillmentAvailability'})
+        try:
+            return lookup(self.seller)
+        except requests.HTTPError as original:
+            if original.response is None or original.response.status_code != 400 or getattr(self, '_seller_recovery_attempted', False):
+                raise
+            self._seller_recovery_attempted = True
+            # Read-only recovery using this exact configured Ads account. Never
+            # guess an ID or treat an Ads profile number as a selling partner ID.
+            from optimize_campaigns import AmazonAdsClient
+            import re
+            ads = AmazonAdsClient()
+            profiles = ads.get('/v2/profiles')
+            matches = [p for p in profiles if str(p.get('profileId')) == str(ads.profile_id)]
+            account = matches[0].get('accountInfo', {}) if len(matches) == 1 else {}
+            candidate = str(account.get('id') or '')
+            if (account.get('type') != 'seller' or account.get('marketplaceStringId') != self.marketplace
+                    or not re.fullmatch(r'[A-Z0-9]{6,20}', candidate) or candidate == self.seller):
+                raise original
+            # The SP-API token must itself authorize this candidate and return the
+            # exact SKU. refresh_product_market also verifies the expected ASIN.
+            result = lookup(candidate)
+            if result.get('sku') != sku or not result.get('summaries'):
+                raise original
+            self.seller = candidate
+            self.seller_id_recovered = True
+            return result
 
     def fees(self, asin, price, fba):
         result = self.request('POST', '/products/fees/v0/items/' + quote(asin, safe='') + '/feesEstimate', body={

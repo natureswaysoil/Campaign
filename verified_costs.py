@@ -75,7 +75,8 @@ def seed_products(client, data):
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 # ASIN identifiers are public; raw errors/responses and costs are not.
                 failed.append({'asin': asin, 'error': type(exc).__name__, 'http_status': status, **safe_api_error(exc)})
-    return {'cost_schedule_saved': True, 'saved': saved, 'existing_preserved': existing, 'failed': failed, 'catalog_snapshot_unmatched': 10}
+    return {'cost_schedule_saved': True, 'saved': saved, 'existing_preserved': existing, 'failed': failed,
+            'seller_id_recovered': getattr(client, 'seller_id_recovered', False) is True, 'catalog_snapshot_unmatched': 10}
 
 
 
