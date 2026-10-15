@@ -141,9 +141,11 @@ jobs:
             --format='table(name.basename(),state,schedule,timeZone,httpTarget.uri)'
 
       - name: Import confirmed private product costs
+        id: cost_import
         run: python3 scripts/import_verified_costs.py
 
       - name: Configure profit synchronization and check activation inputs
+        if: ${{ !cancelled() && (steps.cost_import.outcome == 'success' || steps.cost_import.outcome == 'failure') }}
         env:
           VERIFY_PROFIT_SYNC: "true"
         run: python3 scripts/activate_profit_controls.py

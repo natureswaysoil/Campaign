@@ -57,6 +57,13 @@ def seed_products(client, data):
         else:
             data = confirmed
         current = GCSState('profit-data').read().get('products', {})
+        if current and any(asin not in current for asin in MATCHES):
+            # Establish the account against an already verified SKU before trying
+            # recovery for a catalog SKU that Amazon no longer recognizes.
+            anchor = next(iter(current.values()))
+            listing = client.listing(anchor['sku'])
+            if not any(s.get('asin') == anchor['asin'] for s in listing.get('summaries', [])):
+                raise RuntimeError('Verified account anchor no longer matches')
         for asin, (sku, size) in MATCHES.items():
             if asin in current:
                 existing += 1
@@ -65,7 +72,14 @@ def seed_products(client, data):
             candidate = {'asin': asin, 'sku': sku, 'cogs': cogs, 'shipping': shipping,
                          'updated_at': data['verified_at']}
             try:
-                product = Product.model_validate(refresh_product_market(client, candidate, fbm_only=True)).model_dump(mode='json')
+                try:
+                    market = refresh_product_market(client, candidate, fbm_only=True)
+                except Exception as exc:
+                    if getattr(getattr(exc, 'response', None), 'status_code', None) != 404:
+                        raise
+                    candidate['sku'] = client.find_listing_sku(asin)
+                    market = refresh_product_market(client, candidate, fbm_only=True)
+                product = Product.model_validate(market).model_dump(mode='json')
                 ingest(products=[product], source='owner_confirmed:2026-10-14')
                 verified = GCSState('profit-data').read().get('products', {}).get(asin)
                 if not verified or any(verified[k] != product[k] for k in ('sku', 'cogs', 'shipping', 'updated_at')):
@@ -74,7 +88,10 @@ def seed_products(client, data):
             except Exception as exc:
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 # ASIN identifiers are public; raw errors/responses and costs are not.
-                failed.append({'asin': asin, 'error': type(exc).__name__, 'http_status': status, **safe_api_error(exc)})
+                entry = {'asin': asin, 'error': type(exc).__name__, 'http_status': status, **safe_api_error(exc)}
+                if str(exc) in ('no_matching_listing', 'ambiguous_listing', 'listing_identity_mismatch'):
+                    entry['reason'] = str(exc)
+                failed.append(entry)
     return {'cost_schedule_saved': True, 'saved': saved, 'existing_preserved': existing, 'failed': failed,
             'seller_id_recovered': getattr(client, 'seller_id_recovered', False) is True, 'catalog_snapshot_unmatched': 10}
 

@@ -634,3 +634,18 @@ def test_listing_recovery_rejects_wrong_ads_profile(monkeypatch):
     with pytest.raises(requests.HTTPError):
         client.listing('sku')
     client.request.assert_called_once()
+
+
+def test_asin_sku_recovery_requires_one_exact_marketplace_match():
+    client = decision_sync.SellingPartnerClient.__new__(decision_sync.SellingPartnerClient)
+    client.seller, client.marketplace = 'ATESTSELLER123', 'ATVPDKIKX0DER'
+    client.request = MagicMock(return_value={'numberOfResults': 1, 'items': [
+        {'sku': 'new-sku', 'summaries': [{'asin': 'B012345678', 'marketplaceId': client.marketplace}]}]})
+    assert client.find_listing_sku('B012345678') == 'new-sku'
+    assert client.request.call_args.kwargs['params']['identifiersType'] == 'ASIN'
+    client.request.return_value['numberOfResults'] = 2
+    with pytest.raises(ValueError, match='ambiguous_listing'):
+        client.find_listing_sku('B012345678')
+    client.request.return_value = {'items': []}
+    with pytest.raises(ValueError, match='no_matching_listing'):
+        client.find_listing_sku('B012345678')

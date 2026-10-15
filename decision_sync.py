@@ -124,6 +124,20 @@ class SellingPartnerClient:
             raise RuntimeError('Fee currency mismatch')
         return float(total['Amount'])
 
+    def find_listing_sku(self, asin):
+        result = self.request('GET', '/listings/2021-08-01/items/' + quote(self.seller, safe=''),
+            params={'marketplaceIds': self.marketplace, 'identifiers': asin, 'identifiersType': 'ASIN',
+                    'includedData': 'summaries', 'pageSize': 20})
+        items = result.get('items', [])
+        if not items:
+            raise ValueError('no_matching_listing')
+        if len(items) != 1 or result.get('numberOfResults', len(items)) != 1 or result.get('pagination', {}).get('nextToken'):
+            raise ValueError('ambiguous_listing')
+        item = items[0]
+        if not item.get('sku') or not any(s.get('asin') == asin and s.get('marketplaceId') == self.marketplace for s in item.get('summaries', [])):
+            raise ValueError('listing_identity_mismatch')
+        return item['sku']
+
     def fba_units(self, sku):
         result = self.request('GET', '/fba/inventory/v1/summaries', params={
             'granularityType': 'Marketplace', 'granularityId': self.marketplace,
