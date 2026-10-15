@@ -20,6 +20,10 @@ def sync_summary(sync):
             error = value['error']
             entry['error'] = error if error in ('RuntimeError', 'HTTPError', 'StateBusy', 'ValueError', 'KeyError', 'Timeout', 'ConnectionError') else 'OtherError'
             message = str(value.get('message', ''))
+            placement = re.fullmatch(r'Unknown placement: ([A-Za-z ()_.-]{1,64})', message)
+            if placement:
+                entry['category'] = 'unknown_placement'
+                entry['placement_label'] = placement.group(1)
             code = re.search(r'\b([45][0-9]{2}) (?:Client|Server) Error', message)
             if code:
                 entry['http_status'] = int(code.group(1))

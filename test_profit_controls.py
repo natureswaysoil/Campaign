@@ -510,3 +510,37 @@ def test_owner_fbm_costs_require_matching_listing_and_real_fees(product):
     listing['fulfillmentAvailability'] = []
     with pytest.raises(RuntimeError, match='only to FBM'):
         refresh_product_market(client, product, fbm_only=True)
+
+
+def test_private_cost_packet_round_trip_and_no_automatic_reverification(monkeypatch, now):
+    import base64
+    import json
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    import verified_costs
+    import automation_store
+    state = {}
+    class Store:
+        def __init__(self, name):
+            self.name = name
+        def read(self):
+            return copy.deepcopy(state.get(self.name, {}))
+        def save(self, value):
+            state[self.name] = copy.deepcopy(value)
+        @contextmanager
+        def locked(self):
+            yield self.read()
+    monkeypatch.setattr(automation_store, 'GCSState', Store)
+    public = verified_costs.import_public_key()
+    assert 'PRIVATE KEY' not in public
+    assert public == verified_costs.import_public_key()
+    key = serialization.load_pem_public_key(public.encode())
+    schedule = {'verified_at': now - 10, 'sizes': {s: [1, 2] for s in ('32oz', '1gal', '2.5gal')}}
+    def encrypt(value):
+        return base64.b64encode(key.encrypt(json.dumps(value).encode(), padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))).decode()
+    monkeypatch.setattr(decision_sync, 'SellingPartnerClient', lambda: object())
+    monkeypatch.setattr(verified_costs, 'seed_products', lambda client, value: value)
+    assert verified_costs.import_encrypted_costs(encrypt(schedule)) == schedule
+    expired = {**schedule, 'verified_at': now - 31 * 86400}
+    assert verified_costs.import_encrypted_costs(encrypt(expired))['saved'] == 0

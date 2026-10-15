@@ -93,6 +93,12 @@ def import_encrypted_costs(packet):
     key = serialization.load_pem_private_key(state['private_pem'].encode(), password=None)
     data = json.loads(key.decrypt(base64.b64decode(packet, validate=True),
         padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)))
+    if isinstance(data, dict) and isinstance(data.get('verified_at'), str):
+        from datetime import datetime
+        stamp = datetime.fromisoformat(data['verified_at'])
+        if stamp.tzinfo is None:
+            raise ValueError('Confirmation timestamp must include a timezone')
+        data['verified_at'] = stamp.timestamp()
     # Replaying a historical setup packet must not renew costs or block deploys.
     at = data.get('verified_at') if isinstance(data, dict) else None
     if isinstance(at, (int, float)) and time.time() - at > 30 * 86400:
