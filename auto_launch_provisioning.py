@@ -49,8 +49,15 @@ class PausedProvisioner:
                 self.store.save(state)
                 if keyword:
                     raise LaunchBlocked("Manual keyword provisioning not implemented")
-                # Auto targeting: deliberately require independently provisioned
-                # targeting. A missing target blocks activation.
+                write("auto_target", "/sp/targets", "targetingClauses", {
+                    "campaignId": str(cid), "adGroupId": group_id,
+                    "state": "ENABLED", "expressionType": "AUTO",
+                    "expression": [{"type": "CLOSE_MATCH"}], "bid": bid,
+                })
+                intent["status"] = "auto_target_ack"
+                self.store.save(state)
+                if self.adapter.verify_provisioning(cid=cid, asin=asin, profile=profile) is not True:
+                    raise LaunchBlocked("Amazon entity readback did not confirm provisioning")
                 self.adapter.verify_provisioning(cid=cid, asin=asin, profile=profile)
                 intent["status"] = "provisioned_verified"
                 self.store.save(state)
