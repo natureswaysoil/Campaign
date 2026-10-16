@@ -46,10 +46,26 @@ def load_runtime():
     return config
 
 
+def bind_storage_token():
+    """Use the approved runtime identity for GCS, including the child process."""
+    token = os.getenv('VALIDATION_STORAGE_TOKEN')
+    if not token: raise RuntimeError('Runtime storage identity unavailable')
+    from google.cloud import storage
+    from google.oauth2.credentials import Credentials
+    original = storage.Client
+    def runtime_client(*args, **kwargs):
+        kwargs['credentials'] = Credentials(token=token)
+        kwargs.setdefault('project', 'amazon-ppc-bid-optimizer')
+        return original(*args, **kwargs)
+    storage.Client = runtime_client
+    return original
+
+
 def storage_child(name, nonce):
     from automation_store import GCSState, StateBusy
     if not name.startswith('validation-live/') or '/' in nonce:
         return 2
+    bind_storage_token()
     probe = GCSState(name)
     if probe.read() != {'nonce':nonce}: return 3
     try:
@@ -133,7 +149,21 @@ def main():
                 'daily_limit':policy.daily_limit,'complete_spend_age_minutes':
                     round((time.time()-data['complete_spend_at'])/60,1) if data.get('complete_spend_at') else None}
     check('saved_policy_and_data', saved_inputs)
-    check('gcs_cross_process_persistence_and_lock',storage_probe)
+    def runtime_storage():
+        identity = config['spec']['template']['spec'].get('serviceAccountName')
+        if not identity: raise RuntimeError('Runtime identity not specified')
+        # Token issuance only: do not grant roles or modify service accounts.
+        os.environ['VALIDATION_STORAGE_TOKEN'] = gcloud('auth','print-access-token',
+            '--impersonate-service-account='+identity)
+        original = bind_storage_token()
+        try:
+            storage_probe()
+            return {'identity_scope':'cloud_run_runtime_service_account'}
+        finally:
+            from google.cloud import storage
+            storage.Client = original
+            os.environ.pop('VALIDATION_STORAGE_TOKEN',None)
+    check('gcs_runtime_cross_process_persistence_and_lock',runtime_storage)
     if ads is not None:
         def objects_and_caps():
             campaigns = ads.list_campaigns()
