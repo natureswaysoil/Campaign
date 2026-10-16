@@ -18,7 +18,7 @@ class Client:
 class AdapterTests(unittest.TestCase):
     def test_paused_first_and_readback(self):
         c=Client();a=ProductionLaunchAmazon(c)
-        self.assertEqual(a.create_paused_campaign({"asin":"B001"},"123")["campaign_id"],"42")
+        self.assertEqual(a.create_paused_campaign({"asin":"B001","budget_cap":3.0},"123")["campaign_id"],"42")
         self.assertEqual(c.writes[0][1]["campaigns"][0]["state"],"PAUSED")
         self.assertTrue(a.confirm_paused_campaign("42","B001","123"))
     def test_profile_mismatch_blocks(self):
