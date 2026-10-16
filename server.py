@@ -504,19 +504,23 @@ def api_create_recommended_campaigns(
         start_date = datetime.date.today().isoformat()
         safe_title = _sanitize_name(str(product.get("title") or "Product"))[:70]
 
-        if not live_requested(payload):
-            return JSONResponse({"success": True, "dry_run": True, "apply_live": False,
-                                 "product": product["title"], "total_daily_budget": total_budget})
-
-        # Fail before creating a paused campaign, and use Amazon-verified SKU
-        # when the sheet still contains an obsolete SKU for this exact ASIN.
-        from automation_store import GCSState
-        from profit_guard import resolve_launch_product
-        verified = resolve_launch_product(
-            GCSState('profit-data').read().get('products', {}), asin, sku)
+        from launch_preflight import launch_preflight
+        check = launch_preflight(client, asin=asin, sku=sku,
+            resume=payload.get('_resume_campaigns'), plans=[
+                {'type': 'AUTO_DISCOVERY', 'budget': discovery_budget, 'bid': discovery_bid},
+                {'type': 'MANUAL_EXACT', 'budget': exact_budget, 'bid': exact_bid}])
+        verified = check['product']
         asin, sku = verified['asin'], verified['sku']
         client.profit_product_asin = asin
-
+        discovery_plan, exact_plan = check['plans']
+        discovery_budget, discovery_bid = discovery_plan['budget'], discovery_plan['bid']
+        exact_budget, exact_bid = exact_plan['budget'], exact_plan['bid']
+        total_budget = check['total_daily_budget']
+        if not live_requested(payload):
+            return JSONResponse({'success': True, 'dry_run': True, 'apply_live': False,
+                                 'product': product['title'], 'preflight': check,
+                                 'total_daily_budget': total_budget})
+        from automation_store import GCSState
         exploration = GCSState('profit-policy').read().get('policy', {}).get('product_exploration', {}).get(asin)
         if exploration:
             discovery_budget = min(discovery_budget, float(exploration['daily_budget']))

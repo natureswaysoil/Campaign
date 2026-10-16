@@ -26,16 +26,14 @@ from budget_dayparting import budget_protection_status, get_budget_protection_mo
 
 
 BASELINE_BIDS_FILE = Path(os.getenv("DAYPARTING_BASELINE_BIDS_FILE", "/tmp/dayparting_baseline_bids.json"))
-MIN_BID = float(os.getenv("MIN_DAYPART_BID", "0.10"))
-MAX_BID = float(os.getenv("MAX_DAYPART_BID", "2.50"))
-PROTECT_MULTIPLIER = float(os.getenv("PROTECT_BID_MULTIPLIER", "0.35"))
-TAPER_MULTIPLIER = float(os.getenv("TAPER_BID_MULTIPLIER", "0.45"))
-PRIME_MULTIPLIER = float(os.getenv("PRIME_BID_MULTIPLIER", "1.15"))
-ACOS_CEILING = float(os.getenv("ACOS_CIRCUIT_BREAKER_CEILING", "0.38"))
-ACOS_MIN_SPEND = float(os.getenv("ACOS_CIRCUIT_BREAKER_MIN_SPEND", "20.0"))
-ACOS_REDUCE_MULTIPLIER = float(os.getenv("ACOS_REDUCE_MULTIPLIER", "0.75"))
-ACOS_SEVERE_MULTIPLIER = float(os.getenv("ACOS_SEVERE_MULTIPLIER", "0.50"))
-ACOS_ZERO_SALES_MULTIPLIER = float(os.getenv("ACOS_ZERO_SALES_MULTIPLIER", "0.35"))
+from optimizer_settings import bid_settings
+_SETTINGS = bid_settings()
+MIN_BID, MAX_BID = _SETTINGS.minimum, _SETTINGS.maximum
+PROTECT_MULTIPLIER, TAPER_MULTIPLIER, PRIME_MULTIPLIER = _SETTINGS.protect, _SETTINGS.taper, _SETTINGS.prime
+ACOS_CEILING, ACOS_MIN_SPEND = _SETTINGS.acos_ceiling, _SETTINGS.min_spend
+ACOS_REDUCE_MULTIPLIER = _SETTINGS.reduce
+ACOS_SEVERE_MULTIPLIER = _SETTINGS.severe
+ACOS_ZERO_SALES_MULTIPLIER = _SETTINGS.zero_sales
 
 
 def _clamp_bid(value: float) -> float:
@@ -247,18 +245,19 @@ def api_retune_existing_bids(
             _acos_protected_bid,
             campaign_multipliers=sales_multipliers,
         )
-        api_response: Dict[str, Any] = {}
-        applied_count = update_error_count = 0
-        if apply_live:
-            for offset in range(0, len(updates), 100):
-                chunk = updates[offset:offset + 100]
-                api_response = client.put("/sp/adGroups", {"adGroups": chunk})
-                outcome = batch_outcome(api_response, "adGroups", len(chunk))
-                applied_count += outcome["accepted"]
-                update_error_count += outcome["failed"]
-        failed = update_error_count + keyword_result["update_errors"]
+        from profit_guard import apply_isolated_bids
+        group_result = apply_isolated_bids(client, '/sp/adGroups', updates, apply_live=apply_live)
+        applied_count = group_result['accepted']
+        update_error_count = group_result['failed']
+        counts = {name: group_result[name] + keyword_result.get(name, 0)
+                  for name in ('blocked', 'accepted', 'rejected', 'unconfirmed')}
+        failed = counts['rejected'] + counts['unconfirmed']
+        api_response = {}
         return JSONResponse({
             "success": not failed,
+            "status": "execution_failure" if failed else "safety_hold" if counts['blocked'] else "completed",
+            "bid_outcomes": counts,
+            "ad_group_outcomes": group_result,
             "keyword_dayparting": keyword_result,
             "dry_run": not apply_live,
             "mode": mode,

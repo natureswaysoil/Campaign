@@ -38,11 +38,11 @@ def validate_schedule(data, now=None):
     return data
 
 
-def seed_products(client, data):
+def seed_products(client, data, *, update_existing=False):
     from automation_store import GCSState
     from decision_sync import refresh_product_market, safe_api_error
     from profit_intelligence import Product, ingest
-    saved, existing, failed = 0, 0, []
+    saved, existing, updated, failed = 0, 0, 0, []
     # Use the normal ad-write lock so imports cannot race policy/control changes.
     with GCSState('profit-write-guard').locked():
         # Owner confirmation is durable even while Amazon market data is unavailable.
@@ -65,11 +65,15 @@ def seed_products(client, data):
             if not any(s.get('asin') == anchor['asin'] for s in listing.get('summaries', [])):
                 raise RuntimeError('Verified account anchor no longer matches')
         for asin, (sku, size) in MATCHES.items():
-            if asin in current:
+            old = current.get(asin)
+            if old and (not update_existing or old['updated_at'] >= data['verified_at']):
                 existing += 1
                 continue
+            if old and old['sku'] != sku:
+                failed.append({'asin': asin, 'reason': 'existing_sku_requires_individual_confirmation'})
+                continue
             cogs, shipping = data['sizes'][size]
-            candidate = {'asin': asin, 'sku': sku, 'cogs': cogs, 'shipping': shipping,
+            candidate = {**(old or {}), 'asin': asin, 'sku': sku, 'cogs': cogs, 'shipping': shipping,
                          'updated_at': data['verified_at']}
             try:
                 try:
@@ -85,6 +89,7 @@ def seed_products(client, data):
                 if not verified or any(verified[k] != product[k] for k in ('sku', 'cogs', 'shipping', 'updated_at')):
                     raise RuntimeError('Cost read-back failed')
                 saved += 1
+                updated += int(old is not None)
             except Exception as exc:
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 # ASIN identifiers are public; raw errors/responses and costs are not.
@@ -92,7 +97,7 @@ def seed_products(client, data):
                 if str(exc) in ('no_matching_listing', 'ambiguous_listing', 'listing_identity_mismatch'):
                     entry['reason'] = str(exc)
                 failed.append(entry)
-    return {'cost_schedule_saved': True, 'saved': saved, 'existing_preserved': existing, 'failed': failed,
+    return {'cost_schedule_saved': True, 'saved': saved, 'existing_preserved': existing, 'existing_updated': updated, 'failed': failed,
             'seller_id_recovered': getattr(client, 'seller_id_recovered', False) is True, 'catalog_snapshot_unmatched': 10}
 
 
@@ -113,7 +118,7 @@ def import_public_key():
         serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 
 
-def import_encrypted_costs(packet):
+def import_encrypted_costs(packet, *, update_existing=False):
     from automation_store import GCSState
     from decision_sync import SellingPartnerClient
     from cryptography.hazmat.primitives import serialization, hashes
@@ -132,4 +137,6 @@ def import_encrypted_costs(packet):
     at = data.get('verified_at') if isinstance(data, dict) else None
     if isinstance(at, (int, float)) and time.time() - at > 30 * 86400:
         return {'skipped': 'expired_confirmation', 'saved': 0}
+    if update_existing:
+        return seed_products(SellingPartnerClient(), validate_schedule(data), update_existing=True)
     return seed_products(SellingPartnerClient(), validate_schedule(data))

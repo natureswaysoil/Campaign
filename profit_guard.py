@@ -323,3 +323,82 @@ def guarded_write(client, method, endpoint, body, send):
         GCSState('profit-audit/' + audit_id).save(audit)
         response['_profit_guard'] = {'audit_id': audit_id, 'adjustments': guard.adjustments}
         return response
+
+
+def bid_preflight(client, endpoint, row, *, data=None, policy=None, now=None):
+    """Read-only proposal evaluation. Live writes always re-enter guarded_write."""
+    data = GCSState('profit-data').read() if data is None else data
+    if policy is None:
+        raw = GCSState('profit-policy').read().get('policy')
+        policy = Policy.model_validate(raw) if raw else None
+    now = time.time() if now is None else now
+    guard = Guard(client, data, policy, {}, now)
+    key, id_key = ENDPOINTS[endpoint]
+    old = guard.old_entity(endpoint, row, 'PUT')
+    merged = {**old, **row}
+    cid = str(merged.get('campaignId') or '')
+    from profit_intelligence import conversion_evidence
+    filters = {'campaign_id': cid, 'grain': 'campaign'}
+    if merged.get('keywordId'):
+        filters.update(grain='keyword', keyword_id=str(merged['keywordId']))
+    elif merged.get('targetId'):
+        filters.update(grain='keyword', target_id=str(merged['targetId']))
+    details = conversion_evidence(data, policy, now, **filters) if policy else {}
+    products = guard.campaign_products(cid)
+    details['exploration'] = {p['asin']: (
+        policy.product_exploration[p['asin']].model_dump() if p['asin'] in policy.product_exploration
+        else {'cvr': policy.exploration_cvr, 'daily_budget': policy.exploration_daily_budget}
+    ) for p in products} if policy else {}
+    result = {'id': str(row.get(id_key, '')), 'evidence': details}
+    try:
+        result['economic_cpc_cap'] = guard.ceiling(cid, merged)
+    except GuardBlocked as exc:
+        result['ceiling_reason'] = str(exc)
+    # A diagnostic without a proposal asks whether any increase is currently allowed.
+    if 'bid' not in row and 'defaultBid' not in row and 'state' not in row:
+        bid_key = 'defaultBid' if endpoint == '/sp/adGroups' else 'bid'
+        row = {**row, bid_key: float(old.get(bid_key, 0)) + .01}
+    try:
+        prepared = guard.prepare('PUT', endpoint, {key: [row]})[key][0]
+        return {**result, 'status': 'eligible', 'prepared': prepared}
+    except GuardBlocked as exc:
+        return {**result, 'status': 'blocked', 'reason': str(exc)}
+
+
+def apply_isolated_bids(client, endpoint, rows, *, apply_live=True):
+    """Independent PUTs keep safe reductions available when increases are held.
+
+    No retry is made after an ambiguous response. Each live row still passes the
+    account-wide guarded writer, which rechecks fresh policy under its lock.
+    """
+    from amazon_results import batch_outcome
+    key, id_key = ENDPOINTS[endpoint]
+    counts = dict(blocked=0, accepted=0, rejected=0, unconfirmed=0)
+    outcomes = []
+    for row in rows:
+        entry = {'id': str(row.get(id_key, ''))}
+        try:
+            if not apply_live:
+                check = bid_preflight(client, endpoint, row)
+                counts['blocked'] += int(check['status'] == 'blocked')
+                outcomes.append(check)
+                continue
+            response = client.put(endpoint, {key: [row]})
+            outcome = batch_outcome(response, key, 1)
+            for name in ('accepted', 'rejected', 'unconfirmed'):
+                counts[name] += outcome[name]
+            outcomes.append({**entry, 'status': 'accepted' if outcome['accepted'] else
+                             'rejected' if outcome['rejected'] else 'unconfirmed',
+                             'adjustments': response.get('_profit_guard', {}).get('adjustments', [])})
+        except GuardBlocked as exc:
+            counts['blocked'] += 1
+            outcomes.append({**entry, 'status': 'blocked', 'reason': str(exc)})
+        except Exception as exc:
+            # Request/transport/storage errors must never be mislabeled safety holds.
+            counts['unconfirmed'] += 1
+            outcomes.append({**entry, 'status': 'unconfirmed', 'error_type': type(exc).__name__})
+    return {**counts, 'submitted': len(rows), 'outcomes': outcomes,
+            'failed': counts['rejected'] + counts['unconfirmed'],
+            'success': not (counts['rejected'] or counts['unconfirmed']),
+            'status': 'safety_hold' if counts['blocked'] and not (counts['rejected'] or counts['unconfirmed'])
+                      else 'execution_failure' if counts['rejected'] or counts['unconfirmed'] else 'completed'}

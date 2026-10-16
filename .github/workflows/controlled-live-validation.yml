@@ -1,0 +1,48 @@
+name: Controlled live validation (no ad writes)
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - scripts/validate_live_readonly.py
+      - .github/workflows/controlled-live-validation.yml
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: campaign-controlled-live-validation
+  cancel-in-progress: false
+jobs:
+  validate:
+    # Owner approved this isolated live check in conversation, 2026-10-16.
+    # Never expose cloud credentials to a fork or a different pull request.
+    if: github.event.pull_request.number == 47 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/optimizer-eligibility-recovery-20261016'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Choose existing authentication
+        env:
+          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          WIF_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+        run: |
+          if [[ -n "$WIF_PROVIDER" && -n "$WIF_ACCOUNT" ]]; then
+            echo 'AUTH_METHOD=wif' >> "$GITHUB_ENV"
+          else
+            echo 'AUTH_METHOD=sa_key' >> "$GITHUB_ENV"
+          fi
+      - uses: google-github-actions/auth@v2
+        if: env.AUTH_METHOD == 'wif'
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+      - uses: google-github-actions/auth@v2
+        if: env.AUTH_METHOD == 'sa_key'
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Validate approved live reads and disposable GCS lock
+        run: python scripts/validate_live_readonly.py

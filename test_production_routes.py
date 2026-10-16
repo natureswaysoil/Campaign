@@ -15,14 +15,14 @@ def test_final_server_registers_complete_production_routes():
     assert ("/api/retune-existing-bids", "POST") in paths
 
 
-def test_launch_preview_never_calls_live_launcher():
+def test_launch_preview_delegates_shared_preflight_without_live_intent():
     product = {"title": "Example", "sku": "sku-1", "asin": "B001"}
     client = MagicMock()
     client.list_campaigns.return_value = []
     with (
         patch.object(extended_server, "_product_from_key", return_value=(product, {})),
         patch.object(extended_server, "AmazonAdsClient", return_value=client),
-        patch.object(extended_server.base, "api_create_recommended_campaigns") as live_launcher,
+        patch.object(extended_server.base, "api_create_recommended_campaigns", return_value=JSONResponse({"dry_run": True, "apply_live": False})) as live_launcher,
     ):
         response = extended_server.api_create_campaign_with_duplicate_protection(
             {"product_id": "p1", "apply_live": False}, None, "secret-token"
@@ -30,7 +30,8 @@ def test_launch_preview_never_calls_live_launcher():
     payload = json.loads(response.body)
     assert payload["dry_run"] is True
     assert payload["apply_live"] is False
-    live_launcher.assert_not_called()
+    assert live_launcher.call_args.args[0]["apply_live"] is False
+    client.post.assert_not_called()
 
 
 def test_batch_harvest_uses_one_shared_report_and_stays_dry_run():
@@ -80,7 +81,7 @@ def test_unverified_launch_does_not_create_any_campaign():
         patch.object(server, 'normalized_product', return_value=product),
         patch.object(server, 'generate_keywords_for_product', return_value=[]),
         patch.object(server, 'AmazonAdsClient', return_value=client),
-        patch('automation_store.GCSState') as store,
+        patch('launch_preflight.GCSState') as store,
     ):
         store.return_value.read.return_value = {'products': {}}
         response = server.api_create_recommended_campaigns(

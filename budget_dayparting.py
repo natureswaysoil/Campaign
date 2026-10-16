@@ -28,19 +28,20 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 
-PRIME_TIME_START = int(os.getenv("PRIME_TIME_START", "10"))
-PRIME_TIME_END = int(os.getenv("PRIME_TIME_END", "20"))
+from optimizer_settings import bid_settings
+_SETTINGS = bid_settings()
+PRIME_TIME_START, PRIME_TIME_END = _SETTINGS.prime_start, _SETTINGS.prime_end
 
 # To reserve about 65% of the daily budget for prime time, the pre-prime window
 # should not run at normal bids. This does not literally create a second Amazon
 # budget bucket; it protects the budget by reducing bid pressure before prime.
-PROTECT_BID_MULTIPLIER = float(os.getenv("PROTECT_BID_MULTIPLIER", "0.35"))
-TAPER_BID_MULTIPLIER = float(os.getenv("TAPER_BID_MULTIPLIER", "0.45"))
+PROTECT_BID_MULTIPLIER = _SETTINGS.protect
+TAPER_BID_MULTIPLIER = _SETTINGS.taper
 
-PRIME_BID_POSITION = float(os.getenv("PRIME_BID_POSITION", "0.85"))
-NORMAL_BID_POSITION = float(os.getenv("NORMAL_BID_POSITION", "0.55"))
-MIN_BID = float(os.getenv("MIN_DAYPART_BID", "0.10"))
-MAX_BID = float(os.getenv("MAX_DAYPART_BID", "2.50"))
+PRIME_BID_POSITION = _SETTINGS.prime_position
+NORMAL_BID_POSITION = _SETTINGS.normal_position
+MIN_BID = _SETTINGS.minimum
+MAX_BID = _SETTINGS.maximum
 
 
 def _clamp(value: float, low: float = MIN_BID, high: float = MAX_BID) -> float:

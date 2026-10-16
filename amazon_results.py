@@ -8,7 +8,7 @@ def batch_outcome(response, key, submitted):
     count = min(submitted, len(successes))
     unresolved = max(0, submitted - count - len(errors))
     return {'submitted': submitted, 'accepted': count, 'failed': len(errors) + unresolved,
-            'errors': errors, 'unconfirmed': unresolved, 'success': count == submitted}
+            'errors': errors, 'rejected': min(submitted - count, len(errors)), 'unconfirmed': unresolved, 'success': count == submitted}
 
 
 def create_keywords_verified(client, rows):

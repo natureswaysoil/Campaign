@@ -1,3 +1,5 @@
+from safety import live_requested
+from fastapi.responses import JSONResponse
 """Regression tests for the deployed final_server stack; no external requests."""
 import json
 import time
@@ -88,11 +90,11 @@ def test_launch_requires_explicit_live_intent(payload):
     with (patch.object(extended_server, '_product_from_key', return_value=({'title': 'Example'}, {})),
           patch.object(extended_server, 'AmazonAdsClient'),
           patch.object(extended_server, '_find_existing_launch_campaigns', return_value={}),
-          patch.object(extended_server.base, 'api_create_recommended_campaigns') as launch):
+          patch.object(extended_server.base, 'api_create_recommended_campaigns', return_value=JSONResponse({'dry_run': True, 'apply_live': False})) as launch):
         response = client.post('/api/create-campaign-from-product', json={'product_id': 'p1', **payload}, headers=HEADERS)
     assert response.status_code == 200
     assert response.json()['dry_run'] is True
-    launch.assert_not_called()
+    assert not live_requested(launch.call_args.args[0])
 
 
 @pytest.mark.parametrize('metrics', [{'spend': 80, 'sales': 40}, {'spend': 80, 'sales': 0}])

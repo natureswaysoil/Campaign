@@ -285,3 +285,16 @@ def report_is_mature(end_date, now=None):
         return end <= datetime.fromtimestamp(now or time.time(), ET).date() - timedelta(days=15)
     except ValueError:
         return False
+
+
+def conversion_evidence(data, policy, now, **filters):
+    """Explain the exact sample used by the guard without relaxing eligibility."""
+    today = datetime.fromtimestamp(now, ET).date()
+    selected = [r for r in data.get('metrics', []) if all(r.get(k) == v for k, v in filters.items())]
+    eligible = mature_rows(data, policy, now, **filters)
+    return {'filters': filters, 'eligible_clicks': totals(eligible)['clicks'],
+            'required_clicks': policy.minimum_clicks,
+            'attribution_cutoff': (today - timedelta(days=policy.attribution_days + 1)).isoformat(),
+            'report_timezone': policy.timezone, 'freshness_hours': policy.data_max_age_hours,
+            'selected_rows': len(selected), 'eligible_rows': len(eligible),
+            'latest_observed_at': max((r['observed_at'] for r in selected), default=None)}

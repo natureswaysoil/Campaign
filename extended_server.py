@@ -522,19 +522,6 @@ def api_create_campaign_with_duplicate_protection(
                 },
             })
 
-        if not apply_live:
-            return JSONResponse({
-                "success": True,
-                "dry_run": True,
-                "apply_live": False,
-                "duplicate_launch_prevented": False,
-                "partial_launch_detected": bool(existing),
-                "message": "Launch preview passed validation; no Amazon campaigns were created.",
-                "product": product.get("title"),
-                "sku": product.get("sku"),
-                "asin": product.get("asin"),
-            })
-
         launch_payload = dict(payload)
         if existing and not force_relaunch:
             launch_payload["_resume_campaigns"] = {
