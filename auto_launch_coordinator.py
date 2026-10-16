@@ -47,7 +47,10 @@ class AutoLaunchCoordinator:
             self.store.save(state)
             # Guard is mandatory before any write, including paused objects;
             # it must assert current product economics, budget and profile.
-            self.guard.authorize_paused_launch(candidate, policy, account_profile)
+            authorization = self.guard.authorize_paused_launch(candidate, policy, account_profile)
+            if not isinstance(authorization, dict) or "budget_cap" not in authorization or "max_bid" not in authorization:
+                raise LaunchBlocked("Guard did not return verified budget and CPC cap")
+            candidate = {**candidate, **authorization}
             try:
                 response = self.amazon.create_paused_campaign(candidate, account_profile)
                 # Require explicit creation ID and independently read it back.
