@@ -26,3 +26,10 @@ Before enabling hands-off launch:
 
 Until those gates are implemented, do not call the legacy live launch endpoint
 automatically. This branch changes neither scheduler nor production campaigns.
+
+## Production adapter progress (PR #46)
+- `auto_launch_production.py` uses the existing guarded Ads client and confirms writes by readback.
+- `auto_launch_guard.py` validates stored policy, observed account spend, refreshed economics, and inventory velocity.
+- Coordinated creation is still off by default, and account scheduler is **not configured**. An incomplete ad-group/product-ad/target provisioning sequence must be implemented before any automated activation.
+- The reservation coordinator retains unresolved outcomes and blocks duplicate retry. Operator reconciliation is still required after ambiguity.
+- Tests in CI are mocks, not a live Amazon staging verification.
