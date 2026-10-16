@@ -25,9 +25,11 @@ class AdapterTests(unittest.TestCase):
         c=Client();a=ProductionLaunchAmazon(c)
         with self.assertRaises(LaunchBlocked):a.create_paused_campaign({"asin":"B001"},"456")
         self.assertEqual(c.writes,[])
-    def test_activation_needs_provisioning(self):
-        c=Client();a=ProductionLaunchAmazon(c)
-        with self.assertRaises(LaunchBlocked):a.activate_verified(cid="42",asin="B001",profile="123",provisioned=False)
+    def test_activation_requires_independent_provisioning(self):
+        c=Client();c.list_product_ads=lambda cid: []
+        a=ProductionLaunchAmazon(c)
+        with self.assertRaises(LaunchBlocked):
+            a.activate_verified(cid="42",asin="B001",profile="123",provisioned=True)
         self.assertEqual(c.writes,[])
     def test_missing_targets_blocks_activation(self):
         c=Client();c.list_targets=lambda cid: []
