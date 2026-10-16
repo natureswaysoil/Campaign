@@ -1,7 +1,7 @@
 """Production fail-closed preflight for guarded automatic Sponsored Products launches."""
 import time
 from auto_launch_coordinator import LaunchBlocked
-from profit_intelligence import Policy, Product, economics, pacing
+from profit_intelligence import Policy, Product, economics, inventory_factor, pacing
 from automation_store import GCSState
 
 class ProductionLaunchGuard:
@@ -26,6 +26,9 @@ class ProductionLaunchGuard:
             raise LaunchBlocked("ASIN SKU mismatch")
         # Economics validates current cost, fees, stock and demand freshness.
         details = economics(product.model_dump(mode="json"), policy, time.time())
+        stock_factor, _ = inventory_factor(product.model_dump(mode="json"), policy, time.time())
+        if stock_factor <= 0:
+            raise LaunchBlocked("No usable inventory cover")
         if not details or details["target_acos"] <= 0:
             raise LaunchBlocked("No allowable advertising margin")
         pulse = pacing(state, policy, time.time())
