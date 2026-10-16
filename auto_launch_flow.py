@@ -18,7 +18,7 @@ def continue_launch(*, store, adapter, guard, asin, profile, sku, bid, policy):
         if record.get("status") not in ("paused_verified", "provisioned_verified"):
             raise LaunchBlocked("Unrecognized stage; fail closed")
         # Profit evaluation always re-reads stored economics/pacing before writes.
-        guard.authorize_paused_launch({"asin": asin, "sku": sku}, policy, profile)
+        guard.authorize_paused_launch({"asin": asin, "sku": sku, "campaign_id": cid}, policy, profile)
         if record["status"] == "paused_verified":
             # This step must run under one locked state scope. Provisioner owns
             # its own lock, so it cannot be safely invoked under this lock.
@@ -31,11 +31,11 @@ def continue_launch(*, store, adapter, guard, asin, profile, sku, bid, policy):
         try:
             result = adapter.activate_verified(cid=cid, asin=asin, profile=profile)
         except Exception:
-            record["status"] = "manual_reconciliation_required"
+            record["status"] = "activation_uncertain"
             store.save(state)
             raise
         if result.get("status") != "enabled_verified":
-            record["status"] = "manual_reconciliation_required"
+            record["status"] = "activation_uncertain"
             store.save(state)
             raise LaunchBlocked("Activation not confirmed")
         record["status"] = "enabled_verified"

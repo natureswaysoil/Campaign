@@ -44,4 +44,10 @@ class ProductionLaunchGuard:
         cap = cpc_ceiling(product.model_dump(mode="json"), [], policy, time.time())["max_cpc"]
         if cap < policy.min_cpc:
             raise LaunchBlocked("Unprofitable CPC ceiling")
+        from profit_guard import Guard
+        # Check the aggregate enabled/reserved envelope before even a paused shell.
+        self.client.profit_product_asin = candidate['asin']
+        ledger = GCSState('profit-write-guard').read()
+        Guard(self.client, state, policy, ledger, time.time()).account_room(
+            str(candidate.get('campaign_id') or 'new:auto-launch'), budget)
         return {"budget_cap": round(budget, 2), "max_bid": cap}

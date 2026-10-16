@@ -35,7 +35,9 @@ def retune_keywords(client, ad_groups, metrics, mode, apply_live, target_bid, pr
                 if not math.isfinite(baseline) or baseline <= 0:
                     raise ValueError('Invalid persisted keyword baseline')
                 target = target_bid(baseline, mode)
-                target = max(0.10, min(2.50, target * float(campaign_multipliers.get(campaign_id, 1.0))))
+                from optimizer_settings import bid_settings
+                limits = bid_settings()
+                target = max(limits.minimum, min(limits.maximum, target * float(campaign_multipliers.get(campaign_id, 1.0))))
                 campaign_metrics = metrics.get(campaign_id)
                 if campaign_metrics:
                     target, _, _ = protect_bid(target, baseline, campaign_metrics, current_bid=current)
@@ -47,12 +49,8 @@ def retune_keywords(client, ad_groups, metrics, mode, apply_live, target_bid, pr
         if store and apply_live:
             # Persist before writing Amazon so retries/restarts retain the original baseline.
             store.save(state)
-        outcomes = []
-        if apply_live:
-            for offset in range(0, len(updates), 100):
-                chunk = updates[offset:offset + 100]
-                outcomes.append(batch_outcome(client.put('/sp/keywords', {'keywords': chunk}), 'keywords', len(chunk)))
+        from profit_guard import apply_isolated_bids
+        result = apply_isolated_bids(client, '/sp/keywords', updates, apply_live=apply_live)
         return {'keywords_seen': len(preview), 'updates_needed': len(updates),
-                'updates_applied': sum(o['accepted'] for o in outcomes),
-                'update_errors': sum(o['failed'] for o in outcomes),
-                'preview': preview[:25], 'outcomes': outcomes}
+                'updates_applied': result['accepted'], 'update_errors': result['failed'],
+                'preview': preview, **result}

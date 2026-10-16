@@ -198,3 +198,40 @@ existing scheduler identity, and reports only presence/counts for activation dat
 It never creates costs or chooses a spending limit. Missing SP-API secrets are
 reported by name; missing cloud permissions fail the setup step explicitly.
 The runtime identity must already have access to any attached secret versions.
+
+
+## Eligibility diagnostics and isolated outcomes
+The Profit dashboard can inspect campaign, keyword or target eligibility using
+`GET /api/profit/eligibility/{campaign_id}` (optional `keyword_id` or `target_id`).
+It shows the exact eligible sample, attribution cutoff, refresh requirement,
+exploration allowance and economic cap. A safety hold is expected when the sample
+is insufficient; it is not an Amazon execution failure.
+
+Bid batches are processed as independent guarded PUTs. Results count `blocked`,
+`accepted`, `rejected` and `unconfirmed` separately. A blocked increase cannot
+prevent another row's valid reduction. Transport/storage errors remain execution
+failures and are not retried automatically. `accepted` denotes Amazon acknowledgement,
+not independently verified billing or auction participation.
+
+Launch preview and execution share read-only preflight before creating a campaign.
+The live guard revalidates under its account lock. Product exploration budgets are
+**per campaign**: two campaigns at $2 each allow $4/day combined, subject to the
+account envelope. No allowance or spending limit is changed by this patch.
+
+## Effective settings and cost updates
+`optimizer_settings.py` validates production daypart/circuit-breaker settings;
+`/api/profit/status` exposes their effective values and source. Saved Profit policy
+remains the final cap. Production winner selection uses the lower of its runtime
+threshold and the saved dashboard ACOS target. `optimizer_config.json` remains an
+offline planner input. Reporting uses the verified Ads profile timezone; daypart
+windows explicitly use America/New_York.
+
+Bulk cost import preserves existing records by default. Explicitly set
+`confirm_existing_updates: true` on the authenticated live cost-import request (or
+`UPDATE_EXISTING_CONFIRMED_COSTS=true` for the import script) to apply a newer
+owner-confirmed schedule. This preserves other costs and inventory/velocity,
+requires a fresh Amazon lookup, and never renews the original confirmation date.
+Changed SKU identity requires individual dashboard confirmation.
+
+Offline checks use the explicit safety workflow test list. `test_creds.py` is a
+legacy live credential probe and is deliberately excluded from this validation.

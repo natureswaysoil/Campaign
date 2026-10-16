@@ -178,6 +178,8 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
     included for dashboard/preview output so James can see spend leaks without
     automatically blocking important buyer terms.
     """
+    from optimizer_settings import winner_acos_limit
+    winner_limit = winner_acos_limit(WINNER_MAX_ACOS)
     winners: List[Dict[str, Any]] = []
     negatives: List[Dict[str, Any]] = []
     bid_down: List[Dict[str, Any]] = []
@@ -213,7 +215,7 @@ def classify_search_terms(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
             and orders >= WINNER_MIN_ORDERS
             and clicks >= WINNER_MIN_CLICKS
             and sales > 0
-            and (acos is None or acos <= WINNER_MAX_ACOS)
+            and (acos is None or acos <= winner_limit)
         ):
             winners.append({**result, "reason": "winner"})
             continue

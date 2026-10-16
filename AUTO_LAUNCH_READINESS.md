@@ -1,23 +1,29 @@
-# Automatic Launch Readiness Gate
+# Automatic launch readiness
 
-This PR contains pieces of a safe automatic launcher but **does not yet contain
-a verified end-to-end, unattended activation flow**. Specifically, uncertain
-Amazon POSTs cannot be replayed safely without inspecting Amazon state, and
-the current launch coordinator does not invoke every provisioning stage.
+The scheduler hook now invokes `ProductionPipeline`, which connects selection,
+paused campaign creation, provisioning, independent readback and guarded activation.
+It remains off unless `AUTO_LAUNCH_ENABLED=true` and an authenticated request supplies
+`apply_live: true`. No launch scheduler is created by this patch.
 
-Do not configure a scheduler to launch until ALL of the following pass:
-1. Every live create has a durable intent, a globally unique launch key, and
-   profile-scoped lock, including cross-process and restart tests.
-2. Confirmed Amazon campaign, group, product ad and targets are reconciled
-   by canonical IDs before any retry or activation.
-3. Budgets and bids come from fresh profit policy and actual verified product
-   economics; no fallback bids or hardcoded daily budget.
-4. Guard's account-wide reservations are consistent with scheduler runs.
-5. Seller, SKU, ASIN and account profile identity are verified.
-6. CI full suite and a non-production integration test both pass.
-7. Authenticated Cloud Scheduler trigger and server-side opt-in are provisioned
-   deliberately, with a tested kill switch.
-8. No changes affect current production ad spend until separately approved.
+Implemented and covered by offline integration tests:
+- Profile-scoped launch lock, unique persisted launch name and seller SKU.
+- Preflight before creation using stored economics, inventory, current spend and
+  aggregate enabled/reserved budgets.
+- Durable write-ahead markers for campaign, group, product ad, target and activation.
+- Restart reconciliation by exact launch name and canonical entity IDs. Unknown
+  absent or duplicate objects fail closed; POSTs are never replayed on absence.
+- Final profit guard on every live mutation, including activation.
+- Kill switch tested without factory, credentials or network access.
 
-Current scheduler route fails closed if factory wiring is absent. Changing
-AUTO_LAUNCH_ENABLED by itself does NOT start campaign launches.
+Still required before deployment/enablement approval:
+1. Review this patch and its GitHub CI results.
+2. Validate Amazon API payload/readback shapes in a controlled account and GCS
+   persistence/locking against the deployment identity. Offline adapters and the
+   GCS contract double are not proof of live service behavior.
+3. Verify current product costs, exact SKU/ASIN, policy, account timezone, account
+   budget reservations and approved per-campaign exploration allowance.
+4. Separately approve deployment and scheduler enablement. Do not create a launch
+   schedule until the controlled checks pass.
+
+Historical launches lacking a durable launch key are not adopted automatically.
+An existing campaign without active product ads blocks new automatic selection until reviewed. Inspect these separately; campaign-title matches are not recovery authorization.

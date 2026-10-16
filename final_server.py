@@ -408,9 +408,12 @@ def api_auto_launch_tick(
 ) -> JSONResponse:
     """Authenticated scheduler hook; fail closed until factory wiring is approved."""
     verify_internal_token(authorization, x_daily_optimizer_token)
-    from auto_launch_tick import launch_tick
+    from auto_launch_tick import launch_tick, ProductionPipeline, production_inputs
+    from safety import live_requested
+    if not live_requested(payload):
+        return JSONResponse({'status': 'preview_only', 'launched': 0})
     try:
-        result = launch_tick()
+        result = launch_tick(pipeline_factory=ProductionPipeline, inputs_factory=production_inputs)
     except Exception:
         return JSONResponse({"status": "not_configured", "launched": 0}, status_code=503)
     return JSONResponse(result)

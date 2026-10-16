@@ -94,6 +94,8 @@ def summarize(states, now=None):
                      'report_id': pending.get('report_id') if kind != 'bid' else state.get('report_id'),
                      'last_run_at': last_run, 'last_success': result.get('success')}
             if kind == 'bid':
+                entry['bid_outcomes'] = result.get('bid_outcomes', {})
+                entry['status'] = result.get('status')
                 entry.update(ad_group_updates=result.get('updates_applied'),
                              keyword_updates=result.get('keyword_dayparting', {}).get('updates_applied'),
                              errors=(result.get('update_errors', 0) + result.get('keyword_dayparting', {}).get('update_errors', 0)))

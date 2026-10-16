@@ -10,6 +10,9 @@ class Store:
     def save(self,x): pass
 class Client:
     def __init__(self):self.calls=[]
+    def list_all(self, endpoint, key, filters=None):
+        return [{'campaignId':'42','adGroupId':'7','name':'NWS AUTO | B001','state':'ENABLED','defaultBid':.3}] if self.calls else []
+    def list_product_ads(self, cid):return []
     def post(self,endpoint,payload):
         self.calls.append(endpoint)
         if endpoint=="/sp/adGroups":

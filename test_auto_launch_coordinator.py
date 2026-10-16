@@ -45,12 +45,12 @@ class CoordinatorTests(unittest.TestCase):
             products=[P],verified=V2,policy=POL,account_profile="123")
         self.assertEqual(r["created"],0)
         self.assertEqual(self.amazon.calls,0)
-    def test_guard_failure_keeps_reservation(self):
+    def test_guard_failure_before_any_write_leaves_no_uncertain_reservation(self):
         class Deny:
             def authorize_paused_launch(self,*args):raise LaunchBlocked("deny")
         c=AutoLaunchCoordinator(store=self.store,amazon=self.amazon,guard=Deny(),enable=True)
         with self.assertRaises(LaunchBlocked):c.run_one(products=[P],verified=V,policy=POL,account_profile="123")
         self.assertEqual(self.amazon.calls,0)
-        self.assertEqual(self.store.data["unresolved"],"B001")
+        self.assertIsNone(self.store.data.get("unresolved"))
 
 if __name__=="__main__":unittest.main()

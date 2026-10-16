@@ -24,12 +24,20 @@ Before enabling hands-off launch:
    deployment approval. Require per-account opt-in and a kill switch.
 8. Record durable launch outcomes and alert on incomplete or failed creates.
 
-Until those gates are implemented, do not call the legacy live launch endpoint
+Do not call the legacy live launch endpoint
 automatically. This branch changes neither scheduler nor production campaigns.
 
-## Production adapter progress (PR #46)
-- `auto_launch_production.py` uses the existing guarded Ads client and confirms writes by readback.
-- `auto_launch_guard.py` validates stored policy, observed account spend, refreshed economics, and inventory velocity.
-- Coordinated creation is still off by default, and account scheduler is **not configured**. An incomplete ad-group/product-ad/target provisioning sequence must be implemented before any automated activation.
-- The reservation coordinator retains unresolved outcomes and blocks duplicate retry. Operator reconciliation is still required after ambiguity.
-- Tests in CI are mocks, not a live Amazon staging verification.
+## Complete pipeline (review only)
+`auto_launch_tick.py` now supplies the production adapters to `run_pipeline`.
+The automatic pipeline creates one AUTO campaign per eligible ASIN. The existing
+manual AUTO + EXACT endpoint uses shared preflight but remains a separate workflow;
+do not schedule that endpoint for unattended launches.
+
+All creates are checkpointed before sending. A restarted pipeline reconciles exact
+launch names and canonical entity IDs, then resumes only verified stages. Missing
+or ambiguous readbacks after a POST never trigger a replacement POST. An uncertain
+activation is resolved only when the enabled campaign and provisioned entities are
+independently observed; otherwise it remains held for review.
+
+No deployment, scheduler configuration, policy change or campaign mutation is part
+of this patch. See `AUTO_LAUNCH_READINESS.md` for the remaining live validation.

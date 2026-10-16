@@ -86,7 +86,7 @@ def register(app):
         if not isinstance(packet, str) or len(packet) > 1024:
             raise HTTPException(422, 'Invalid encrypted cost packet')
         try:
-            return import_encrypted_costs(packet)
+            return import_encrypted_costs(packet, update_existing=payload.get('confirm_existing_updates') is True)
         except Exception as exc:
             # Never include decrypted data, key material or raw Amazon errors.
             raise HTTPException(503, 'Private cost import failed: ' + type(exc).__name__) from None
@@ -120,12 +120,33 @@ def register(app):
         return {'campaign_id': campaign_id, 'state': campaign.get('state'),
                 'product_ads': len(ads), 'catalog_candidates': candidates}
 
+    @app.get('/api/profit/eligibility/{campaign_id}')
+    def eligibility(campaign_id: str, keyword_id: str = '', target_id: str = ''):
+        from optimize_campaigns import AmazonAdsClient
+        from profit_guard import bid_preflight, GuardBlocked
+        client = AmazonAdsClient()
+        if keyword_id and target_id:
+            raise HTTPException(422, 'Select a keyword or target')
+        if keyword_id or target_id:
+            endpoint = '/sp/keywords' if keyword_id else '/sp/targets'
+            row = {'campaignId': campaign_id, 'keywordId' if keyword_id else 'targetId': keyword_id or target_id}
+        else:
+            groups = client.list_ad_groups(campaign_id)
+            if not groups:
+                raise HTTPException(409, 'Campaign has no ad group; launch preflight is required')
+            endpoint, row = '/sp/adGroups', {'campaignId': campaign_id, 'adGroupId': str(groups[0]['adGroupId'])}
+        try:
+            return bid_preflight(client, endpoint, row)
+        except GuardBlocked as exc:
+            return {'status': 'blocked', 'reason': str(exc)}
+
     @app.get('/api/profit/status')
     def status():
         try:
             policy = GCSState('profit-policy').read()
             data = GCSState('profit-data').read()
-            return {'policy': policy.get('policy'), 'products': list(data.get('products', {}).values()),
+            from optimizer_settings import effective_settings
+            return {'effective_settings': effective_settings(policy.get('policy')), 'policy': policy.get('policy'), 'products': list(data.get('products', {}).values()),
                     'metric_count': len(data.get('metrics', [])), 'data_updated_at': data.get('updated_at'),
                     'complete_spend_at': data.get('complete_spend_at'),
                     'alerts': GCSState('profit-alerts').read(), 'controls': GCSState('profit-control-result').read(),

@@ -41,7 +41,8 @@ def main():
             input=json.dumps(json.loads(private_schedule), separators=(',', ':')).encode(), capture_output=True)
         if encrypted.returncode:
             raise RuntimeError('Private cost encryption failed')
-    result = post('/api/profit/cost-import', {'apply_live': True, 'packet': base64.b64encode(encrypted.stdout).decode()})
+    result = post('/api/profit/cost-import', {'apply_live': True, 'packet': base64.b64encode(encrypted.stdout).decode(),
+        'confirm_existing_updates': os.getenv('UPDATE_EXISTING_CONFIRMED_COSTS', 'false') == 'true'})
     print('COST_IMPORT ' + json.dumps(result))
     if result.get('failed'):
         raise RuntimeError('Unverified products remain blocked')

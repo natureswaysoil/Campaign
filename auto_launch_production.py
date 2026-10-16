@@ -9,6 +9,8 @@ from auto_launch_coordinator import LaunchBlocked
 class ProductionLaunchAmazon:
     def __init__(self, client):
         self.client = client
+        self.launch_names = {}
+        self.expected_skus = {}
 
     def _profile(self, expected):
         if str(self.client.profile_id) != str(expected):
@@ -29,11 +31,13 @@ class ProductionLaunchAmazon:
             ads = self.client.list_product_ads(str(cid))
             if not isinstance(ads, list):
                 raise LaunchBlocked("Incomplete product ad discovery")
+            if not any(str(ad.get('state', '')).upper() != 'ARCHIVED' for ad in ads):
+                raise LaunchBlocked('Existing campaign has no active product ads; review incomplete launch')
             for ad in ads:
                 asin = str(ad.get("asin") or "").strip()
                 if not asin and str(ad.get("state", "")).upper() != "ARCHIVED":
                     raise LaunchBlocked("Product ad lacks ASIN")
-                if asin:
+                if asin and str(ad.get('state', '')).upper() != 'ARCHIVED':
                     found.add(asin)
         return found
 
@@ -45,8 +49,9 @@ class ProductionLaunchAmazon:
         budget = candidate.get("budget_cap")
         if not isinstance(budget, (int, float)) or isinstance(budget, bool) or not 1 <= budget <= 25:
             raise LaunchBlocked("Verified per-product launch budget required")
+        self.launch_names[asin] = candidate.get('launch_name', 'NWS AUTO PENDING | ' + asin)
         response = self.client.post("/sp/campaigns", {"campaigns":[{
-            "name": "NWS AUTO PENDING | " + asin,
+            "name": self.launch_names[asin],
             "targetingType": "AUTO",
             "state": "PAUSED",
             "dynamicBidding": {"strategy": "LEGACY_FOR_SALES"},
@@ -67,7 +72,7 @@ class ProductionLaunchAmazon:
         self._profile(profile)
         matches = [c for c in self.client.list_campaigns()
                    if str(c.get("campaignId")) == str(cid)]
-        return len(matches) == 1 and matches[0].get("state") == "PAUSED" and matches[0].get("name") == "NWS AUTO PENDING | " + asin
+        return len(matches) == 1 and matches[0].get("state") == "PAUSED" and matches[0].get("name") == self.launch_names.get(asin, "NWS AUTO PENDING | " + asin)
 
     def list_campaign_ids_for_asin(self, asin, profile):
         self._profile(profile)
@@ -80,21 +85,26 @@ class ProductionLaunchAmazon:
                 ids.append(str(cid))
         return ids
 
-    def verify_provisioning(self, *, cid, asin, profile):
+    def verify_provisioning(self, *, cid, asin, profile, campaign_state="PAUSED"):
         """Independently read back every required entity; fail closed."""
         self._profile(profile)
         campaigns = [x for x in self.client.list_campaigns()
                      if str(x.get("campaignId")) == str(cid)]
-        if len(campaigns) != 1 or campaigns[0].get("state") != "PAUSED":
-            raise LaunchBlocked("Campaign must be uniquely paused")
+        if len(campaigns) != 1 or campaigns[0].get("state") != campaign_state:
+            raise LaunchBlocked("Campaign state is not independently verified")
         groups = self.client.list_all("/sp/adGroups/list", "adGroups",
             {"campaignIdFilter": {"include": [str(cid)]}})
         if not groups or not all(str(g.get("campaignId")) == str(cid) for g in groups):
             raise LaunchBlocked("Ad groups absent or inconsistent")
         active_groups = {str(g["adGroupId"]) for g in groups if g.get("state") == "ENABLED" and g.get("adGroupId")}
-        if not active_groups:
-            raise LaunchBlocked("No enabled ad group")
+        if len(active_groups) != 1:
+            raise LaunchBlocked("Exactly one enabled ad group required")
         ads = self.client.list_product_ads(str(cid))
+        live_ads = [a for a in ads if a.get('state') != 'ARCHIVED']
+        expected_sku = self.expected_skus.get(asin)
+        if len(live_ads) != 1 or any(a.get('asin') != asin or
+                (expected_sku and a.get('sku') != expected_sku) for a in live_ads):
+            raise LaunchBlocked('Unexpected product ads in launch campaign')
         if not any(str(a.get("asin")) == str(asin) and str(a.get("adGroupId")) in active_groups
                    and a.get("state") == "ENABLED" for a in ads):
             raise LaunchBlocked("Enabled product ad not verified")
@@ -128,3 +138,14 @@ class ProductionLaunchAmazon:
         if len(updated) != 1 or updated[0].get("state") != "ENABLED":
             raise LaunchBlocked("Activation state not confirmed")
         return {"campaign_id":str(cid),"status":"enabled_verified"}
+
+
+    def confirm_enabled_launch(self, *, cid, asin, sku, profile):
+        self._profile(profile)
+        campaigns = [c for c in self.client.list_campaigns() if str(c.get('campaignId')) == str(cid)]
+        if len(campaigns) != 1 or campaigns[0].get('state') != 'ENABLED' or campaigns[0].get('name') != self.launch_names.get(asin):
+            return False
+        ads = [a for a in self.client.list_product_ads(str(cid)) if a.get('state') != 'ARCHIVED']
+        if not ads or any(a.get('asin') != asin or a.get('sku') != sku for a in ads):
+            return False
+        return self.verify_provisioning(cid=cid, asin=asin, profile=profile, campaign_state='ENABLED')
