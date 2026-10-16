@@ -4,6 +4,8 @@ All writes go through optimize_campaigns.AmazonAdsClient.post/put, which call
 profit_guard.guarded_write. The adapter never calls _request_raw.
 """
 from amazon_results import batch_outcome
+from datetime import datetime, date
+from profit_intelligence import ET
 from auto_launch_coordinator import LaunchBlocked
 
 class ProductionLaunchAmazon:
@@ -49,11 +51,14 @@ class ProductionLaunchAmazon:
         budget = candidate.get("budget_cap")
         if not isinstance(budget, (int, float)) or isinstance(budget, bool) or not 1 <= budget <= 25:
             raise LaunchBlocked("Verified per-product launch budget required")
+        start_date = candidate.get('start_date') or datetime.now(ET).date().isoformat()
+        start_date = date.fromisoformat(start_date).isoformat()
         self.launch_names[asin] = candidate.get('launch_name', 'NWS AUTO PENDING | ' + asin)
         response = self.client.post("/sp/campaigns", {"campaigns":[{
             "name": self.launch_names[asin],
             "targetingType": "AUTO",
             "state": "PAUSED",
+            "startDate": start_date,
             "dynamicBidding": {"strategy": "LEGACY_FOR_SALES"},
             "budget": {"budgetType":"DAILY", "budget": round(budget, 2)},
         }]})
