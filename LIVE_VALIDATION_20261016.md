@@ -1,23 +1,33 @@
 # Controlled live validation — October 16, 2026
 
-The owner approved live validation and publication of these results in public PR #47. The latest controlled validation completed successfully after the owner granted runtime impersonation access and the IAM change propagated.
+The owner approved controlled live validation and publication of its results in public PR #47. Later approval explicitly covered testing live campaign creation and activation. No merge, deployment or scheduler enablement was performed.
 
-Successful run: https://github.com/natureswaysoil/Campaign/actions/runs/38979715218
+## Successful live checks
 
-| Check | Observed result |
-|---|---|
-| Production revision | campaign-optimizer-00330-pzd; automatic launching disabled |
-| Amazon Ads authorization | Passed; configured USD profile and America/Los_Angeles reporting timezone match |
-| Saved decision inputs | Read successfully: 16 products, 635 metric records, $75 daily policy limit |
-| Current spend observation | 38.1 minutes old at the successful validation |
-| Amazon object reads | 333 campaigns and 426 groups returned; product-ad, keyword and target read shapes sampled on 3 campaigns |
-| Sampled bid preflight | 2 held samples and 1 unverifiable sample; expected holds remain distinct from execution failures. This sample does not certify account-wide bid eligibility. |
-| Selling Partner lookup | Authorization and one exact product identity/fee/inventory lookup passed; refreshed values retained only in memory |
-| Approved exploration preflight | Eligible at a $0.07 maximum bid and $2/day campaign budget; no campaign created |
-| Real GCS cross-process persistence and lock | PASSED under the Cloud Run runtime identity: durable readback, contention from a separate process, release/reacquisition, and disposable-object cleanup |
+| Validation | Result | Evidence |
+|---|---|---|
+| Amazon authorization, product lookup, sampled list shapes and bid preflight | Passed | https://github.com/natureswaysoil/Campaign/actions/runs/38979715218 |
+| GCS cross-process persistence, lock contention, release/reacquisition and disposable-object cleanup under the runtime identity | Passed after the owner granted scoped impersonation access | Same read-only validation run |
+| Campaign creation, ad group, product ad and four automatic targets | Passed against Amazon | https://github.com/natureswaysoil/Campaign/actions/runs/38980751999 |
+| Campaign activation | Amazon ENABLED state independently read back | Same lifecycle run |
+| Cleanup | PAUSED state verified in the main test and a separate cleanup step | Same lifecycle run |
 
-Earlier validation attempts could not impersonate the runtime identity. The owner applied the scoped service-account permission. The first retry still saw an impersonation denial; the later successful run confirmed the access blocker was cleared. No additional IAM changes were made by the validation job.
+The lifecycle test used one explicit verified product and a durable test intent. Its campaign was future-dated, capped at $2/day with a $0.07 maximum bid, enabled only to verify the API state transition, then paused. The test does not claim auction delivery, conversions or measured spend results. The persistent intent prevents subsequent reruns from creating additional test campaigns.
 
-The storage probe used a unique disposable `validation-live/<uuid>` namespace, never production workflow records. The validation adapters block Amazon advertising mutations. No merge, deployment, campaign creation/activation, budget/policy change, or scheduler enablement occurred.
+## Bug found and corrected by the live test
 
-Production safety CI passed 268 tests; local offline validation passed 295 tests plus 3 subtests. This live run validates Amazon read access, sampled response shapes, preflight against real observations, and real GCS behavior. It does not validate live campaign creation or activation and does not by itself establish full production readiness.
+The first lifecycle attempt created the campaign, ad group and product ad but Amazon rejected the attempted AUTO target POST with HTTP 400 / INVALID_ARGUMENT. Cleanup confirmed the campaign remained PAUSED. The implementation had confused the recommendation enum CLOSE_MATCH with a targeting-clause expression.
+
+Amazon creates four AUTO clauses when the ad group is created: QUERY_HIGH_REL_MATCHES, QUERY_BROAD_REL_MATCHES, ASIN_ACCESSORY_RELATED and ASIN_SUBSTITUTE_RELATED. The corrected provisioner reconciles all four canonical target IDs, their campaign/group ownership, enabled state and bid inheritance instead of POSTing duplicate AUTO targets. The successful retry reused the same campaign and independently verified provisioning before activation.
+
+The creation adapter now supplies a startDate, defaulting to the configured Ads-profile calendar date and honoring an explicit future date for the controlled test.
+
+## Scope and remaining rollout work
+
+The successful read-only observation included 16 verified products, 635 metric records, a $75 saved daily account limit, 333 campaign records and 426 ad groups. Three campaigns were sampled for bid eligibility; two were held and one was unverifiable. These observations do not certify every campaign's economics or bid eligibility.
+
+Live validation exercised the shared production creation/provisioning/activation adapters for an explicitly selected test product. It did not enable unattended product selection or a recurring launch scheduler. Offline recovery tests cover lost acknowledgements and missing/ambiguous readbacks; no network failure was intentionally injected into the live account.
+
+No existing campaign budgets, account policy, product costs, deployment or scheduler settings were changed by the lifecycle probe. The standard guard retained its daily budget reservation for the test, as designed. The newly created test campaign is PAUSED. PR #47 remains a review branch; production rollout remains a separate approval.
+
+Final local offline validation: 297 tests and 3 subtests passed.

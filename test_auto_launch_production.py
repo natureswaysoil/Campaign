@@ -24,6 +24,12 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(a.create_paused_campaign({"asin":"B001","budget_cap":3.0},"123")["campaign_id"],"42")
         self.assertEqual(c.writes[0][1]["campaigns"][0]["state"],"PAUSED")
         self.assertTrue(a.confirm_paused_campaign("42","B001","123"))
+    def test_future_date_is_preserved_for_controlled_activation(self):
+        c=Client()
+        ProductionLaunchAmazon(c).create_paused_campaign(
+            {'asin':'B001','budget_cap':2,'start_date':'2030-01-02'},'123')
+        assert c.writes[0][1]['campaigns'][0]['startDate']=='2030-01-02'
+        assert c.writes[0][1]['campaigns'][0]['state']=='PAUSED'
     def test_profile_mismatch_blocks(self):
         c=Client();a=ProductionLaunchAmazon(c)
         with self.assertRaises(LaunchBlocked):a.create_paused_campaign({"asin":"B001"},"456")

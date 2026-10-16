@@ -101,7 +101,9 @@ class Amazon:
                 row={**row,id_key:str(len(objects)+1)}
                 objects.append(copy.deepcopy(row))
                 if path=='/sp/adGroups':
-                    from auto_targets import AUTO_EXPRESSIONS
+                    # Recorded Amazon AUTO schema: these are not recommendation enums.
+                    AUTO_EXPRESSIONS = ('QUERY_HIGH_REL_MATCHES','QUERY_BROAD_REL_MATCHES',
+                                        'ASIN_ACCESSORY_RELATED','ASIN_SUBSTITUTE_RELATED')
                     self.targets.extend({'targetId':str(i+1),'campaignId':row['campaignId'],
                         'adGroupId':row['adGroupId'],'state':'ENABLED','expressionType':'AUTO',
                         'expression':[{'type':kind}]} for i,kind in enumerate(sorted(AUTO_EXPRESSIONS)))
@@ -269,3 +271,16 @@ def test_legacy_empty_campaign_blocks_new_automatic_shell(state):
     with pytest.raises(LaunchBlocked,match='review incomplete launch'):
         execute(client,p,policy)
     assert not client.writes
+
+
+def test_recommendation_enum_cannot_be_used_as_an_auto_target():
+    from auto_targets import verified_auto_targets
+    rows = [{'targetId':str(i),'campaignId':'c','adGroupId':'g','state':'ENABLED',
+             'expressionType':'AUTO','expression':[{'type':kind}]} for i,kind in enumerate(
+                ('QUERY_HIGH_REL_MATCHES','QUERY_BROAD_REL_MATCHES','ASIN_ACCESSORY_RELATED','ASIN_SUBSTITUTE_RELATED'))]
+    client=MagicMock()
+    client.list_targets.return_value=rows
+    assert len(verified_auto_targets(client,'c','g'))==4
+    rows[0]['expression']=[{'type':'CLOSE_MATCH'}]
+    with pytest.raises(LaunchBlocked,match='Automatic targeting identity mismatch'):
+        verified_auto_targets(client,'c','g')
