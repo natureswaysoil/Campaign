@@ -398,3 +398,19 @@ def api_growth_state(
 # Shared profit controls use the existing /api/ authentication middleware.
 from profit_api import register as register_profit_routes
 register_profit_routes(app)
+
+
+@app.post("/api/automation/auto-launch-tick")
+def api_auto_launch_tick(
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+    x_daily_optimizer_token: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Authenticated scheduler hook; fail closed until factory wiring is approved."""
+    verify_internal_token(authorization, x_daily_optimizer_token)
+    from auto_launch_tick import launch_tick
+    try:
+        result = launch_tick()
+    except Exception:
+        return JSONResponse({"status": "not_configured", "launched": 0}, status_code=503)
+    return JSONResponse(result)
