@@ -42,12 +42,15 @@ class ProductionLaunchAmazon:
         # Only create the campaign shell. A distinct, guarded provisioning step
         # must add ads/targets before any activation is attempted.
         asin = candidate["asin"]
+        budget = candidate.get("budget_cap")
+        if not isinstance(budget, (int, float)) or isinstance(budget, bool) or not 1 <= budget <= 25:
+            raise LaunchBlocked("Verified per-product launch budget required")
         response = self.client.post("/sp/campaigns", {"campaigns":[{
             "name": "NWS AUTO PENDING | " + asin,
             "targetingType": "AUTO",
             "state": "PAUSED",
             "dynamicBidding": {"strategy": "LEGACY_FOR_SALES"},
-            "budget": {"budgetType":"DAILY", "budget": 3.0},
+            "budget": {"budgetType":"DAILY", "budget": round(budget, 2)},
         }]})
         outcome = batch_outcome(response, "campaigns", 1)
         if not outcome["success"]:
