@@ -13,7 +13,7 @@ def continue_launch(*, store, adapter, guard, asin, profile, sku, bid, policy):
         cid = record.get("campaign_id")
         if not cid:
             raise LaunchBlocked("Campaign creation must be reconciled")
-        if record.get("status") in ("manual_reconciliation_required", "uncertain_review_required"):
+        if record.get("status") in ("manual_reconciliation_required", "uncertain_review_required", "activation_uncertain"):
             raise LaunchBlocked("Uncertain state requires reconciliation")
         if record.get("status") not in ("paused_verified", "provisioned_verified"):
             raise LaunchBlocked("Unrecognized stage; fail closed")
