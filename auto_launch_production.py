@@ -114,10 +114,8 @@ class ProductionLaunchAmazon:
                    and a.get("state") == "ENABLED" for a in ads):
             raise LaunchBlocked("Enabled product ad not verified")
         if campaigns[0].get("targetingType") == "AUTO":
-            targets = self.client.list_targets(str(cid))
-            if not any(str(t.get("adGroupId")) in active_groups and t.get("state") == "ENABLED"
-                       for t in targets):
-                raise LaunchBlocked("Automatic target not verified")
+            from auto_targets import verified_auto_targets
+            verified_auto_targets(self.client, cid, next(iter(active_groups)))
         else:
             keywords = self.client.list_keywords(str(cid))
             if not any(str(k.get("adGroupId")) in active_groups and k.get("state") == "ENABLED"

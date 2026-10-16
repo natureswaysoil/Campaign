@@ -7,7 +7,10 @@ class Client:
     def list_campaigns(self):return [{"campaignId":"42","name":"NWS AUTO PENDING | B001","state":self.state,"targetingType":"AUTO"}]
     def list_product_ads(self, cid):return [{"asin":"B001","adGroupId":"7","state":"ENABLED"}]
     def list_all(self, endpoint, key, filters=None):return [{"campaignId":"42","adGroupId":"7","state":"ENABLED"}]
-    def list_targets(self,cid):return [{"adGroupId":"7","state":"ENABLED"}]
+    def list_targets(self,cid):
+        from auto_targets import AUTO_EXPRESSIONS
+        return [{'campaignId':'42','adGroupId':'7','state':'ENABLED','expressionType':'AUTO',
+                 'expression':[{'type':kind}],'targetId':str(i)} for i,kind in enumerate(sorted(AUTO_EXPRESSIONS))]
     def post(self, endpoint, body):
         self.writes.append((endpoint,body))
         return {"campaigns":{"success":[{"campaign":{"campaignId":"42"}}]}}

@@ -80,7 +80,11 @@ class Amazon:
     def list_campaigns(self): return copy.deepcopy(self.campaigns)
     def list_product_ads(self,cid):return copy.deepcopy([a for a in self.ads if a['campaignId']==str(cid)])
     def list_keywords(self,cid):return []
-    def list_targets(self,cid):return copy.deepcopy([t for t in self.targets if t['campaignId']==str(cid)])
+    def list_targets(self,cid):
+        if self.fail==('LIST','/sp/targets') and self.ads:
+            self.fail=None
+            raise TimeoutError('Readback temporarily unavailable')
+        return copy.deepcopy([t for t in self.targets if t['campaignId']==str(cid)])
     def list_all(self,path,key,filters=None):
         data={'adGroups':self.groups,'productAds':self.ads,'targetingClauses':self.targets,'keywords':[]}[key]
         ids=(filters or {}).get('campaignIdFilter',{}).get('include')
@@ -96,6 +100,11 @@ class Amazon:
             if method=='POST':
                 row={**row,id_key:str(len(objects)+1)}
                 objects.append(copy.deepcopy(row))
+                if path=='/sp/adGroups':
+                    from auto_targets import AUTO_EXPRESSIONS
+                    self.targets.extend({'targetId':str(i+1),'campaignId':row['campaignId'],
+                        'adGroupId':row['adGroupId'],'state':'ENABLED','expressionType':'AUTO',
+                        'expression':[{'type':kind}]} for i,kind in enumerate(sorted(AUTO_EXPRESSIONS)))
             else:
                 found=next(x for x in objects if x[id_key]==row[id_key]);found.update(row)
             rows.append({id_key:row[id_key]})
@@ -114,7 +123,7 @@ def execute(client,p,policy):
         verified={p['asin']:{**p,'available':100}},policy=policy.model_dump(),account_profile='123')
 
 @pytest.mark.parametrize('failure',[None,('POST','/sp/campaigns'),('POST','/sp/adGroups'),
-    ('POST','/sp/productAds'),('POST','/sp/targets'),('PUT','/sp/campaigns')])
+    ('POST','/sp/productAds'),('LIST','/sp/targets'),('PUT','/sp/campaigns')])
 def test_restart_reconciles_every_committed_stage_without_duplicates(state,failure):
     _,p,policy=state
     client=Amazon(failure)
@@ -122,13 +131,14 @@ def test_restart_reconciles_every_committed_stage_without_duplicates(state,failu
         with pytest.raises(TimeoutError):execute(client,p,policy)
     result=execute(client,p,policy)
     assert result['status']=='enabled_verified'
-    assert len(client.campaigns)==len(client.groups)==len(client.ads)==len(client.targets)==1
+    assert len(client.campaigns)==len(client.groups)==len(client.ads)==1
+    assert len(client.targets)==4
     assert client.campaigns[0]['state']=='ENABLED'
     assert client.groups[0]['defaultBid']<=.05
     assert client.writes.count(('POST','/sp/campaigns'))==1
     assert client.writes.count(('POST','/sp/adGroups'))==1
     assert client.writes.count(('POST','/sp/productAds'))==1
-    assert client.writes.count(('POST','/sp/targets'))==1
+    assert client.writes.count(('POST','/sp/targets'))==0
     assert client.writes.count(('PUT','/sp/campaigns'))==1
     assert Memory('auto-launch').read()['unresolved'] is None
 

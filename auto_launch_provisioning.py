@@ -91,16 +91,19 @@ class PausedProvisioner:
                     return rows
                 stage('product_ad', '/sp/productAds', 'productAds', 'adId',
                     {'campaignId': str(cid), 'adGroupId': gid, 'state': 'ENABLED', 'sku': sku, 'asin': asin}, ads)
-                def targets():
-                    rows = [t for t in client.list_targets(str(cid)) if t.get('state') != 'ARCHIVED'
-                            and t.get('expression') == [{'type': 'CLOSE_MATCH'}]]
-                    if any(str(t.get('adGroupId')) != gid or t.get('state') != 'ENABLED'
-                           or t.get('expressionType') != 'AUTO' or float(t.get('bid', 0)) > bid for t in rows):
-                        raise LaunchBlocked('Automatic targeting identity mismatch')
-                    return rows
-                stage('auto_target', '/sp/targets', 'targetingClauses', 'targetId',
-                    {'campaignId': str(cid), 'adGroupId': gid, 'state': 'ENABLED',
-                     'expressionType': 'AUTO', 'expression': [{'type': 'CLOSE_MATCH'}], 'bid': bid}, targets)
+                from auto_targets import verified_auto_targets
+                targets = verified_auto_targets(client, cid, gid)
+                identities = {kind: str(t['targetId']) for kind, t in targets.items()}
+                previous = intent.setdefault('entities', {}).get('auto_targets')
+                if previous and previous != identities:
+                    raise LaunchBlocked('Automatic target IDs changed during recovery')
+                if any(t.get('bid') is not None and not 0 < float(t['bid']) <= bid for t in targets.values()):
+                    raise LaunchBlocked('Automatic target bid exceeds verified ceiling')
+                # The existing enabled clauses inherit the verified default bid
+                # when Amazon omits an explicit bid. No target creation is needed.
+                intent['entities']['auto_targets'] = identities
+                intent.update(status='auto_target_ack', pending_stage=None)
+                self.store.save(state)
                 if self.adapter.verify_provisioning(cid=cid, asin=asin, profile=profile) is not True:
                     raise LaunchBlocked('Provisioning not independently verified')
                 intent['status'] = 'provisioned_verified'
