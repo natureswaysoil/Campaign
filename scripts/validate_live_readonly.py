@@ -25,7 +25,14 @@ def gcloud(*args):
     if result.returncode:
         denied = 'PERMISSION_DENIED' in result.stderr or 'Permission' in result.stderr
         operation = 'runtime_impersonation' if args[:2] == ('auth','print-access-token') else 'cloud_read'
-        raise ValidationError(operation + ('_denied' if denied else '_failed'))
+        code = operation + ('_denied' if denied else '_failed')
+        if 'SERVICE_DISABLED' in result.stderr or 'has not been used in project' in result.stderr:
+            code = 'iam_credentials_api_disabled'
+        elif 'serviceusage.services.use' in result.stderr:
+            code = 'service_usage_permission_denied'
+        elif 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' in result.stderr:
+            code = 'credential_scope_insufficient'
+        raise ValidationError(code)
     return result.stdout.strip()
 
 
