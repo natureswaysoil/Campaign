@@ -58,7 +58,6 @@ class PausedProvisioner:
                 self.store.save(state)
                 if self.adapter.verify_provisioning(cid=cid, asin=asin, profile=profile) is not True:
                     raise LaunchBlocked("Amazon entity readback did not confirm provisioning")
-                self.adapter.verify_provisioning(cid=cid, asin=asin, profile=profile)
                 intent["status"] = "provisioned_verified"
                 self.store.save(state)
                 return {"status": "provisioned_verified", "campaign_id": str(cid)}
