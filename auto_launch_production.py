@@ -77,11 +77,40 @@ class ProductionLaunchAmazon:
                 ids.append(str(cid))
         return ids
 
-    def activate_verified(self, *, cid, asin, profile, provisioned):
+    def verify_provisioning(self, *, cid, asin, profile):
+        """Independently read back every required entity; fail closed."""
+        self._profile(profile)
+        campaigns = [x for x in self.client.list_campaigns()
+                     if str(x.get("campaignId")) == str(cid)]
+        if len(campaigns) != 1 or campaigns[0].get("state") != "PAUSED":
+            raise LaunchBlocked("Campaign must be uniquely paused")
+        groups = self.client.list_all("/sp/adGroups/list", "adGroups",
+            {"campaignIdFilter": {"include": [str(cid)]}})
+        if not groups or not all(str(g.get("campaignId")) == str(cid) for g in groups):
+            raise LaunchBlocked("Ad groups absent or inconsistent")
+        active_groups = {str(g["adGroupId"]) for g in groups if g.get("state") == "ENABLED" and g.get("adGroupId")}
+        if not active_groups:
+            raise LaunchBlocked("No enabled ad group")
+        ads = self.client.list_product_ads(str(cid))
+        if not any(str(a.get("asin")) == str(asin) and str(a.get("adGroupId")) in active_groups
+                   and a.get("state") == "ENABLED" for a in ads):
+            raise LaunchBlocked("Enabled product ad not verified")
+        if campaigns[0].get("targetingType") == "AUTO":
+            targets = self.client.list_targets(str(cid))
+            if not any(str(t.get("adGroupId")) in active_groups and t.get("state") == "ENABLED"
+                       for t in targets):
+                raise LaunchBlocked("Automatic target not verified")
+        else:
+            keywords = self.client.list_keywords(str(cid))
+            if not any(str(k.get("adGroupId")) in active_groups and k.get("state") == "ENABLED"
+                       for k in keywords):
+                raise LaunchBlocked("Manual targeting not verified")
+        return True
+
+    def activate_verified(self, *, cid, asin, profile, provisioned=None):
         """Only enable after all objects and economics are independently verified."""
         self._profile(profile)
-        if provisioned is not True:
-            raise LaunchBlocked("Ad group, product ad and targeting not verified")
+        self.verify_provisioning(cid=cid, asin=asin, profile=profile)
         campaigns = [c for c in self.client.list_campaigns() if str(c.get("campaignId")) == str(cid)]
         if len(campaigns) != 1 or campaigns[0].get("state") != "PAUSED":
             raise LaunchBlocked("Campaign not uniquely paused")
