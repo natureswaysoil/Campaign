@@ -112,6 +112,25 @@ def build_bid_plan(keyword: str, rec: Optional[Dict[str, Any]], fallback_bid: fl
     }
 
 
+def allocate_launch_budgets(total: float) -> List[float]:
+    """Allocate three daily budgets without exceeding the requested total.
+
+    Require at least $3 per campaign; never silently increase owner spend.
+    """
+    import math
+    if isinstance(total, bool) or not math.isfinite(float(total)):
+        raise ValueError("Daily budget must be finite")
+    cents = round(float(total) * 100)
+    if cents < 900 or cents > 5000:
+        raise ValueError("Three-campaign launch budget must be between $9 and $50 per day")
+    remaining = cents - 900
+    # Allocate extra dollars 30/50/20, with remainder in final campaign.
+    auto_extra = round(remaining * 0.30)
+    core_extra = round(remaining * 0.50)
+    return [(300 + auto_extra) / 100, (300 + core_extra) / 100,
+            (300 + remaining - auto_extra - core_extra) / 100]
+
+
 def build_optimized_launch_preview(
     product: Dict[str, Any],
     manual_keywords: Optional[List[str]] = None,
@@ -123,7 +142,8 @@ def build_optimized_launch_preview(
     title = str(product.get("title") or product.get("name") or product.get("productName") or "Untitled Product")
     asin = str(product.get("asin") or product.get("ASIN") or "")
     sku = str(product.get("sku") or product.get("sellerSku") or product.get("SKU") or "")
-    safe_budget = round(max(3.0, min(50.0, float(budget or 10.0))), 2)
+    safe_budget = round(float(budget), 2)
+    launch_budgets = allocate_launch_budgets(safe_budget)
     safe_fallback = clamp_bid(fallback_bid)
 
     keywords = generate_launch_keywords(product, manual_keywords)
@@ -151,14 +171,14 @@ def build_optimized_launch_preview(
             {
                 "name": f"NWS - {title[:55]} - Auto - Discovery",
                 "type": "auto_discovery",
-                "daily_budget": round(max(3.0, safe_budget * 0.30), 2),
+                "daily_budget": launch_budgets[0],
                 "starting_bid": clamp_bid(safe_fallback * 0.75),
                 "purpose": "Find converting customer search terms safely.",
             },
             {
                 "name": f"NWS - {title[:55]} - Manual - Core",
                 "type": "manual_exact_phrase",
-                "daily_budget": round(max(3.0, safe_budget * 0.50), 2),
+                "daily_budget": launch_budgets[1],
                 "keywords": [
                     {"keyword": b["keyword"], "exact_bid": b["exact_bid"], "phrase_bid": b["phrase_bid"], "source": b["source"]}
                     for b in manual_core_keywords
@@ -168,7 +188,7 @@ def build_optimized_launch_preview(
             {
                 "name": f"NWS - {title[:55]} - Broad - Research",
                 "type": "manual_broad_research",
-                "daily_budget": round(max(3.0, safe_budget * 0.20), 2),
+                "daily_budget": launch_budgets[2],
                 "keywords": [
                     {"keyword": b["keyword"], "broad_bid": b["broad_bid"], "source": b["source"]}
                     for b in broad_research_keywords
