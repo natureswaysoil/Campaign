@@ -1,7 +1,7 @@
 """Production fail-closed preflight for guarded automatic Sponsored Products launches."""
 import time
 from auto_launch_coordinator import LaunchBlocked
-from profit_intelligence import Policy, Product, economics, inventory_factor, pacing
+from profit_intelligence import Policy, Product, economics, inventory_factor, pacing, cpc_ceiling
 from automation_store import GCSState
 
 class ProductionLaunchGuard:
@@ -36,4 +36,12 @@ class ProductionLaunchGuard:
             raise LaunchBlocked("Account spend not current or stop threshold reached")
         if not policy.exploration_cvr and candidate["asin"] not in policy.product_exploration:
             raise LaunchBlocked("No approved exploration allowance")
-        return {"budget_cap": min(3.0, policy.exploration_daily_budget)}
+        opt = policy.product_exploration.get(candidate["asin"])
+        budget = opt.daily_budget if opt else policy.exploration_daily_budget
+        budget = min(budget, policy.daily_limit - pulse["spend"])
+        if budget < 1.0:
+            raise LaunchBlocked("Insufficient remaining daily budget")
+        cap = cpc_ceiling(product.model_dump(mode="json"), [], policy, time.time())["max_cpc"]
+        if cap < policy.min_cpc:
+            raise LaunchBlocked("Unprofitable CPC ceiling")
+        return {"budget_cap": round(budget, 2), "max_bid": cap}
