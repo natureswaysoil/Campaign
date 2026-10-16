@@ -15,10 +15,17 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+class ValidationError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
 def gcloud(*args):
     result = subprocess.run(['gcloud', *args], capture_output=True, text=True, timeout=90)
     if result.returncode:
-        raise RuntimeError('Google Cloud read failed')
+        denied = 'PERMISSION_DENIED' in result.stderr or 'Permission' in result.stderr
+        operation = 'runtime_impersonation' if args[:2] == ('auth','print-access-token') else 'cloud_read'
+        raise ValidationError(operation + ('_denied' if denied else '_failed'))
     return result.stdout.strip()
 
 
@@ -103,7 +110,7 @@ def main():
             results.append({'check':name,'status':'passed',**details})
         except Exception as exc:
             # No raw exception text, response bodies, headers, environment or IDs.
-            results.append({'check':name,'status':'failed','error_type':type(exc).__name__})
+            results.append({'check':name,'status':'failed','error_type':type(exc).__name__, 'reason_code':getattr(exc,'code','operation_failed')})
     config = load_runtime()
     check('runtime_revision', lambda: {'revision':config['status'].get('latestReadyRevisionName'),
         'auto_launch_enabled':any(e['name']=='AUTO_LAUNCH_ENABLED' and e.get('value','').lower()=='true'
@@ -151,7 +158,11 @@ def main():
     check('saved_policy_and_data', saved_inputs)
     def runtime_storage():
         identity = config['spec']['template']['spec'].get('serviceAccountName')
-        if not identity: raise RuntimeError('Runtime identity not specified')
+        if not identity:
+            identity = gcloud('run','revisions','describe',config['status']['latestReadyRevisionName'],
+                '--project','amazon-ppc-bid-optimizer','--region','us-central1',
+                '--format=value(spec.serviceAccountName)')
+        if not identity: raise ValidationError('runtime_identity_not_explicit')
         # Token issuance only: do not grant roles or modify service accounts.
         os.environ['VALIDATION_STORAGE_TOKEN'] = gcloud('auth','print-access-token',
             '--impersonate-service-account='+identity)
