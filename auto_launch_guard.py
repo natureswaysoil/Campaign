@@ -1,0 +1,36 @@
+"""Production fail-closed preflight for guarded automatic Sponsored Products launches."""
+import time
+from auto_launch_coordinator import LaunchBlocked
+from profit_intelligence import Policy, Product, economics, pacing
+from automation_store import GCSState
+
+class ProductionLaunchGuard:
+    def __init__(self, client):
+        self.client = client
+
+    def authorize_paused_launch(self, candidate, supplied_policy, account_profile):
+        if str(self.client.profile_id) != str(account_profile):
+            raise LaunchBlocked("Profile mismatch")
+        stored = GCSState("profit-policy").read().get("policy")
+        if not stored:
+            raise LaunchBlocked("Profit policy missing")
+        policy = Policy.model_validate(stored)
+        if not supplied_policy or float(supplied_policy.get("daily_limit", 0)) != policy.daily_limit:
+            raise LaunchBlocked("Requested and stored profit limits differ")
+        state = GCSState("profit-data").read()
+        raw = state.get("products", {}).get(candidate["asin"])
+        if not raw:
+            raise LaunchBlocked("Verified ASIN economics missing")
+        product = Product.model_validate(raw)
+        if product.sku != candidate["sku"]:
+            raise LaunchBlocked("ASIN SKU mismatch")
+        # Economics validates current cost, fees, stock and demand freshness.
+        details = economics(product.model_dump(mode="json"), policy, time.time())
+        if not details or details["target_acos"] <= 0:
+            raise LaunchBlocked("No allowable advertising margin")
+        pulse = pacing(state, policy, time.time())
+        if not pulse["fresh"] or pulse["stop"]:
+            raise LaunchBlocked("Account spend not current or stop threshold reached")
+        if not policy.exploration_cvr and candidate["asin"] not in policy.product_exploration:
+            raise LaunchBlocked("No approved exploration allowance")
+        return {"budget_cap": min(3.0, policy.exploration_daily_budget)}
