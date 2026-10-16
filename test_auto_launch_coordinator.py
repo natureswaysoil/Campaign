@@ -19,7 +19,7 @@ class Amazon:
     def confirm_paused_campaign(self,c,a,p):return self.confirm
 
 class Guard:
-    def authorize_paused_launch(self,*args):pass
+    def authorize_paused_launch(self,*args):return {"budget_cap":3.0,"max_bid":0.25}
 
 class CoordinatorTests(unittest.TestCase):
     def setUp(self):self.store=Store();self.amazon=Amazon();self.guard=Guard()
