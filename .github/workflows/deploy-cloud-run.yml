@@ -118,16 +118,6 @@ jobs:
           docker push \
             us-central1-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/amazon-ads-autopilot/app:${{ github.sha }}
 
-      - name: Configure dedicated marketing read credential
-        run: |
-          if ! gcloud secrets describe CAMPAIGN_MARKETING_READ_TOKEN --project="$GCP_PROJECT_ID" >/dev/null 2>&1; then
-            gcloud secrets create CAMPAIGN_MARKETING_READ_TOKEN --project="$GCP_PROJECT_ID" --replication-policy=automatic --quiet
-          fi
-          if [ -z "$(gcloud secrets versions list CAMPAIGN_MARKETING_READ_TOKEN --project="$GCP_PROJECT_ID" --filter='state=ENABLED' --format='value(name)' --limit=1)" ]; then
-            python3 -c 'import secrets; print(secrets.token_urlsafe(48), end="")' | gcloud secrets versions add CAMPAIGN_MARKETING_READ_TOKEN --project="$GCP_PROJECT_ID" --data-file=- --quiet >/dev/null
-          fi
-          gcloud secrets add-iam-policy-binding CAMPAIGN_MARKETING_READ_TOKEN --project="$GCP_PROJECT_ID" --member='serviceAccount:marketing-agent@marketingagent-508322.iam.gserviceaccount.com' --role=roles/secretmanager.secretAccessor --condition=None --quiet >/dev/null
-
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy campaign-optimizer \
@@ -138,7 +128,7 @@ jobs:
             --timeout 1800 \
             --memory 1Gi \
             --update-env-vars GCP_PROJECT_ID=${{ env.GCP_PROJECT_ID }},PRIORITY_FILTER=1,AMAZON_ADS_TIMEZONE=America/Los_Angeles,PRODUCTS_CSV_URL=https://docs.google.com/spreadsheets/d/1dtUYrSy18_D2updwCpVa5wXfgf0hzAXaiQTQqMQnrSc/export?format=csv \
-            --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest,DAILY_OPTIMIZER_TOKEN=DAILY_OPTIMIZER_TOKEN:latest,CAMPAIGN_MARKETING_READ_TOKEN=CAMPAIGN_MARKETING_READ_TOKEN:latest
+            --update-secrets AMAZON_ADS_CLIENT_ID=AMAZON_ADS_CLIENT_ID:latest,AMAZON_ADS_CLIENT_SECRET=AMAZON_ADS_CLIENT_SECRET:latest,AMAZON_ADS_REFRESH_TOKEN=AMAZON_ADS_REFRESH_TOKEN:latest,AMAZON_ADS_PROFILE_ID=AMAZON_ADS_PROFILE_ID:latest,AMAZON_ADS_REGION=AMAZON_ADS_REGION:latest,DAILY_OPTIMIZER_TOKEN=DAILY_OPTIMIZER_TOKEN:latest
 
 
       - name: Configure and verify automatic PPC schedules
@@ -166,4 +156,3 @@ jobs:
       - name: Apply approved orchid-only exploration settings
         if: github.event.head_commit.message == 'Enable approved orchid-only exploration with bounded campaign budgets'
         run: python3 scripts/enable_orchid_exploration.py
-
