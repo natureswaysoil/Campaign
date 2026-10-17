@@ -90,7 +90,9 @@ def verify_internal_token(authorization: Optional[str] = None, x_daily_optimizer
 async def protect_api(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         try:
-            verify_internal_token(request.headers.get("authorization"), request.headers.get("x-daily-optimizer-token"))
+            from marketing_read_auth import marketing_read_authorized
+            if not marketing_read_authorized(request.method, request.url.path, request.headers.get("x-marketing-read-token")):
+                verify_internal_token(request.headers.get("authorization"), request.headers.get("x-daily-optimizer-token"))
             if request.method == "POST":
                 body = await request.body()
                 if body:
@@ -1003,3 +1005,4 @@ def api_optimizer_history(authorization: Optional[str] = Header(default=None), x
 
 if __name__ == "__main__":
     print(json.dumps(run_optimizer(dry_run=True), indent=2, default=str))
+
