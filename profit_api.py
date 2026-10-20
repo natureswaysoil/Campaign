@@ -117,8 +117,23 @@ def register(app):
             if name.startswith(prefix):
                 asin = str(product.get('asin') or '')
                 candidates.append({'asin': asin, 'verified': asin in products})
+        # Surface real advertised identities, not only campaign-name suggestions.
+        # Never emit private economics, Amazon response bodies or credentials.
+        advertised = []
+        for ad in ads:
+            if ad.get('state') == 'ARCHIVED':
+                continue
+            asin = str(ad.get('asin') or '')
+            sku = str(ad.get('sku') or '')
+            verified = products.get(asin)
+            exact = bool(verified and verified.get('asin') == asin
+                         and verified.get('sku') == sku)
+            advertised.append({'asin': asin, 'sku': sku,
+                               'state': ad.get('state'),
+                               'verified_exact_mapping': exact})
         return {'campaign_id': campaign_id, 'state': campaign.get('state'),
-                'product_ads': len(ads), 'catalog_candidates': candidates}
+                'product_ads': len(ads), 'advertised_products': advertised,
+                'catalog_candidates': candidates}
 
     @app.get('/api/profit/eligibility/{campaign_id}')
     def eligibility(campaign_id: str, keyword_id: str = '', target_id: str = ''):
