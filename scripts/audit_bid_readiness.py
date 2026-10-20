@@ -20,12 +20,16 @@ def audit(client, products, policy=None, metrics=None, now=None):
         items = []
         for ad in rows:
             asin, sku = str(ad.get("asin") or ""), str(ad.get("sku") or "")
+            # A SKU match is a clue, not verification of a different ASIN.
             product = products.get(asin) if asin else None
-            if not product and sku:
-                matches = [p for p in products.values() if p.get("sku") == sku]
-                product = matches[0] if len(matches) == 1 else None
+            exact = bool(product and product.get("asin") == asin
+                         and product.get("sku") == sku)
+            matches = [p for p in products.values() if sku and p.get("sku") == sku]
             entry = {"asin": asin or None, "sku": sku or None,
-                     "verified_mapping": bool(product)}
+                     "verified_mapping": exact,
+                     "sku_conflict": bool(matches and not exact)}
+            if not exact:
+                product = None
             if not product:
                 entry["readiness"] = "missing_verified_asin_economics"
             elif policy is None:
