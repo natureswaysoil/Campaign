@@ -1,28 +1,66 @@
-"""Read-only list of campaigns and advertised ASINs needing verified economics."""
+"""Read-only diagnostic: campaign ASIN mapping, economic readiness, exploration.
+
+Does not mutate Amazon bids, profit-data, or policy. No unit cost data is printed.
+"""
 import json
-from optimize_campaigns import AmazonAdsClient
+import time
 from automation_store import GCSState
+from optimize_campaigns import AmazonAdsClient
+from profit_intelligence import Policy, cpc_ceiling, mature_rows
 
 
-def audit(client, products):
-    result = []
+def audit(client, products, policy=None, metrics=None, now=None):
+    now = time.time() if now is None else now
+    metrics = metrics or []
+    results = []
     for campaign in client.list_campaigns():
-        cid = str(campaign['campaignId'])
-        for ad in client.list_product_ads(cid):
-            if ad.get('state') == 'ARCHIVED':
-                continue
-            asin = str(ad.get('asin') or '')
-            sku = str(ad.get('sku') or '')
-            product = products.get(asin)
+        cid = str(campaign["campaignId"])
+        rows = [row for row in client.list_product_ads(cid)
+                if row.get("state") != "ARCHIVED"]
+        items = []
+        for ad in rows:
+            asin, sku = str(ad.get("asin") or ""), str(ad.get("sku") or "")
+            product = products.get(asin) if asin else None
             if not product and sku:
-                matches = [p for p in products.values() if p.get('sku') == sku]
+                matches = [p for p in products.values() if p.get("sku") == sku]
                 product = matches[0] if len(matches) == 1 else None
-            result.append({'campaign_id': cid, 'asin': asin, 'sku': sku,
-                           'verified_mapping': bool(product)})
-    return result
+            entry = {"asin": asin or None, "sku": sku or None,
+                     "verified_mapping": bool(product)}
+            if not product:
+                entry["readiness"] = "missing_verified_asin_economics"
+            elif policy is None:
+                entry["readiness"] = "missing_profit_policy"
+            else:
+                entry["exploration_opt_in"] = (
+                    product["asin"] in policy.product_exploration
+                    or policy.exploration_cvr > 0
+                )
+                try:
+                    eligible = mature_rows({"metrics": metrics}, policy, now,
+                                           grain="campaign", campaign_id=cid)
+                    ceiling = cpc_ceiling(product, eligible, policy, now)
+                    entry["ceiling_source"] = ceiling["source"]
+                    entry["max_cpc"] = ceiling["max_cpc"]
+                    entry["readiness"] = ("eligible" if ceiling["max_cpc"] >= policy.min_cpc
+                                          else "no_safe_bid_allowance")
+                except ValueError as exc:
+                    # Restrict output to known non-secret diagnostic categories.
+                    msg = str(exc)
+                    permitted = {"insufficient_mature_conversion_data",
+                                 "stale_economics", "stale_price_or_fees",
+                                 "missing_or_stale_inventory",
+                                 "missing_or_stale_sales_velocity"}
+                    entry["readiness"] = msg if msg in permitted else "economic_validation_failed"
+            items.append(entry)
+        if items:
+            results.append({"campaign_id": cid, "products": items})
+    return {"read_only": True, "campaigns": results}
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     client = AmazonAdsClient()
-    products = GCSState('profit-data').read().get('products', {})
-    print(json.dumps({'read_only': True, 'mappings': audit(client, products)}, indent=2))
+    state = GCSState("profit-data").read()
+    raw = GCSState("profit-policy").read().get("policy")
+    policy = Policy.model_validate(raw) if raw else None
+    print(json.dumps(audit(client, state.get("products", {}), policy,
+                           state.get("metrics", [])), indent=2))
