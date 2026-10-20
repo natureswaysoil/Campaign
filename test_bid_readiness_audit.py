@@ -17,8 +17,8 @@ def test_audit_missing_mapping_and_disabled_exploration():
     result = audit(FakeAmazon(), {
         "B012345678": {"asin": "B012345678", "sku": "KNOWN",
                         "price": 40, "cogs": 10, "fees": 5, "shipping": 10,
-                        "updated_at": 1, "market_at": 1, "inventory": 100,
-                        "inventory_at": 1, "daily_units": 1, "velocity_at": 1}
+                        "updated_at": 100000, "market_at": 100000, "inventory": 100,
+                        "inventory_at": 100000, "daily_units": 1, "velocity_at": 100000}
     }, Policy(daily_limit=75), now=100000)
     known = result["campaigns"][0]["products"][0]
     unknown = result["campaigns"][1]["products"][0]
