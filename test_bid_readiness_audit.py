@@ -34,3 +34,13 @@ def test_audit_is_read_only_and_never_guesses_other_skus():
                    Policy(daily_limit=75), now=100000)
     assert all(not x["verified_mapping"]
                for campaign in result["campaigns"] for x in campaign["products"])
+
+
+def test_existing_asin_with_wrong_sku_is_not_verified():
+    products = {
+        "B012345678": {"asin": "B012345678", "sku": "DIFFERENT"}
+    }
+    result = audit(FakeAmazon(), products, Policy(daily_limit=75), now=100000)
+    first = result["campaigns"][0]["products"][0]
+    assert first["verified_mapping"] is False
+    assert first["readiness"] == "missing_verified_asin_economics"
