@@ -96,6 +96,21 @@ def summarize(states, now=None):
             if kind == 'bid':
                 entry['bid_outcomes'] = result.get('bid_outcomes', {})
                 entry['status'] = result.get('status')
+                diagnostic = result.get('diagnostic')
+                if isinstance(diagnostic, dict):
+                    entry['diagnostic'] = {}
+                    if diagnostic.get('phase') in {'request', 'poll', 'download', 'parse', 'apply'}:
+                        entry['diagnostic']['phase'] = diagnostic['phase']
+                    if diagnostic.get('category') in {
+                        'terminal_report', 'pending_timeout', 'missing_download_url', 'report_unavailable',
+                        'http_error', 'invalid_report', 'unexpected_error', 'unconfirmed_bid_update',
+                        'rejected_bid_update', 'stale_metrics', 'retune_failed',
+                    }:
+                        entry['diagnostic']['category'] = diagnostic['category']
+                    if type(diagnostic.get('http_status')) is int and 400 <= diagnostic['http_status'] <= 599:
+                        entry['diagnostic']['http_status'] = diagnostic['http_status']
+                    if isinstance(diagnostic.get('retryable'), bool):
+                        entry['diagnostic']['retryable'] = diagnostic['retryable']
                 entry.update(ad_group_updates=result.get('updates_applied'),
                              keyword_updates=result.get('keyword_dayparting', {}).get('updates_applied'),
                              errors=(result.get('update_errors', 0) + result.get('keyword_dayparting', {}).get('update_errors', 0)))
@@ -119,7 +134,8 @@ def summarize(states, now=None):
             if age is not None and age > 2:
                 alerts.append(f'{kind} report pending over two hours')
             if result.get('success') is False or result.get('error') is True:
-                alerts.append(f'{kind} latest apply reported failure')
+                alerts.append('bid latest report failed' if kind == 'bid' and result.get('status') == 'report_failure'
+                              else f'{kind} latest apply reported failure')
             if not result:
                 entry['verification'] = 'No recorded apply result yet; live changes unverified'
                 alerts.append(f'{kind} has no recorded apply result')

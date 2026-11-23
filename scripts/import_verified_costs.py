@@ -10,7 +10,24 @@ from pathlib import Path
 import subprocess
 import tempfile
 import urllib.request
+from urllib.error import HTTPError
 from activate_profit_controls import gcloud
+
+
+class CostImportHTTPError(RuntimeError):
+    def __init__(self, step, status):
+        self.step = step
+        self.status = status
+        if status in (401, 403):
+            self.category = 'authorization'
+        elif status == 404:
+            self.category = 'route_not_found'
+        elif status == 429:
+            self.category = 'rate_limited'
+        elif status >= 500:
+            self.category = 'service_failure'
+        else:
+            self.category = 'request_rejected'
 
 
 def main():
@@ -28,11 +45,14 @@ def main():
                  '--region', 'us-central1', '--format=value(status.url)')
     token = gcloud('secrets', 'versions', 'access', 'latest', '--secret=DAILY_OPTIMIZER_TOKEN', '--project', project)
     headers = {'X-Daily-Optimizer-Token': token, 'Content-Type': 'application/json'}
-    def post(route, payload):
+    def post(step, route, payload):
         req = urllib.request.Request(url + route, data=json.dumps(payload).encode(), headers=headers)
-        with urllib.request.urlopen(req, timeout=900) as response:
-            return json.load(response)
-    public = post('/api/profit/cost-import/key', {'apply_live': True})['public_key']
+        try:
+            with urllib.request.urlopen(req, timeout=900) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            raise CostImportHTTPError(step, exc.code) from None
+    public = post('key', '/api/profit/cost-import/key', {'apply_live': True})['public_key']
     with tempfile.TemporaryDirectory() as directory:
         key = Path(directory) / 'public.pem'
         key.write_text(public)
@@ -41,7 +61,7 @@ def main():
             input=json.dumps(json.loads(private_schedule), separators=(',', ':')).encode(), capture_output=True)
         if encrypted.returncode:
             raise RuntimeError('Private cost encryption failed')
-    result = post('/api/profit/cost-import', {'apply_live': True, 'packet': base64.b64encode(encrypted.stdout).decode(),
+    result = post('import', '/api/profit/cost-import', {'apply_live': True, 'packet': base64.b64encode(encrypted.stdout).decode(),
         'confirm_existing_updates': os.getenv('UPDATE_EXISTING_CONFIRMED_COSTS', 'false') == 'true'})
     print('COST_IMPORT ' + json.dumps(result))
     if result.get('failed'):
@@ -51,6 +71,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except CostImportHTTPError as exc:
+        print(f'COST_IMPORT_FAILED step={exc.step} http_status={exc.status} category={exc.category}')
+        raise SystemExit(1)
     except Exception as exc:
         print('COST_IMPORT_FAILED ' + type(exc).__name__)
         raise SystemExit(1)
