@@ -179,6 +179,62 @@ def test_scheduled_metrics_request_poll_apply():
         assert state.data['per_campaign']['c1']['sales'] == 100
 
 
+@pytest.mark.parametrize('failure,phase,category', [
+    ('stale', 'poll', 'pending_timeout'),
+    ('expired_url', 'download', 'report_unavailable'),
+])
+def test_bid_report_recovers_without_applying(failure, phase, category):
+    from requests import HTTPError, Response
+    from scripts.monitor_automation import summarize
+
+    state = MemoryState()
+    state.data = {'report_id': 'old', 'requested_at': 1}
+    amazon = MagicMock()
+    amazon.request_report.return_value = 'replacement'
+    if failure == 'stale':
+        amazon.get.return_value = {'status': 'PROCESSING'}
+    else:
+        amazon.get.return_value = {'status': 'COMPLETED', 'url': 'https://example.test/private'}
+        expired = Response()
+        expired.status_code = 403
+        amazon.download_binary.side_effect = HTTPError('private signed URL', response=expired)
+    retune = MagicMock()
+    with patch.object(scheduled_bids, 'GCSState', return_value=state), patch.object(
+        scheduled_bids.core, 'AmazonAdsClient', return_value=amazon
+    ):
+        assert scheduled_bids.retune_tick({'apply_live': True}, retune).status_code == 503
+        assert 'report_id' not in state.data
+        assert scheduled_bids.retune_tick({'apply_live': True}, retune).status_code == 202
+    retune.assert_not_called()
+    report = summarize({'profile': {'bid': state.data}})['profiles'][0]['bid']
+    assert report['report_id'] == 'replacement'
+    assert report['diagnostic']['phase'] == phase
+    assert report['diagnostic']['category'] == category
+    assert report['diagnostic']['retryable'] is True
+    if failure == 'expired_url':
+        assert report['diagnostic']['http_status'] == 403
+    assert 'private' not in json.dumps(report)
+
+
+def test_bid_apply_failure_records_sanitized_outcome():
+    state = MemoryState()
+    state.data = {'summary': {}, 'per_campaign': {'1': {}}, 'ts': scheduled_bids.time.time()}
+    retune = MagicMock(return_value=JSONResponse({
+        'error': True, 'message': 'private vendor response',
+    }, status_code=500))
+    with patch.object(scheduled_bids, 'GCSState', return_value=state), patch.object(
+        scheduled_bids.core, '_dash_summary_cache', {}
+    ):
+        response = scheduled_bids.retune_tick({'apply_live': True}, retune)
+    assert response.status_code == 500
+    result = state.data['last_result']
+    assert result['diagnostic'] == {
+        'phase': 'apply', 'category': 'retune_failed', 'retryable': False, 'http_status': 500,
+    }
+    assert b'private' not in response.body
+    assert 'message' not in result
+
+
 @pytest.mark.parametrize('name', ['harvest', 'bids'])
 def test_scheduler_preview_never_opens_storage(name):
     module = scheduled_harvest if name == 'harvest' else scheduled_bids
